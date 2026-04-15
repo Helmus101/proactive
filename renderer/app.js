@@ -800,27 +800,73 @@ class WeaveApp {
         this.chatInput.style.height = '44px';
 
         const thinkingPanel = this.appendThinkingPanel();
+        const stepsContainer = thinkingPanel.querySelector('.thinking-steps-container');
+        const activeSteps = new Map();
 
         const handleChatStep = (data) => {
-            const label = thinkingPanel.querySelector('.thinking-step-label');
-            if (!label) return;
+            const stepId = data?.step || 'unknown';
+            let stepItem = activeSteps.get(stepId);
+
+            if (!stepItem) {
+                stepItem = document.createElement('div');
+                stepItem.className = 'thinking-step-item active';
+                stepItem.innerHTML = `
+                    <div class="thinking-step-status">
+                        <span class="material-symbols-outlined thinking-step-icon spinner">progress_activity</span>
+                    </div>
+                    <div class="thinking-step-body">
+                        <div class="thinking-step-label"></div>
+                        <div class="thinking-step-details"></div>
+                    </div>
+                `;
+                if (stepsContainer) stepsContainer.appendChild(stepItem);
+                activeSteps.set(stepId, stepItem);
+            }
+
+            const label = stepItem.querySelector('.thinking-step-label');
+            const details = stepItem.querySelector('.thinking-step-details');
+
             const step = data?.step || '';
-            let text = '';
+            let labelText = '';
+            let detailsText = '';
+
             if (step === 'query_analysis') {
                 const scope = data.time_scope && data.time_scope !== 'all_time' ? ` · ${data.time_scope}` : '';
-                text = `Analyzing query · ${data.strategy_mode || 'memory'}${scope}`;
+                labelText = 'Analyzing query';
+                detailsText = `${data.strategy_mode || 'memory'}${scope}`;
             } else if (step === 'memory_retrieval') {
-                text = `Searching memory · ${data.query_count || 0} queries`;
+                labelText = 'Searching memory';
+                detailsText = `${data.query_count || 0} queries · ${data.seed_count || 0} seeds found`;
             } else if (step === 'temporal_widen') {
-                text = `Widening time window`;
+                labelText = 'Widening time window';
+                detailsText = 'Sparse results, expanding search range';
             } else if (step === 'graph_expansion') {
-                text = `Expanding graph · ${data.expanded_count || 0} nodes`;
+                labelText = 'Expanding graph';
+                detailsText = `${data.expanded_count || 0} connected nodes identified`;
             } else if (step === 'web_search') {
-                text = `Searching web`;
+                labelText = 'Searching web';
+                detailsText = data.query || 'Looking up external context';
             } else if (step === 'composing') {
-                text = `Composing answer...`;
+                labelText = 'Composing answer';
+                detailsText = 'Synthesizing retrieved context';
             }
-            if (text) label.textContent = text;
+
+            if (labelText) label.textContent = labelText;
+            if (detailsText) details.textContent = detailsText;
+
+            // Mark previous steps as completed
+            for (const [id, item] of activeSteps.entries()) {
+                if (id !== stepId && item.classList.contains('active')) {
+                    item.classList.remove('active');
+                    item.classList.add('completed');
+                    const itemIcon = item.querySelector('.thinking-step-icon');
+                    if (itemIcon) {
+                        itemIcon.textContent = 'check_circle';
+                        itemIcon.classList.remove('spinner');
+                    }
+                }
+            }
+
             this.scrollChatToBottom();
         };
 
@@ -906,7 +952,7 @@ class WeaveApp {
         wrapper.innerHTML = `
             <div class="thinking-panel expanded">
                 <div class="thinking-live-label">Thinking <span class="thinking-word" id="thinking-word-live">...</span></div>
-                <div class="thinking-step-label"></div>
+                <div class="thinking-steps-container"></div>
             </div>
         `;
         const panel = wrapper.firstElementChild;

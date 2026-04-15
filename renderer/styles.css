@@ -2224,15 +2224,57 @@ body.compact-mode .suggestion-card {
     to { opacity: 1; transform: translateY(0); }
 }
 
+.thinking-steps-container {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.thinking-step-item {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    animation: fadeIn 0.3s ease-out;
+}
+
+.thinking-step-status {
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+
+.thinking-step-icon {
+    font-size: 18px !important;
+}
+
+.thinking-step-icon.spinner {
+    color: var(--accent-blue);
+    animation: rotate 1.5s linear infinite;
+}
+
+.thinking-step-item.completed .thinking-step-icon {
+    color: var(--accent-teal);
+}
+
+.thinking-step-item.active .thinking-step-label {
+    color: var(--text-primary);
+    font-weight: 500;
+}
+
 .thinking-step-label {
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.thinking-step-details {
     font-size: 11px;
-    color: var(--text-muted, rgba(255,255,255,0.38));
-    margin-top: 4px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-height: 14px;
-    transition: opacity 0.2s ease;
+    color: var(--text-tertiary);
+    margin-top: 2px;
+}
+
+@keyframes rotate {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
 }
 
 .thinking-panel.expanded {
