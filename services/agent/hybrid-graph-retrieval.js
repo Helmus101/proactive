@@ -455,6 +455,64 @@ async function lexicalSearchDocs(terms = [], filters = {}) {
     .sort((a, b) => (b.base_score || 0) - (a.base_score || 0));
 }
 
+async function lexicalSearchRawEvents(terms = [], filters = {}, limit = 120) {
+  const cleanTerms = (Array.isArray(terms) ? terms : [])
+    .map((t) => String(t || '').trim())
+    .filter((t) => t.length >= 2)
+    .slice(0, 12);
+  if (!cleanTerms.length) return [];
+
+  const clauses = cleanTerms.map(() => `(COALESCE(redacted_text, text, raw_text, '') LIKE ? OR COALESCE(title, '') LIKE ?)` ).join(' OR ');
+  const params = cleanTerms.flatMap((t) => {
+    const like = `%${t}%`;
+    return [like, like];
+  });
+
+  const rows = await db.allQuery(
+    `SELECT id, type, source_type, source, app, timestamp, occurred_at, date, title, text, redacted_text, raw_text, metadata
+     FROM events
+     WHERE ${clauses}
+     ORDER BY COALESCE(occurred_at, timestamp) DESC
+     LIMIT ?`,
+    [...params, Math.max(30, Number(limit || 120))]
+  ).catch(() => []);
+
+  return rows
+    .map((row) => {
+      const metadata = asObj(row.metadata);
+      const body = String(row.redacted_text || row.text || row.raw_text || '').slice(0, 1200);
+      const header = [row.title, row.app, row.source].filter(Boolean).join(' • ');
+      const combined = [header, body].filter(Boolean).join('\n');
+      const exactHits = countExactTermHits(combined, cleanTerms);
+      const ts = parseTs(row.occurred_at || row.timestamp);
+      const recencyBoost = ts ? Math.max(0, 1 - ((Date.now() - ts) / (1000 * 60 * 60 * 24 * 30))) : 0;
+      return {
+        key: `event:${row.id}`,
+        source_type: row.source_type || row.type || 'event',
+        node_id: null,
+        event_id: row.id,
+        layer: 'event',
+        subtype: (row.source_type || row.type || '').toLowerCase(),
+        source_type_group: metadata.source_type_group || (String(row.source_type || row.type || '').toLowerCase().includes('screen') ? 'desktop' : null),
+        anchor_at: row.occurred_at || row.timestamp,
+        latest_activity_at: row.occurred_at || row.timestamp,
+        timestamp: row.occurred_at || row.timestamp,
+        app: row.app || null,
+        text: combined,
+        activity_summary: metadata.activity_summary || null,
+        content_type: metadata.content_type || null,
+        uncertainty: metadata.capture_uncertainty || null,
+        source_refs: [row.id],
+        base_score: Number((Math.min(1.4, (exactHits * 0.22) + recencyBoost)).toFixed(6)),
+        match_reason: `lexical_event:${cleanTerms.join(',')}`
+      };
+    })
+    .filter((row) => row.base_score > 0)
+    .filter((row) => rowMatchesFilters(row, filters))
+    .sort((a, b) => (b.base_score || 0) - (a.base_score || 0))
+    .slice(0, Math.max(18, Math.min(120, Number(limit || 120))));
+}
+
 async function querylessRecentDocs(filters = {}, limit = 24) {
   const rows = await db.allQuery(
     `SELECT doc_id, source_type, node_id, event_id, app, timestamp, text, metadata
@@ -669,6 +727,7 @@ async function buildHybridGraphRetrieval({
   }
 
   const lexicalRanking = await lexicalSearchDocs(retrievalPlan.lexical_terms || [], finalFilters);
+  const rawEventLexicalRanking = await lexicalSearchRawEvents(retrievalPlan.lexical_terms || [], finalFilters, 120);
   const semanticRankings = retrievalPlan.mode === 'queryless'
     ? []
     : await vectorSearchNodes(finalNodeRows, retrievalPlan.semantic_queries || retrievalPlan.search_queries || []);
@@ -681,7 +740,11 @@ async function buildHybridGraphRetrieval({
     : [];
 
   const alpha = options.alpha !== undefined ? options.alpha : (retrievalPlan.alpha !== undefined ? retrievalPlan.alpha : 0.7);
-  let fused = alphaBlendedSearch(lexicalRanking, [...semanticRankings, coreRanking, coreToRawRanking, recencyRanking], alpha);
+  let fused = alphaBlendedSearch(
+    [...lexicalRanking, ...rawEventLexicalRanking],
+    [...semanticRankings, coreRanking, coreToRawRanking, recencyRanking],
+    alpha
+  );
 
   // Recursive Retrieval Pass
   if (recursionDepth > 0 && !passiveOnly) {
@@ -693,7 +756,11 @@ async function buildHybridGraphRetrieval({
       const recursionQueries = anchorNodes.map(node => node.text.slice(0, 300));
       const recursionRankings = await vectorSearchNodes(finalNodeRows, recursionQueries);
       if (recursionRankings.length > 0) {
-        fused = alphaBlendedSearch(lexicalRanking, [...semanticRankings, ...recursionRankings, coreRanking, recencyRanking], alpha);
+        fused = alphaBlendedSearch(
+          [...lexicalRanking, ...rawEventLexicalRanking],
+          [...semanticRankings, ...recursionRankings, coreRanking, recencyRanking],
+          alpha
+        );
       }
     }
   }
@@ -715,7 +782,7 @@ async function buildHybridGraphRetrieval({
     const episodeNodes = graph.expandedNodes.filter((n) => n.layer === 'episode');
 
     const coreNodes = await loadMemoryNodeCandidates({ layer: 'core' }).catch(() => []);
-    const rawDocs = lexicalRanking.slice(0, 18).map((r) => ({ ...r, layer: r.layer || 'event' }));
+    const rawDocs = [...rawEventLexicalRanking, ...lexicalRanking].slice(0, 24).map((r) => ({ ...r, layer: r.layer || 'event' }));
 
     // build evidence ordering with dedupe by key/node id
     const ordered = [];

@@ -855,6 +855,8 @@ class WeaveApp {
                 text = `Layer penetration: ${depth} · Path discovered`;
             } else if (step === "discovery_status") {
                 text = `Discovery: ${data.seed_count} seeds · ${data.evidence_count} evidence · Confidence ${(data.confidence * 100).toFixed(0)}%`;
+            } else if (step === "llm_fallback") {
+                text = `Model unavailable · Returning grounded memory-only answer`;
             } else if (step === "graph_expansion") {
                 text = `Walking Knowledge Graph · ${data.expanded_count || 0} related nodes`;
             } else if (step === "web_search") {

@@ -206,32 +206,74 @@ async function dispatchTool(request = {}, runtime = {}) {
         [input.node_id, input.node_id]
       ).catch(() => []);
       
-      // Reconstruction logic: fetch raw events if it's an episode or linked to one
-      let rawEvents = [];
-      const sourceRefs = (() => {
+      // Reconstruction logic:
+      // 1) direct source_refs on target node
+      // 2) source_refs from directly linked nodes (episodes/raw_event/semantic)
+      const directSourceRefs = (() => {
         try { return JSON.parse(node.source_refs || '[]'); } catch (_) { return []; }
       })();
-      
-      if (sourceRefs.length) {
-        const placeholders = sourceRefs.map(() => '?').join(',');
-        rawEvents = await db.allQuery(
-          `SELECT id, type, timestamp, source, title, redacted_text, raw_text, metadata, 
-                  (CASE WHEN type = 'ScreenCapture' THEN 1 ELSE 0 END) as is_capture
-           FROM events 
-           WHERE id IN (${placeholders}) 
-           ORDER BY is_capture DESC, timestamp DESC 
-           LIMIT 40`,
-          sourceRefs
+
+      const neighborIds = Array.from(new Set(
+        edges.flatMap((edge) => [edge.from_node_id, edge.to_node_id]).filter((id) => id && id !== input.node_id)
+      )).slice(0, 60);
+
+      let neighborRows = [];
+      if (neighborIds.length) {
+        const placeholders = neighborIds.map(() => '?').join(',');
+        neighborRows = await db.allQuery(
+          `SELECT id, layer, subtype, source_refs, metadata
+           FROM memory_nodes
+           WHERE id IN (${placeholders})`,
+          neighborIds
         ).catch(() => []);
       }
 
-      // Enhanced reconstruction: if multiple captures exist, try to build a timeline snippet
-      const captures = rawEvents.filter(e => e.type === 'ScreenCapture' || e.is_capture);
-      const reconstruction = captures.length > 0 
-        ? captures.map(c => `[${c.timestamp}] ${c.title}: ${c.redacted_text || c.raw_text || ''}`).join('\n---\n')
+      const neighborSourceRefs = neighborRows.flatMap((row) => {
+        try { return JSON.parse(row.source_refs || '[]'); } catch (_) { return []; }
+      });
+
+      const allSourceRefs = Array.from(new Set([...directSourceRefs, ...neighborSourceRefs])).filter(Boolean).slice(0, 260);
+
+      let rawEvents = [];
+      if (allSourceRefs.length) {
+        const placeholders = allSourceRefs.map(() => '?').join(',');
+        rawEvents = await db.allQuery(
+          `SELECT id, type, source_type, timestamp, occurred_at, source, app, title, redacted_text, raw_text, metadata,
+                  (CASE
+                    WHEN LOWER(COALESCE(source_type, type, '')) LIKE '%screen%' THEN 1
+                    WHEN LOWER(COALESCE(source_type, type, '')) LIKE '%capture%' THEN 1
+                    ELSE 0
+                  END) as is_capture
+           FROM events
+           WHERE id IN (${placeholders})
+           ORDER BY is_capture DESC, COALESCE(occurred_at, timestamp) DESC
+           LIMIT 140`,
+          allSourceRefs
+        ).catch(() => []);
+      }
+
+      const captures = rawEvents.filter((e) => Number(e.is_capture || 0) === 1);
+      const bestEvents = (captures.length ? captures : rawEvents).slice(0, 28);
+      const reconstruction = bestEvents.length > 0
+        ? bestEvents.map((e) => {
+            const when = e.occurred_at || e.timestamp || 'unknown time';
+            const header = [e.title, e.app || e.source].filter(Boolean).join(' • ');
+            const body = String(e.redacted_text || e.raw_text || '').replace(/\s+/g, ' ').trim();
+            return `[${when}] ${header || e.id}: ${body}`.slice(0, 900);
+          }).join('\n---\n')
         : null;
 
-      result = { status: 'success', output: { node, edges, rawEvents, reconstruction } };
+      result = {
+        status: 'success',
+        output: {
+          node,
+          edges,
+          rawEvents,
+          reconstruction,
+          source_ref_count: allSourceRefs.length,
+          capture_count: captures.length
+        }
+      };
     } else {
       result = { status: 'error', error: `Node not found: ${input.node_id}` };
     }
@@ -296,4 +338,3 @@ module.exports = {
   dispatchTool,
   adaptActionToToolRequest
 };
-
