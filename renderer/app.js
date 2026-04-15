@@ -833,23 +833,33 @@ class WeaveApp {
             const step = data?.step || '';
             const queryHint = data?.query ? ` "${data.query.slice(0, 30)}${data.query.length > 30 ? "..." : ""}"` : "";
             let text = '';
-            if (step === 'query_analysis') {
-                const scope = data.time_scope && data.time_scope !== 'all_time' ? ` · ${data.time_scope}` : '';
-                const queries = Array.isArray(data.queries) && data.queries.length ? ` (${data.queries.slice(0, 2).join(', ')}...)` : '';
-                text = `Reconstructing query angles${queries} · ${data.strategy_mode || 'memory'}${scope}`;
-            } else if (step === 'passive_insufficient') {
+            if (step === "query_analysis") {
+                const scope = data.time_scope && data.time_scope !== "all_time" ? ` · ${data.time_scope}` : "";
+                const queries = Array.isArray(data.queries) && data.queries.length ? ` (${data.queries.slice(0, 2).join(", ")}...)` : "";
+                text = `Reconstructing query angles${queries} · ${data.strategy_mode || "memory"}${scope}`;
+            } else if (step === "query_reconstruction") {
+                const terms = Array.isArray(data.lexical_terms) && data.lexical_terms.length ? ` · Terms: ${data.lexical_terms.slice(0, 3).join(", ")}` : "";
+                text = `Transforming queries for high-precision anchoring${terms}`;
+            } else if (step === "passive_insufficient") {
                 text = `Initial layer pass incomplete (score: ${data.passive_score || 0}) · Deepening search`;
-            } else if (step === 'passive_sufficient') {
+            } else if (step === "passive_sufficient") {
                 text = `Found strong match in Core layers (score: ${data.passive_score || 0})`;
-            } else if (step === 'memory_retrieval') {
+            } else if (step === "memory_retrieval") {
                 text = `Retrieving memory for${queryHint} (${data.query_count || 0} queries)`;
-            } else if (step === 'temporal_widen') {
+            } else if (step === "temporal_widen") {
                 text = `Sparse results · Widening temporal window`;
-            } else if (step === 'graph_expansion') {
+            } else if (step === "deep_scan_triggered") {
+                text = `Deep Scan active · Forcing recursive graph expansion`;
+            } else if (step === "layer_penetration") {
+                const depth = data.max_depth === 3 ? "Deep (Raw)" : (data.max_depth === 2 ? "Mid (Episode)" : "Core");
+                text = `Layer penetration: ${depth} · Path discovered`;
+            } else if (step === "discovery_status") {
+                text = `Discovery: ${data.seed_count} seeds · ${data.evidence_count} evidence · Confidence ${(data.confidence * 100).toFixed(0)}%`;
+            } else if (step === "graph_expansion") {
                 text = `Walking Knowledge Graph · ${data.expanded_count || 0} related nodes`;
-            } else if (step === 'web_search') {
+            } else if (step === "web_search") {
                 text = `Consulting external web sources`;
-            } else if (step === 'composing') {
+            } else if (step === "composing") {
                 text = `Synthesizing final answer...`;
             }
             if (text) label.textContent = text;
@@ -1064,6 +1074,17 @@ class WeaveApp {
         const webResults = Array.isArray(trace?.web_results_summary) ? trace.web_results_summary.slice(0, 4) : [];
         const temporalReasoning = Array.isArray(trace?.temporal_reasoning) ? trace.temporal_reasoning : [];
         const strategy = trace?.strategy || {};
+        const layers = Array.isArray(trace?.layers) ? trace.layers : [];
+        const maxDepth = layers.includes("raw") || layers.includes("event") ? 3 : (layers.includes("episode") ? 2 : (layers.includes("insight") || layers.includes("semantic") ? 1 : 0));
+        const depthLabels = ["Core", "Insight", "Episode", "Raw"];
+        const penetrationHtml = `
+            <div class="penetration-breadcrumb">
+                ${depthLabels.map((label, idx) => {
+                    const active = idx <= maxDepth;
+                    return `<span class="penetration-node ${active ? "active" : ""}">${this.escapeHtml(label)}</span>`;
+                }).join(`<span class="penetration-sep">/</span>`)}
+            </div>
+        `;
         const summaryBits = [];
 
         if (trace?.thinking_summary) summaryBits.push(trace.thinking_summary);
@@ -1071,8 +1092,17 @@ class WeaveApp {
         if (trace?.applied_date_range?.start && trace?.applied_date_range?.end) {
             summaryBits.push(`Window: ${trace.applied_date_range.start} -> ${trace.applied_date_range.end}`);
         }
-        if (trace?.date_filter_status && trace.date_filter_status !== 'not_used') {
+        if (trace?.date_filter_status && trace.date_filter_status !== "not_used") {
             summaryBits.push(`Filter ${trace.date_filter_status}`);
+        }
+        if (trace?.results_summary?.seed_count !== undefined) {
+            summaryBits.push(`${trace.results_summary.seed_count} Seeds`);
+        }
+        if (trace?.results_summary?.evidence_count !== undefined) {
+            summaryBits.push(`${trace.results_summary.evidence_count} Evidence`);
+        }
+        if (strategy?.recursion_depth > 0) {
+            summaryBits.push(`Deep Expansion`);
         }
 
         const filterHtml = filters.length
@@ -1119,6 +1149,9 @@ class WeaveApp {
                     <span class="thinking-trace-summary">${this.escapeHtml(summaryBits.join(' • ') || 'Open to inspect the retrieval path.')}</span>
                 </summary>
                 <div class="thinking-trace-sections">
+                    <div class="thinking-trace-penetration">
+                        ${penetrationHtml}
+                    </div>
                     <section class="thinking-trace-section">
                         <div class="thinking-trace-section-title">Strategy & intent analysis</div>
                         ${strategyHtml}
