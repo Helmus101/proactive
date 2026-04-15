@@ -7,6 +7,7 @@ function graphDerivation() {
   return require('./graph-derivation');
 }
 const { upsertMemoryNode, upsertMemoryEdge, upsertRetrievalDoc } = require('./graph-store');
+const { generateEmbedding } = require('../embedding-engine');
 
 const DEEPSEEK_ENDPOINT = 'https://api.deepseek.com/v1/chat/completions';
 const llmCache = new Map();
@@ -242,28 +243,40 @@ async function runEpisodeJob() {
         const row = await db.getQuery(`SELECT id, summary, title, canonical_text FROM memory_nodes WHERE id = ?`, [id]).catch(() => null);
         if (!row) continue;
         const prompt = `
-You are a concise summarizer. Given an episode title and its raw canonical text, produce a short narrative summary (1-3 sentences) that captures the key events and any next-step actions. Return strict JSON: {"narrative":"..."}
+You are a concise summarizer. Given an episode title and its raw canonical text, produce 3-5 key takeaway points as bullet points. Return strict JSON: {"takeaways":"..."}
 
 Title: ${String(row.title || '').slice(0, 240)}
 Text: ${String(row.canonical_text || row.summary || '').slice(0, 4000)}
 `;
         const payload = await callLLM(prompt, normalizeLLMConfig(process.env.DEEPSEEK_API_KEY || null), 0.25);
         const parsed = Array.isArray(payload) ? payload[0] : (payload || null);
-        const narrative = parsed && (parsed.narrative || parsed.summary) ? String(parsed.narrative || parsed.summary).trim() : null;
-        if (narrative) {
+        const takeaways = parsed && (parsed.takeaways || parsed.summary || parsed.narrative) ? String(parsed.takeaways || parsed.summary || parsed.narrative).trim() : null;
+        if (takeaways) {
           await upsertMemoryNode({
             id: row.id,
             layer: 'episode',
             subtype: null,
             title: row.title,
-            summary: narrative,
+            summary: takeaways,
             canonicalText: row.canonical_text,
             confidence: 0.88,
             status: 'active',
             sourceRefs: [],
             metadata: {},
             graphVersion: result.version,
-            embedding: await generateEmbedding(narrative, process.env.OPENAI_API_KEY)
+            embedding: await generateEmbedding(takeaways, process.env.OPENAI_API_KEY)
+          });
+
+          await upsertRetrievalDoc({
+            docId: `node:${row.id}`,
+            sourceType: 'node',
+            nodeId: row.id,
+            timestamp: new Date().toISOString(),
+            text: `${row.title}\n${takeaways}`,
+            metadata: {
+              layer: 'episode',
+              title: row.title
+            }
           });
         }
       } catch (e) { /* per-episode failure should not stop the job */ }
