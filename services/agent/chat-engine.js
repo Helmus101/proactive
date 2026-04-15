@@ -446,12 +446,19 @@ async function buildThinkingTrace({ query, retrieval, drilldownEvidence = [] }) 
   );
 
   const strategy = buildThinkingStrategy(retrieval, drilldownEvidence);
+  const resultsSummary = buildThinkingResultsSummary(retrieval, drilldownEvidence);
+  
+  // Add Deep Search indicator if recursion was used
+  if (retrieval?.retrieval_plan?.recursion_depth > 0) {
+    resultsSummary.details.push("Performed recursive 'Deep Search' expansion from high-confidence anchor nodes.");
+  }
+
   return {
     thinking_summary: buildThinkingSummary(query, retrieval, drilldownEvidence),
     strategy,
     filters: buildThinkingFilters(retrieval),
     search_queries: buildThinkingSearchQueries(retrieval),
-    results_summary: buildThinkingResultsSummary(retrieval, drilldownEvidence),
+    results_summary: resultsSummary,
     data_sources: dataSources,
     connection_candidates: buildConnectionCandidates(retrieval),
     seed_results: Array.isArray(retrieval?.seed_results) ? retrieval.seed_results : [],
@@ -620,6 +627,10 @@ async function executeParallelRetrieval(baseQuery, baseThought, options) {
   return {
     ...results[0],
     retrieval_run_id: results.map((r) => r.retrieval_run_id).join(','),
+    retrieval_plan: {
+      ...results[0].retrieval_plan,
+      recursion_depth: recursionDepth
+    },
     thought_summary: Array.from(new Set(results.flatMap((r) => r.thought_summary))),
     trace_summary: Array.from(new Set(results.flatMap((r) => r.trace_summary))),
     evidence,

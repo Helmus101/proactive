@@ -278,11 +278,18 @@ function stripLikelyUiChromeLines(lines = []) {
     const value = String(line || '').trim();
     if (!value) return false;
     if (value.length <= 2) return false;
-    if (/^(back|next|open|save|share|search|home|reload|refresh|compose|inbox|sent|drafts|trash|archive|reply|forward)$/i.test(value)) return false;
-    if (/^(file|edit|view|history|bookmarks|window|help)$/i.test(value)) return false;
-    if (/^\d{1,2}:\d{2}$/.test(value)) return false;
-    if (/^(mon|tue|wed|thu|fri|sat|sun)\b/i.test(value) && value.length <= 12) return false;
-    if (/^(ctrl|cmd|alt|shift)\b/i.test(value)) return false;
+    // UI Navigation & Chrome
+    if (/^(back|next|open|save|share|search|home|reload|refresh|compose|inbox|sent|drafts|trash|archive|reply|forward|settings|help|menu|close|minimize|maximize|restore|quit|exit)$/i.test(value)) return false;
+    if (/^(file|edit|view|history|bookmarks|window|help|tools|run|terminal|debug|options|preferences)$/i.test(value)) return false;
+    // Time & Date overlays
+    if (/^\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?$/i.test(value)) return false;
+    if (/^(mon|tue|wed|thu|fri|sat|sun)\b/i.test(value) && value.length <= 15) return false;
+    if (/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b/i.test(value) && value.length <= 15) return false;
+    // Keyboard shortcuts & System
+    if (/^(ctrl|cmd|alt|shift|meta|esc|tab|space|enter|delete|backspace|insert|home|end|pgup|pgdn|up|down|left|right)\b/i.test(value)) return false;
+    // App specific UI noise
+    if (/^(unread|starred|important|muted|snoozed|promotions|social|updates|forums)$/i.test(value)) return false;
+    if (/^(all mail|spam|bin|drafts|sent|inbox|scheduled)$/i.test(value)) return false;
     return true;
   });
 }
@@ -317,6 +324,14 @@ function inferDesktopActivity(contentType, text, metadata = {}) {
     return /\b(reply|draft|send|submit|review|fix|debug|meeting|agenda|assignment|deadline|due|report|proposal|ticket|issue|task|document|notes|research|plan|code)\b/i.test(v) || v.split(/\s+/).length >= 4;
   }) || '').slice(0, 150);
 
+  // Detection for "Creating" vs "Viewing"
+  const isCreating = (
+    /\b(writing|drafting|composing|coding|editing|designing|creating|building|developing)\b/i.test(lowered) ||
+    /\b(save|commit|push|publish|submit|send|post|create|new)\b/i.test(lowered) ||
+    (app && /\b(cursor|vscode|intellij|sublime|textedit|notes|notion|google docs|pages|word|figma|canva)\b/i.test(app.toLowerCase()) && !/\b(view|preview|read-only)\b/i.test(windowTitle.toLowerCase()))
+  );
+  const activityLabel = isCreating ? 'creating' : 'viewing';
+
   // Prefer explicit study signal emitted during capture over guessed text labels.
   if (meta.study_signal) {
     const signalMap = {
@@ -335,16 +350,18 @@ function inferDesktopActivity(contentType, text, metadata = {}) {
       return {
         summary: shortEvidence ? `${label}${focusLine ? ` (${focusLine})` : ''}` : label,
         confidence: shortEvidence || focusLine ? 'high' : 'medium',
-        evidence: [focusLine || shortEvidence].filter(Boolean)
+        evidence: [focusLine || shortEvidence].filter(Boolean),
+        activity_type: isCreating ? 'creating' : 'viewing'
       };
     }
   }
 
   if (!source || source.length < 20) {
     return {
-      summary: windowTitle ? `activity unclear in ${windowTitle}` : (app ? `activity unclear in ${app}` : 'activity unclear from capture'),
+      summary: windowTitle ? `${activityLabel} content in ${windowTitle}` : (app ? `${activityLabel} content in ${app}` : 'activity unclear from capture'),
       confidence: 'low',
-      evidence: []
+      evidence: [],
+      activity_type: activityLabel
     };
   }
 
@@ -353,13 +370,15 @@ function inferDesktopActivity(contentType, text, metadata = {}) {
       return {
         summary: focusLine ? `reviewing email thread: ${focusLine}` : 'reviewing email thread metadata',
         confidence: 'high',
-        evidence: [focusLine || shortEvidence].filter(Boolean)
+        evidence: [focusLine || shortEvidence].filter(Boolean),
+        activity_type: activityLabel
       };
     }
     return {
-      summary: focusLine ? `working in email context: ${focusLine}` : 'email context visible, exact action unclear',
+      summary: focusLine ? `${activityLabel === 'creating' ? 'drafting' : 'reviewing'} email: ${focusLine}` : 'email context visible, exact action unclear',
       confidence: 'medium',
-      evidence: [focusLine || shortEvidence].filter(Boolean)
+      evidence: [focusLine || shortEvidence].filter(Boolean),
+      activity_type: activityLabel
     };
   }
 
@@ -367,7 +386,8 @@ function inferDesktopActivity(contentType, text, metadata = {}) {
     return {
       summary: focusLine ? `debugging runtime/build issue: ${focusLine}` : 'reviewing runtime or build errors',
       confidence: 'high',
-      evidence: [focusLine || shortEvidence].filter(Boolean)
+      evidence: [focusLine || shortEvidence].filter(Boolean),
+      activity_type: 'creating' // debugging is active
     };
   }
 
@@ -375,7 +395,8 @@ function inferDesktopActivity(contentType, text, metadata = {}) {
     return {
       summary: focusLine ? `task-oriented work: ${focusLine}` : 'task-oriented activity visible in capture',
       confidence: 'high',
-      evidence: [focusLine || shortEvidence].filter(Boolean)
+      evidence: [focusLine || shortEvidence].filter(Boolean),
+      activity_type: activityLabel
     };
   }
 
@@ -383,24 +404,27 @@ function inferDesktopActivity(contentType, text, metadata = {}) {
     return {
       summary: focusLine ? `executing action step: ${focusLine}` : 'action-oriented workflow visible in capture',
       confidence: 'medium',
-      evidence: [focusLine || shortEvidence].filter(Boolean)
+      evidence: [focusLine || shortEvidence].filter(Boolean),
+      activity_type: 'creating'
     };
   }
 
   if (focusLine) {
     return {
-      summary: `working on: ${focusLine}`,
+      summary: `${activityLabel === 'creating' ? 'drafting' : 'working on'}: ${focusLine}`,
       confidence: focusLine.length > 28 ? 'high' : 'medium',
-      evidence: [focusLine]
+      evidence: [focusLine],
+      activity_type: activityLabel
     };
   }
 
   return {
     summary: windowTitle
-      ? `viewing content in ${windowTitle}`
-      : (app ? `viewing content in ${app}` : 'viewing on-screen content'),
+      ? `${activityLabel} content in ${windowTitle}`
+      : (app ? `${activityLabel} content in ${app}` : 'viewing on-screen content'),
     confidence: 'medium',
-    evidence: shortEvidence ? [shortEvidence] : []
+    evidence: shortEvidence ? [shortEvidence] : [],
+    activity_type: activityLabel
   };
 }
 
@@ -473,6 +497,7 @@ function interpretDesktopCapture(text, metadata = {}) {
     searchText,
     cleanedText,
     activitySummary,
+    activityType: activity.activity_type || 'viewing',
     activityConfidence: activity.confidence || 'low',
     activityEvidence: Array.isArray(activity.evidence) ? activity.evidence.slice(0, 3) : [],
     contentType,
@@ -627,6 +652,8 @@ function normalizeEventEnvelope({ id, type, timestamp, source, text, metadata = 
   const occurredAtInfo = pickOccurredAt(type, meta, timestamp);
   const occurredAt = occurredAtInfo.iso;
 
+  const isPassive = lowerType.includes('screen') || lowerType.includes('desktop') || lowerType.includes('capture');
+
   return {
     id,
     type: sourceType,
@@ -635,6 +662,7 @@ function normalizeEventEnvelope({ id, type, timestamp, source, text, metadata = 
     occurred_at: occurredAt,
     occurred_date: occurredAtInfo.date,
     ingested_at: ingestedAt,
+    passive_observation: isPassive,
     type_group: lowerType.includes('calendar') ? 'calendar'
       : (lowerType.includes('email') || lowerType.includes('message') ? 'communication'
         : (lowerType.includes('browser') || lowerType.includes('screen') ? 'desktop' : 'artifact')),
@@ -755,6 +783,7 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
     redacted_text: safeText,
     ...(desktopInterpretation ? {
       activity_summary: desktopInterpretation.activitySummary,
+      activity_type: desktopInterpretation.activityType,
       activity_confidence: desktopInterpretation.activityConfidence,
       activity_evidence: desktopInterpretation.activityEvidence,
       content_type: desktopInterpretation.contentType,
