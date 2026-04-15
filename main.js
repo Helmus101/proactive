@@ -62,6 +62,7 @@ let suggestionEngineTimer = null;
 let semanticsTimer = null;
 let dailyInsightTimer = null;
 let weeklyInsightTimer = null;
+let livingCoreTimer = null;
 let episodeJobLock = false;
 let suggestionJobLock = false;
 let lastSuggestionLockSkipLogAt = 0;
@@ -1791,6 +1792,25 @@ async function runDailyInsightsScheduled() {
   }
 }
 
+async function runLivingCoreJobScheduled() {
+  try {
+    const apiKey = process.env.DEEPSEEK_API_KEY;
+    if (!apiKey) {
+      console.warn("[LivingCore] No DeepSeek API key, skipping Living Core synthesis");
+      return;
+    }
+    console.log("[LivingCore] Running Living Core synthesis job...");
+    const { runLivingCoreJob } = require("./services/agent/intelligence-engine");
+    const created = await runLivingCoreJob(apiKey);
+    console.log("[LivingCore] Created core nodes:", created.length);
+    if (mainWindow && mainWindow.webContents) {
+      mainWindow.webContents.send("memory-graph-update", { type: "living_core_completed", count: created.length, timestamp: Date.now() });
+    }
+  } catch (e) {
+    console.error("[LivingCore] Error:", e?.message || e);
+  }
+}
+
 function startMemoryGraphProcessing() {
   console.log('[MemoryGraph] Starting automated processing...');
   store.set('memoryGraphHealth', {
@@ -1838,6 +1858,7 @@ function startMemoryGraphProcessing() {
 
   // Schedule daily insights (every day at 23:00 local time by default)
   scheduleDailyInsights();
+  scheduleLivingCore();
   
   // Warm the graph immediately on startup, then follow with the scheduled loop.
   setTimeout(() => {
@@ -1889,6 +1910,20 @@ function scheduleDailyInsights() {
   console.log('[DailyInsight] Scheduled for:', next.toLocaleString());
 }
 
+function scheduleLivingCore() {
+  if (livingCoreTimer) clearTimeout(livingCoreTimer);
+  const now = new Date();
+  const next = new Date(now);
+  next.setHours(1, 0, 0, 0);
+  if (next <= now) next.setDate(next.getDate() + 1);
+  const delay = next.getTime() - now.getTime();
+  livingCoreTimer = setTimeout(async function tick() {
+    await runLivingCoreJobScheduled();
+    livingCoreTimer = setTimeout(tick, 24 * 60 * 60 * 1000);
+  }, delay);
+  console.log("[LivingCore] Scheduled for:", next.toLocaleString());
+}
+
 function stopMemoryGraphProcessing() {
   if (episodeGenerationTimer) {
     clearInterval(episodeGenerationTimer);
@@ -1901,6 +1936,10 @@ function stopMemoryGraphProcessing() {
   if (weeklyInsightTimer) {
     clearTimeout(weeklyInsightTimer);
     weeklyInsightTimer = null;
+  }
+  if (livingCoreTimer) {
+    clearTimeout(livingCoreTimer);
+    livingCoreTimer = null;
   }
   console.log('[MemoryGraph] Automated processing stopped');
 }

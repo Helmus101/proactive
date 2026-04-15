@@ -695,6 +695,76 @@ function inferCaptureEpisodeSubtype(group) {
   return group.typeGroup || 'desktop';
 }
 
+async function resolveCrossAppEntities(semanticNodes) {
+  const resolvedNodes = [];
+  const idMap = new Map(); // originalId -> resolvedNode
+
+  for (const node of semanticNodes) {
+    const meta = node.metadata || {};
+    let resolved = null;
+
+    // Multi-signal resolution:
+    // 1. Identifiers (email, url)
+    const identifiers = [];
+    if (node.subtype === 'person' && meta.name && meta.name.includes('@')) identifiers.push(meta.name.toLowerCase());
+    if (node.subtype === 'link' && meta.url) identifiers.push(meta.url.toLowerCase());
+    
+    // 2. Stable Hash on identifier
+    const identifierHash = identifiers.length ? stableHash(identifiers[0]) : null;
+
+    for (const existing of resolvedNodes) {
+      if (node.subtype !== existing.subtype) continue;
+
+      const existingMeta = existing.metadata || {};
+      let match = false;
+
+      // Check identifier match
+      if (identifierHash) {
+        const existingIdentifiers = [];
+        if (existing.subtype === 'person' && existingMeta.name && existingMeta.name.includes('@')) existingIdentifiers.push(existingMeta.name.toLowerCase());
+        if (existing.subtype === 'link' && existingMeta.url) existingIdentifiers.push(existingMeta.url.toLowerCase());
+        
+        if (existingIdentifiers.some(id => identifiers.includes(id))) {
+          match = true;
+        }
+      }
+
+      // Check vector similarity (already done in writeEpisodeGroup, but we can be more aggressive here)
+      if (!match && node.embedding && existing.embedding) {
+        const sim = cosineSimilarity(node.embedding, existing.embedding);
+        if (sim > 0.92) match = true;
+      }
+
+      // Check participant overlap for facts/tasks
+      if (!match && (node.subtype === 'fact' || node.subtype === 'task')) {
+        const pOverlap = overlapScore(meta.participants || [], existingMeta.participants || []);
+        if (pOverlap >= 2 && node.title.toLowerCase() === existing.title.toLowerCase()) match = true;
+      }
+
+      if (match) {
+        resolved = existing;
+        break;
+      }
+    }
+
+    if (resolved) {
+      // Merge
+      resolved.source_refs = uniq([...(resolved.source_refs || []), ...(node.source_refs || [])], 64);
+      resolved.confidence = Math.max(resolved.confidence, node.confidence);
+      // Combine metadata if needed
+      if (node.subtype === 'person' && !resolved.metadata.name && node.metadata.name) {
+        resolved.metadata.name = node.metadata.name;
+      }
+      idMap.set(node.id, resolved);
+    } else {
+      resolvedNodes.push(node);
+      idMap.set(node.id, node);
+    }
+  }
+
+  return { resolvedNodes, idMap };
+}
+
 async function writeEpisodeGroup(group, version) {
   const baseSubtype = group.typeGroup === 'desktop'
     ? inferCaptureEpisodeSubtype(group)
@@ -851,27 +921,11 @@ async function writeEpisodeGroup(group, version) {
   }
 
   const _semanticNodes = deriveSemanticNodes(group, episodeData);
-  const semanticNodes = [];
-
-  // Entity Vector Resolution: Merge nodes using semantic similarity rather than exact string matching
   for (const node of _semanticNodes) {
-    const nodeEmbedding = await embedText(node.canonical_text || node.summary || node.title);
-    node.embedding = nodeEmbedding; // Cache it to avoid re-embed
-    
-    let merged = false;
-    for (const existing of semanticNodes) {
-      if (node.subtype === existing.subtype) {
-        const sim = cosineSimilarity(node.embedding, existing.embedding);
-        if (sim > 0.88) {
-          // Merge source refs into the existing vector-resolved entity
-          existing.source_refs = uniq([...(existing.source_refs || []), ...(node.source_refs || [])], 48);
-          merged = true;
-          break;
-        }
-      }
-    }
-    if (!merged) semanticNodes.push(node);
+    node.embedding = await embedText(node.canonical_text || node.summary || node.title);
   }
+
+  const { resolvedNodes: semanticNodes } = await resolveCrossAppEntities(_semanticNodes);
 
   for (const node of semanticNodes) {
     const nodeEmbedding = node.embedding;

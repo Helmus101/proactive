@@ -580,6 +580,10 @@ async function executeParallelRetrieval(baseQuery, baseThought, options) {
   ].filter(Boolean);
   const queries = Array.from(new Set(bundle)).slice(0, 4);
   
+  // Detect when a query requires deep context (e.g., long-term relationship, patterns)
+  const requiresDeepContext = /\b(relationship|pattern|over the last|long-term|habit|habitual|recurring|years?|months?)\b/i.test(baseQuery);
+  const recursionDepth = requiresDeepContext ? 1 : 0;
+
   // Parallel multi-agent dispatch
   const results = await Promise.all(queries.map((q) => buildHybridGraphRetrieval({
     query: q,
@@ -588,7 +592,8 @@ async function executeParallelRetrieval(baseQuery, baseThought, options) {
       retrieval_thought: { ...baseThought, semantic_queries: [q] }
     },
     seedLimit: Math.max(3, Math.floor(10 / queries.length)),
-    hopLimit: 2
+    hopLimit: 2,
+    recursionDepth
   })));
 
   if (results.length === 1) return results[0];
