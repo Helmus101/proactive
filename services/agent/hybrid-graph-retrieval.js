@@ -616,6 +616,8 @@ async function buildHybridGraphRetrieval({
 
   const reranked = rerankFusedResults(fused, retrievalPlan);
   const seeds = reranked.slice(0, retrievalPlan.seed_limit);
+  // canonical list of seed node ids/keys used for tracing and logging
+  const seedNodeIds = Array.from(new Set(seeds.map((s) => (s.node_id || s.event_id || s.key)).filter(Boolean))).slice(0, retrievalPlan.seed_limit);
   const graph = await expandGraph(seeds, retrievalPlan.hop_limit, MAX_EXPANDED);
 
   // Spiral retrieval ordering: Insights -> Semantics -> Episodes
