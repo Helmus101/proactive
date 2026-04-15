@@ -13,6 +13,16 @@ const DEFAULT_SEED_LIMIT = 5;
 const DEFAULT_HOP_LIMIT = 2;
 const MAX_EXPANDED = 10;
 
+const EDGE_WEIGHTS = {
+  'PROMOTED_FROM': 1.2,
+  'ABSTRACTED_TO': 1.2,
+  'PART_OF_EPISODE': 1.0,
+  'MENTIONS': 0.8,
+  'GENERATED_FROM': 0.8,
+  'RELATED_TO': 0.5,
+  'FOLLOWS_UP': 0.5
+};
+
 function parseTs(value) {
   if (!value && value !== 0) return 0;
   if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
@@ -177,7 +187,8 @@ async function coreDownRanking(nodeRows = [], retrievalPlan = {}, limit = 80) {
       const row = mapById.get(neighborId);
       const text = `${row.title || ''} ${row.summary || ''} ${row.canonical_text || ''} ${edge.edge_type || ''} ${edge.trace_label || ''}`;
       const termBoost = Math.min(0.24, countExactTermHits(text, terms) * 0.04);
-      const base = Math.max(0.2, 0.95 - (depth * 0.18)) + (Number(edge.weight || 0) * 0.06) + (Number(edge.evidence_count || 0) * 0.02) + termBoost;
+      const edgeWeightMultiplier = EDGE_WEIGHTS[edge.edge_type] || 1.0;
+      const base = (Math.max(0.2, 0.95 - (depth * 0.18)) + (Number(edge.weight || 0) * 0.06) + (Number(edge.evidence_count || 0) * 0.02)) * edgeWeightMultiplier + termBoost;
       const prev = Number(scoreById.get(neighborId) || 0);
       scoreById.set(neighborId, Math.max(prev, Number(base.toFixed(6))));
       if (!visited.has(neighborId)) {
@@ -430,7 +441,7 @@ async function expandGraph(seedNodeIds = [], hopLimit = DEFAULT_HOP_LIMIT, maxEx
         latest_activity_at: metadata.latest_activity_at || metadata.end || node.updated_at || node.created_at || null,
         timestamp: metadata.end || metadata.start || metadata.latest_interaction_at || node.updated_at || node.created_at || null,
         depth: current.depth + 1,
-        sort_score: expansionScore(node.layer, node.subtype),
+        sort_score: expansionScore(node.layer, node.subtype) * (EDGE_WEIGHTS[edge.edge_type] || 1.0),
         edge: {
           from: current.id,
           to: node.id,
@@ -471,7 +482,8 @@ async function buildHybridGraphRetrieval({
   query,
   options = {},
   seedLimit = DEFAULT_SEED_LIMIT,
-  hopLimit = DEFAULT_HOP_LIMIT
+  hopLimit = DEFAULT_HOP_LIMIT,
+  recursionDepth = 0
 } = {}) {
   const basePlan = options.retrieval_thought || buildRetrievalThought({
     query,
@@ -521,7 +533,25 @@ async function buildHybridGraphRetrieval({
     rankingPool.push(lexicalRanking, ...semanticRankings, coreRanking, recencyRanking);
   }
 
-  const fused = reciprocalRankFusion(rankingPool.filter((ranking) => Array.isArray(ranking) && ranking.length));
+  let fused = reciprocalRankFusion(rankingPool.filter((ranking) => Array.isArray(ranking) && ranking.length));
+
+  // Recursive Retrieval Pass
+  if (recursionDepth > 0) {
+    const anchorNodes = fused
+      .filter(row => (row.layer === 'core' || row.layer === 'insight') && row.base_score > 0.6)
+      .slice(0, 3);
+    
+    if (anchorNodes.length > 0) {
+      const recursionQueries = anchorNodes.map(node => node.text.slice(0, 300));
+      const recursionRankings = await vectorSearchNodes(nodeRows, recursionQueries);
+      if (recursionRankings.length > 0) {
+        // Add recursion results to ranking pool and re-fuse
+        rankingPool.push(...recursionRankings);
+        fused = reciprocalRankFusion(rankingPool.filter((ranking) => Array.isArray(ranking) && ranking.length));
+      }
+    }
+  }
+
   const reranked = rerankFusedResults(fused, retrievalPlan);
   const seeds = reranked.slice(0, retrievalPlan.seed_limit);
   const seedNodeIds = Array.from(new Set(seeds.map((seed) => seed.node_id).filter(Boolean)));
