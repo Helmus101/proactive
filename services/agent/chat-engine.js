@@ -580,6 +580,8 @@ async function executeParallelRetrieval(baseQuery, baseThought, options) {
   ].filter(Boolean);
   const queries = Array.from(new Set(bundle)).slice(0, 4);
   
+  const isDeepQuery = /\b(relationship|over the last|history|patterns|trends|habits|evolved|connection between)\b/i.test(baseQuery);
+
   // Parallel multi-agent dispatch
   const results = await Promise.all(queries.map((q) => buildHybridGraphRetrieval({
     query: q,
@@ -588,7 +590,8 @@ async function executeParallelRetrieval(baseQuery, baseThought, options) {
       retrieval_thought: { ...baseThought, semantic_queries: [q] }
     },
     seedLimit: Math.max(3, Math.floor(10 / queries.length)),
-    hopLimit: 2
+    hopLimit: 2,
+    recursionDepth: isDeepQuery ? 1 : 0
   })));
 
   if (results.length === 1) return results[0];
