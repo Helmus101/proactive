@@ -251,7 +251,7 @@ function normalizeSuggestionType(value = '', fallbackText = '') {
   if (valid.includes(raw)) return raw;
   const hay = `${raw} ${String(fallbackText || '').toLowerCase()}`;
   if (/\bstudy|quiz|exam|class|assignment|homework|lecture|review|flashcard|vocab\b/.test(hay)) return 'study';
-  if (/\brelationship|follow ?up|reply|check-?in|reconnect|birthday|anniversary|friend|mentor|alex|maya|sam|leo\b/.test(hay)) return 'relationship';
+  if (/\brelationship|follow ?up|reply|check-?in|reconnect|birthday|anniversary|friend|mentor|alex|maya|sam|leo\b/.test(hay)) return 'followup';
   if (/\bwork|project|client|meeting|presentation|proposal|deadline|task|job\b/.test(hay)) return 'work';
   if (/\bpersonal|home|health|fitness|hobby|family|bill|shopping\b/.test(hay)) return 'personal';
   if (/\bcreative|design|writing|art|music|video|ideation|brainstorm\b/.test(hay)) return 'creative';
@@ -641,7 +641,7 @@ async function generateTopTodosFromMemoryQuery(llmConfig, options = {}) {
 
   RULES:
   - Use only STANDING NOTES + MEMORY EVIDENCE + GRAPH EDGES.
-  - Instruct the LLM to look for any relevant tasks or follow-ups in the retrieved memory evidence.
+  - Look for any relevant actionable tasks, follow-ups, or open loops in the retrieved memory evidence.
   - Prefer semantic tasks and insight-backed actions over raw-event cleanup.
 
 STANDING NOTES:
@@ -666,7 +666,8 @@ ${edgeDigest || 'No edge traces available.'}
 I asked the memory what the top 5 things to do now were, and it gave me the following 5 things:
 ${JSON.stringify(topFiveItems, null, 2)}
 
-Now generate final proactive suggestions in this exact internal template:
+Now generate final proactive suggestions in this exact internal template.
+Provide up to 8 candidates so the system can select the best ones.
 Format them exactly into the following strict JSON array:
 [
   {
@@ -696,7 +697,7 @@ Rules:
 `;
 
   const aiRows = await callLLM(phase2Prompt, llmConfig, 0.22).catch(() => null);
-  const rows = Array.isArray(aiRows) ? aiRows.slice(0, 5) : [];
+  const rows = Array.isArray(aiRows) ? aiRows.slice(0, 10) : [];
   const selected = rows.filter((row) => !isWeakTitle(row?.title || ''));
   if (!selected.length) return [];
 
@@ -738,7 +739,7 @@ Rules:
       description: normalized.description || normalized.intent || '',
       reason: normalized.reason || 'Because current memory signals show this specific action is due now.',
       outcome,
-      category: suggestionType === 'relationship' ? 'followup' : suggestionType,
+      category: (suggestionType === 'relationship' || suggestionType === 'followup') ? 'followup' : suggestionType,
       priority: normalized.priority || 'medium',
       confidence: Number(normalized.confidence || 0.58),
       time_anchor: timeAnchor,
@@ -779,7 +780,7 @@ Rules:
       secondary_action: String(raw?.secondary_action || '').trim() || null,
       ai_generated: true,
       ai_doable: false,
-      action_type: suggestionType === 'relationship' ? 'relationship_followup' : `${suggestionType}_review`,
+      action_type: (suggestionType === 'relationship' || suggestionType === 'followup') ? 'followup_review' : `${suggestionType}_review`,
       execution_mode: 'manual',
       assignee: 'human',
       source: 'memory-query-top5',
