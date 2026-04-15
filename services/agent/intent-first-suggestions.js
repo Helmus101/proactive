@@ -23,10 +23,13 @@ function trimToSingleClause(text, maxLen = 180) {
 
 function normalizeCategory(category) {
   const raw = safeText(category).toLowerCase().trim();
+  if (raw.includes('study')) return 'study';
   if (raw.includes('follow')) return 'followup';
+  if (raw.includes('relationship')) return 'followup';
   if (raw.includes('creative')) return 'creative';
   if (raw.includes('personal')) return 'personal';
   if (raw.includes('plan')) return 'work';
+  if (raw.includes('work')) return 'work';
   return 'work';
 }
 
