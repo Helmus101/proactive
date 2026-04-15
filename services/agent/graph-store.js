@@ -39,6 +39,15 @@ const EDGE_INVERSIONS = {
   'DEPENDS_ON': 'PREREQUISITE_FOR'
 };
 
+const MEMORY_LAYERS = {
+  RAW: 'raw',
+  EPISODE: 'episode',
+  SEMANTIC: 'semantic',
+  CLOUD: 'cloud',
+  INSIGHT: 'insight',
+  CORE: 'core'
+};
+
 async function upsertGraphNode({
   id,
   type,
@@ -126,6 +135,33 @@ async function upsertMemoryNode({
     },
     embedding
   }).catch(() => {});
+}
+
+async function updateMemoryNode(id, updates = {}) {
+  const existing = await db.getQuery(`SELECT * FROM memory_nodes WHERE id = ?`, [id]);
+  if (!existing) return null;
+
+  const metadata = { ...asObj(existing.metadata), ...asObj(updates.metadata) };
+  const node = {
+    id: existing.id,
+    layer: updates.layer || existing.layer,
+    subtype: updates.subtype || existing.subtype,
+    title: updates.title || existing.title,
+    summary: updates.summary || existing.summary,
+    canonicalText: updates.canonical_text || existing.canonical_text,
+    confidence: updates.confidence !== undefined ? updates.confidence : existing.confidence,
+    status: updates.status || existing.status,
+    sourceRefs: updates.source_refs || asObj(existing.source_refs),
+    metadata,
+    graphVersion: existing.graph_version,
+    createdAt: existing.created_at,
+    updatedAt: new Date().toISOString(),
+    embedding: updates.embedding || asObj(existing.embedding),
+    anchorDate: updates.anchor_date || existing.anchor_date
+  };
+
+  await upsertMemoryNode(node);
+  return node;
 }
 
 async function upsertGraphEdge({
@@ -324,8 +360,10 @@ module.exports = {
   asObj,
   toText,
   stableHash,
+  MEMORY_LAYERS,
   upsertGraphNode,
   upsertMemoryNode,
+  updateMemoryNode,
   upsertGraphEdge,
   upsertMemoryEdge,
   buildRetrievalDocText,
