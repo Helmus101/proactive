@@ -53,6 +53,7 @@ class WeaveApp {
             this.showMorningBrief(this.activeBriefId);
         });
         window.electronAPI.onPlannerStep?.((payload) => this.handlePlannerStep(payload));
+        window.electronAPI.onMemoryGraphUpdate?.((payload) => this.handleMemoryGraphUpdate(payload));
         window.electronAPI.onVoiceCommandToggle?.((payload) => this.handleVoiceCommandToggle(payload));
         window.electronAPI.onVoiceSessionUpdate?.((payload) => this.handleVoiceSessionUpdate(payload));
         await this.loadInitialData();
@@ -830,6 +831,7 @@ class WeaveApp {
             const label = thinkingPanel.querySelector('.thinking-step-label');
             if (!label) return;
             const step = data?.step || '';
+            const queryHint = data?.query ? ` "${data.query.slice(0, 30)}${data.query.length > 30 ? "..." : ""}"` : "";
             let text = '';
             if (step === 'query_analysis') {
                 const scope = data.time_scope && data.time_scope !== 'all_time' ? ` · ${data.time_scope}` : '';
@@ -840,7 +842,7 @@ class WeaveApp {
             } else if (step === 'passive_sufficient') {
                 text = `Found strong match in Core layers (score: ${data.passive_score || 0})`;
             } else if (step === 'memory_retrieval') {
-                text = `Retrieving from ${data.query_count || 0} reconstructed queries`;
+                text = `Retrieving memory for${queryHint} (${data.query_count || 0} queries)`;
             } else if (step === 'temporal_widen') {
                 text = `Sparse results · Widening temporal window`;
             } else if (step === 'graph_expansion') {
@@ -1237,19 +1239,6 @@ class WeaveApp {
         this.updateChatSyncStatus();
 
         // Respond to main process requests to flush chat sessions to memory
-        if (window.electronAPI && window.electronAPI.onMemoryGraphUpdate) {
-            window.electronAPI.onMemoryGraphUpdate((data) => {
-                try {
-                    if (data && data.type === 'request_chat_save') {
-                        const trimmed = (this.chatSessions || []).map((session) => ({
-                            ...session,
-                            messages: (session.messages || []).slice(-120)
-                        })).slice(0, 25);
-                        if (window.electronAPI?.saveChatSessionsToMemory) window.electronAPI.saveChatSessionsToMemory(trimmed);
-                    }
-                } catch (e) { /* ignore */ }
-            });
-        }
     }
 
     pushMessageToActiveChat(role, content, retrieval = null, thinkingTrace = null) {
@@ -2732,6 +2721,46 @@ class WeaveApp {
             .replace(/'/g, '&#39;');
     }
 }
+
+    handleMemoryGraphUpdate(payload = {}) {
+        const syncStatusEl = document.getElementById("chat-sync-status");
+        const processingStatusEl = document.getElementById("mem-processing-status");
+        
+        if (syncStatusEl) {
+            const textEl = syncStatusEl.querySelector(".sync-text");
+            if (textEl) textEl.textContent = "Syncing memory...";
+            syncStatusEl.classList.add("syncing");
+            
+            clearTimeout(this._syncResetTimer);
+            this._syncResetTimer = setTimeout(() => {
+                if (textEl) textEl.textContent = "Memory synced";
+                syncStatusEl.classList.remove("syncing");
+            }, 3000);
+        }
+
+        if (processingStatusEl) {
+            processingStatusEl.textContent = "Processing...";
+            processingStatusEl.classList.remove("inactive");
+            processingStatusEl.classList.add("active");
+            
+            clearTimeout(this._procResetTimer);
+            this._procResetTimer = setTimeout(() => {
+                processingStatusEl.textContent = "Idle";
+                processingStatusEl.classList.remove("active");
+                processingStatusEl.classList.add("inactive");
+            }, 3000);
+        }
+
+        try {
+            if (payload && payload.type === "request_chat_save") {
+                const trimmed = (this.chatSessions || []).map((session) => ({
+                    ...session,
+                    messages: (session.messages || []).slice(-120)
+                })).slice(0, 25);
+                if (window.electronAPI?.saveChatSessionsToMemory) window.electronAPI.saveChatSessionsToMemory(trimmed);
+            }
+        } catch (e) { }
+    }
 
 document.addEventListener('DOMContentLoaded', () => {
     window.app = new WeaveApp();

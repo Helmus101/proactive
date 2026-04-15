@@ -333,9 +333,9 @@ function inferDesktopActivity(contentType, text, metadata = {}) {
 
   // Enhanced Detection for "Creating" vs "Viewing"
   const creatingSignals = [
-    /\b(writing|drafting|composing|coding|editing|designing|creating|building|developing|typing)\b/i,
-    /\b(save|commit|push|publish|submit|send|post|create|new|add|insert|update)\b/i,
-    /\b(untitled|new folder|new document|new file)\b/i
+    /\b(writing|drafting|composing|coding|editing|designing|creating|building|developing|typing|refactoring|debugging|sketching|drawing|painting|producing|rendering|recording)\b/i,
+    /\b(save|commit|push|publish|submit|send|post|create|new|add|insert|update|deployment|deploy|checkout|merge|rebase)\b/i,
+    /\b(untitled|new folder|new document|new file|draft|unsaved|modified|\*)\b/i
   ];
   
   const viewingSignals = [
@@ -343,11 +343,11 @@ function inferDesktopActivity(contentType, text, metadata = {}) {
     /\b(details|overview|summary|info|about|help|faq)\b/i
   ];
 
-  const hasCreatingSignal = creatingSignals.some(sig => sig.test(lowered));
+  const hasCreatingSignal = creatingSignals.some(sig => sig.test(lowered)) || /\b(github.*(compare|pull|new)|compose|drafting|replying|editing)\b/i.test(windowTitle);
   const hasViewingSignal = viewingSignals.some(sig => sig.test(lowered));
   
-  const isKnownEditor = (app && /\b(cursor|vscode|intellij|sublime|textedit|notes|notion|google docs|pages|word|figma|canva|linear|github|slack|discord|teams)\b/i.test(app.toLowerCase()));
-  const isReadOnlyWindow = /\b(view|preview|read-only|readonly|history|log|output)\b/i.test(windowTitle.toLowerCase());
+  const isKnownEditor = (app && /\b(cursor|vscode|intellij|sublime|textedit|notes|notion|google docs|pages|word|figma|canva|linear|github|slack|discord|teams|obsidian|craft|scrivener|overleaf|replit|terminal|iterm|xcode|android studio|unity|blender|photoshop|illustrator|premiere|after effects)\b/i.test(app.toLowerCase()));
+  const isReadOnlyWindow = /\b(view|preview|read-only|readonly|history|log|output|logs|terminal output)\b/i.test(windowTitle.toLowerCase());
 
   let isCreating = false;
   if (isKnownEditor && !isReadOnlyWindow) {
