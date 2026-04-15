@@ -53,6 +53,7 @@ function normalizeDateRange(dateRange) {
 }
 
 function rowMatchesFilters(row, filters = {}) {
+  if (row.id === 'global_core' || row.layer === 'core') return true;
   const appFilter = Array.isArray(filters.app) ? filters.app : (filters.app ? [filters.app] : []);
   if (appFilter.length) {
     const app = String(row.app || '').toLowerCase();
@@ -144,16 +145,16 @@ function rerankFusedResults(rows, retrievalPlan) {
 
       const sourceBonus = sourceAgreementBonus(row, preferred);
       const dateBonus = dateFreshnessBonus(row, retrievalPlan?.applied_date_range);
-      const exactTermHits = countExactTermHits(row.text, lexicalTerms);
-      const exactnessBonus = Math.min(0.16, exactTermHits * 0.04);
-      const entryModeBonus = entryMode === 'core_first'
-        ? (coreWalkBonus + (semanticBonus * 0.6) + (lexicalBonus * 0.25))
-        : (entryMode === 'query_first'
-          ? (lexicalBonus + (semanticBonus * 0.9) + (coreWalkBonus * 0.25))
-          : ((coreWalkBonus * 0.7) + (lexicalBonus * 0.7) + (semanticBonus * 0.7)));
-      const rerankScore = Number(((row.fused_score || row.base_score || 0) + lexicalBonus + semanticBonus + coreWalkBonus + entryModeBonus + episodeBonus + rawEvidenceBonus + sourceBonus + dateBonus + exactnessBonus + passiveBoost).toFixed(6));
-      return { ...row, rerank_score: rerankScore, exact_term_hits: exactTermHits };
-    })
+    const exactTermHits = countExactTermHits(row.text, lexicalTerms);
+    const exactnessBoost = exactTermHits > 0 ? 0.9 : 0;
+    const entryModeBonus = entryMode === 'core_first'
+      ? (coreWalkBonus + (semanticBonus * 0.6) + (lexicalBonus * 0.25))
+      : (entryMode === 'query_first'
+        ? (lexicalBonus + (semanticBonus * 0.9) + (coreWalkBonus * 0.25))
+        : ((coreWalkBonus * 0.7) + (lexicalBonus * 0.7) + (semanticBonus * 0.7)));
+    const rerankScore = Number(((row.fused_score || row.base_score || 0) + lexicalBonus + semanticBonus + coreWalkBonus + entryModeBonus + episodeBonus + rawEvidenceBonus + sourceBonus + dateBonus + exactnessBoost + passiveBoost).toFixed(6));
+    return { ...row, rerank_score: rerankScore, exact_term_hits: exactTermHits };
+  })
     .sort((a, b) => {
       if ((b.rerank_score || 0) !== (a.rerank_score || 0)) return (b.rerank_score || 0) - (a.rerank_score || 0);
       return sortKeyForRow(b) - sortKeyForRow(a);
@@ -163,22 +164,33 @@ function rerankFusedResults(rows, retrievalPlan) {
 async function coreDownRanking(nodeRows = [], retrievalPlan = {}, limit = 80) {
   if (!Array.isArray(nodeRows) || !nodeRows.length) return [];
   const mapById = new Map(nodeRows.map((row) => [row.id, row]));
-  let frontier = nodeRows
-    .filter((row) => row.layer === 'core' || row.id === 'global_core')
+  
+  // Primary anchoring frontier: Global Core and Core nodes
+  let coreFrontier = nodeRows
+    .filter((row) => row.id === 'global_core' || row.layer === 'core')
     .map((row) => row.id)
-    .slice(0, 8);
-  if (!frontier.length) {
-    frontier = nodeRows
-      .filter((row) => row.layer === 'insight' || row.layer === 'semantic')
-      .sort((a, b) => (Number(b.confidence || 0) - Number(a.confidence || 0)))
-      .map((row) => row.id)
-      .slice(0, 6);
-  }
+    .slice(0, 12);
+
+  // Secondary seed frontier: Insights and Semantics
+  let seedFrontier = nodeRows
+    .filter((row) => row.layer === 'insight' || row.layer === 'semantic')
+    .sort((a, b) => (Number(b.confidence || 0) - Number(a.confidence || 0)))
+    .map((row) => row.id)
+    .slice(0, 10);
+
+  let frontier = Array.from(new Set([...coreFrontier, ...seedFrontier]));
   if (!frontier.length) return [];
 
   const terms = Array.isArray(retrievalPlan?.lexical_terms) ? retrievalPlan.lexical_terms : [];
   const visited = new Set(frontier);
-  const scoreById = new Map(frontier.map((id) => [id, 1.2]));
+  const scoreById = new Map(frontier.map((id) => {
+    const row = mapById.get(id);
+    let base = 0.8;
+    if (id === 'global_core') base = 1.6;
+    else if (row?.layer === 'core') base = 1.3;
+    else if (row?.layer === 'insight') base = 1.1;
+    return [id, base];
+  }));
 
   for (let depth = 1; depth <= 2 && frontier.length; depth++) {
     const placeholders = frontier.map(() => '?').join(',');
@@ -329,6 +341,12 @@ async function loadMemoryNodeCandidates(filters = {}) {
   sql += ` LIMIT 2400`;
 
   const rows = await db.allQuery(sql, params).catch(() => []);
+  
+  // Always try to fetch global_core regardless of date filters
+  const globalCore = await db.getQuery(`SELECT * FROM memory_nodes WHERE id = 'global_core'`).catch(() => null);
+  if (globalCore && !rows.find(r => r.id === 'global_core')) {
+    rows.push(globalCore);
+  }
 
   return rows
     .map((row) => {
