@@ -1,0 +1,9 @@
+# Icon Placeholders
+
+This directory should contain the following icons:
+- icon16.png (16x16 pixels)
+- icon48.png (48x48 pixels) 
+- icon128.png (128x128 pixels)
+
+For development, you can use any square PNG images with these dimensions.
+The icons should represent the proactive todo concept - perhaps a checkmark with AI/brain elements.

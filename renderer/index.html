@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Weave</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=SF+Pro+Display:wght@300;400;500;600&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+    <!-- Liquid Glass Background -->
+    <div class="liquid-background"></div>
+    <div class="ambient-bloom ambient-bloom-1"></div>
+    <div class="ambient-bloom ambient-bloom-2"></div>
+    <div class="ambient-bloom ambient-bloom-3"></div>
+
+    <div class="app-shell">
+
+    <!-- Top Bar -->
+    <header class="top-bar">
+        <div class="top-bar-content">
+            <div class="app-icon">A</div>
+            <h1 class="greeting" id="today-greeting">Good morning</h1>
+            <div class="top-bar-actions">
+                <div style="position: relative;">
+                    <button class="icon-btn" id="refresh-tasks-btn" title="Refresh">
+                        <span class="material-symbols-outlined" style="font-size: 18px;">refresh</span>
+                    </button>
+                    <div class="notification-dot"></div>
+                </div>
+                <div class="avatar">U</div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Bottom Navigation -->
+    <nav class="bottom-nav">
+        <button class="nav-pill active" id="nav-today" data-view="today-view" title="Today">
+            <span class="material-symbols-outlined">home</span>
+        </button>
+        <button class="nav-pill" id="nav-chat" data-view="chat-view" title="Chat">
+            <span class="material-symbols-outlined">forum</span>
+        </button>
+        <button class="nav-pill" id="nav-settings" data-view="settings-view" title="Settings">
+            <span class="material-symbols-outlined">settings</span>
+        </button>
+    </nav>
+
+    <!-- Main Content Area -->
+        <main class="content-area">
+
+            <!-- ───── TODAY VIEW ───── -->
+            <section id="today-view" class="view active">
+
+                <!-- Context Chips -->
+                <div class="context-chips">
+                    <button class="context-chip active" data-filter="all">Today</button>
+                    <button class="context-chip" data-filter="work">Work</button>
+                    <button class="context-chip" data-filter="followups">Follow-ups</button>
+                    <button class="context-chip" data-filter="creative">Creative</button>
+                    <button class="context-chip" data-filter="personal">Personal</button>
+                </div>
+
+                <div style="padding: 8px 24px 0; display: flex; justify-content: flex-end;">
+                    <button id="manual-generate-suggestions-btn" class="pill-btn" type="button">Generate Suggestions</button>
+                </div>
+
+                <!-- Suggestion Cards (Reminders List) -->
+                <div id="reminders-list" style="padding: 0 24px;">
+                    <div class="empty-state" style="text-align: center; padding: 60px 20px;">
+                        <div class="empty-icon" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;">
+                            <span class="material-symbols-outlined">lightbulb</span>
+                        </div>
+                        <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">No suggestions yet</div>
+                        <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">Refresh to generate AI-powered suggestions based on your context</div>
+                    </div>
+                </div>
+
+                <!-- Execute Confirmation Modal -->
+                <div id="execute-confirm-modal" class="modal-overlay hidden">
+                    <div class="modal-content glass-card" style="max-width:520px;">
+                        <div class="modal-header">
+                            <h3 id="confirm-modal-title">Execute Suggestion</h3>
+                            <button class="close-modal" id="confirm-close-btn">✕</button>
+                        </div>
+                        <div class="modal-body" id="confirm-modal-body" style="font-size:13px; color:var(--text-primary);">
+                            <p id="confirm-modal-text">Are you sure you want to run this automation?</p>
+                        </div>
+                        <div class="modal-footer" style="display:flex; gap:8px; justify-content:flex-end;">
+                            <button class="pill-btn" id="confirm-cancel-btn">Cancel</button>
+                            <button class="pill-btn pill-btn-primary" id="confirm-run-btn">Run</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="morning-brief-modal" class="modal-overlay hidden">
+                    <div class="modal-content morning-brief-doc-shell">
+                        <div class="morning-brief-doc-toolbar">
+                            <div class="morning-brief-doc-toolbar-left">
+                                <h3 class="morning-brief-doc-title">Morning Brief</h3>
+                                <div id="morning-brief-list" class="morning-brief-doc-nav"></div>
+                            </div>
+                            <button class="close-modal morning-brief-doc-close" id="morning-brief-close-btn">Close</button>
+                        </div>
+                        <section class="morning-brief-doc-panel">
+                            <article id="morning-brief-content" class="morning-brief-doc-content"></article>
+                        </section>
+                    </div>
+                </div>
+
+            </section>
+            
+            <!-- ───── SETTINGS VIEW ───── -->
+            <section id="settings-view" class="view hidden">
+
+                <!-- Appearance Section -->
+                <div class="settings-section">
+                    <div class="settings-card">
+                        <div class="settings-row">
+                            <div>
+                                <div class="settings-label">Dark Mode</div>
+                                <div class="settings-description">Switch between light and dark themes</div>
+                            </div>
+                            <div class="settings-control">
+                                <div class="toggle-switch" id="dark-mode-toggle"></div>
+                            </div>
+                        </div>
+                        <div class="settings-row">
+                            <div>
+                                <div class="settings-label">Compact View</div>
+                                <div class="settings-description">Show more content with reduced spacing</div>
+                            </div>
+                            <div class="settings-control">
+                                <div class="toggle-switch" id="compact-view-toggle"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- AI Behavior Section -->
+                <div class="settings-section">
+                    <div class="settings-card">
+                        <div class="settings-row">
+                            <div>
+                                <div class="settings-label">AI Personality</div>
+                                <div class="settings-description">Adjust tone and response style</div>
+                            </div>
+                        </div>
+                        <div style="padding: 0 20px 16px;">
+                            <div class="ai-personality-preview">
+                                <div class="preview-message" id="preview-message">"I'll help you organize your tasks efficiently!"</div>
+                            </div>
+                            <div class="slider-container">
+                                <div class="slider-label">
+                                    <span class="slider-title">Formality</span>
+                                    <span class="slider-value" id="formality-value">50%</span>
+                                </div>
+                                <input type="range" class="slider" id="formality-slider" min="0" max="100" value="50">
+                            </div>
+                            <div class="slider-container">
+                                <div class="slider-label">
+                                    <span class="slider-title">Verbosity</span>
+                                    <span class="slider-value" id="verbosity-value">50%</span>
+                                </div>
+                                <input type="range" class="slider" id="verbosity-slider" min="0" max="100" value="50">
+                            </div>
+                            <div class="settings-row" style="padding: 12px 0 0;">
+                                <div>
+                                    <div class="settings-label">Suggestion LLM Provider</div>
+                                    <div class="settings-description">Choose which API generates suggestion cards</div>
+                                </div>
+                                <div class="settings-control">
+                                    <select id="suggestion-llm-provider" style="min-width: 170px; height: 36px; border-radius: 12px; border: 1px solid var(--separator); background: rgba(255,255,255,0.45); color: var(--text-primary); padding: 0 10px;">
+                                        <option value="deepseek">DeepSeek</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="settings-row">
+                                <div>
+                                    <div class="settings-label">Suggestion Model</div>
+                                    <div class="settings-description">For example: deepseek-chat or llama3.1:8b</div>
+                                </div>
+                                <div class="settings-control">
+                                    <input id="suggestion-llm-model" type="text" placeholder="deepseek-chat" style="width: 220px; height: 36px; border-radius: 12px; border: 1px solid var(--separator); background: rgba(255,255,255,0.45); color: var(--text-primary); padding: 0 10px;" />
+                                </div>
+                            </div>
+                            <div class="settings-row">
+                                <div>
+                                    <div class="settings-label">Ollama Base URL</div>
+                                    <div class="settings-description">Used when provider is Ollama (remote or local endpoint)</div>
+                                </div>
+                                <div class="settings-control">
+                                    <input id="suggestion-llm-base-url" type="text" placeholder="http://127.0.0.1:11434" style="width: 260px; height: 36px; border-radius: 12px; border: 1px solid var(--separator); background: rgba(255,255,255,0.45); color: var(--text-primary); padding: 0 10px;" />
+                                </div>
+                            </div>
+                            <div class="settings-row">
+                                <div>
+                                    <div class="settings-label">Provider API Key</div>
+                                    <div class="settings-description">DeepSeek key or optional Ollama gateway key</div>
+                                </div>
+                                <div class="settings-control">
+                                    <input id="suggestion-llm-api-key" type="password" placeholder="Optional for Ollama" style="width: 220px; height: 36px; border-radius: 12px; border: 1px solid var(--separator); background: rgba(255,255,255,0.45); color: var(--text-primary); padding: 0 10px;" />
+                                </div>
+                            </div>
+                            <div class="settings-row">
+                                <div class="settings-description" id="suggestion-llm-status">Suggestion provider settings not loaded</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Notifications Section -->
+                <div class="settings-section">
+                    <div class="settings-card">
+                        <div class="settings-row">
+                            <div>
+                                <div class="settings-label">Push Notifications</div>
+                                <div class="settings-description">Get notified about important updates</div>
+                            </div>
+                            <div class="settings-control">
+                                <div class="toggle-switch active" id="notifications-toggle"></div>
+                            </div>
+                        </div>
+                        <div class="settings-row">
+                            <div>
+                                <div class="settings-label">Sound Effects</div>
+                                <div class="settings-description">Play sounds for actions and alerts</div>
+                            </div>
+                            <div class="settings-control">
+                                <div class="toggle-switch" id="sound-toggle"></div>
+                            </div>
+                        </div>
+                        <div class="settings-row">
+                            <div>
+                                <div class="settings-label">Desktop Capture</div>
+                                <div class="settings-description">Automatic screen analysis for memory</div>
+                            </div>
+                            <div class="settings-control">
+                                <div class="toggle-switch" id="capture-toggle"></div>
+                            </div>
+                        </div>
+                        <div class="settings-row">
+                            <div>
+                                <div class="settings-label">OCR Provider</div>
+                                <div class="settings-description">Free OCR is built in and works without API keys</div>
+                            </div>
+                            <div class="settings-control">
+                                <select id="ocr-provider-select" style="min-width: 170px; height: 36px; border-radius: 12px; border: 1px solid var(--separator); background: rgba(255,255,255,0.45); color: var(--text-primary); padding: 0 10px;">
+                                    <option value="ocrspace">OCR.space (Free, No Key)</option>
+                                    <option value="auto">Auto (Cloud + Local Fallback)</option>
+                                    <option value="google-vision">Google Vision API</option>
+                                    <option value="vision-local">Local Vision (offline)</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="settings-row">
+                            <div>
+                                <div class="settings-label">OCR Language</div>
+                                <div class="settings-description">Language hint (for example: en, fr, nl)</div>
+                            </div>
+                            <div class="settings-control">
+                                <input id="ocr-language-input" type="text" maxlength="16" placeholder="en" style="width: 110px; height: 36px; border-radius: 12px; border: 1px solid var(--separator); background: rgba(255,255,255,0.45); color: var(--text-primary); padding: 0 10px;" />
+                            </div>
+                        </div>
+                        <div class="settings-row">
+                            <div>
+                                <div class="settings-label">OCR API Key</div>
+                                <div class="settings-description">Optional, only needed for Google Vision or custom OCR key</div>
+                            </div>
+                            <div class="settings-control">
+                                <input id="ocr-api-key-input" type="password" placeholder="Enter API key" style="width: 220px; height: 36px; border-radius: 12px; border: 1px solid var(--separator); background: rgba(255,255,255,0.45); color: var(--text-primary); padding: 0 10px;" />
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Account Section -->
+                <div class="settings-section">
+                    <div class="settings-card">
+                        <div class="settings-row">
+                            <div>
+                                <div class="settings-label">Google Workspace</div>
+                                <div class="settings-description" id="google-status">Not connected</div>
+                            </div>
+                            <div class="settings-control" style="display:flex; gap:8px;">
+                                <button class="ghost-button" id="google-connect-btn">Connect</button>
+                                <button class="ghost-button" id="google-disconnect-btn" style="color: var(--accent-coral); border-color: rgba(255,107,107,0.35);">Disconnect</button>
+                            </div>
+                        </div>
+                        <div class="settings-row">
+                            <div>
+                                <div class="settings-label">Data Export</div>
+                                <div class="settings-description">Download all your data</div>
+                            </div>
+                            <div class="settings-control">
+                                <button class="ghost-button">Export</button>
+                            </div>
+                        </div>
+                        <div class="settings-row">
+                            <div>
+                                <div class="settings-label">Delete All Data</div>
+                                <div class="settings-description">Clear history, captures, memory graph, and local settings</div>
+                            </div>
+                            <div class="settings-control">
+                                <button class="ghost-button" id="delete-all-data-btn" style="color: var(--accent-coral); border-color: rgba(255,107,107,0.35);">Delete</button>
+                            </div>
+                        </div>
+                        <div class="settings-row">
+                            <div>
+                                <div class="settings-label">Delete All Suggestions</div>
+                                <div class="settings-description">Remove all generated suggestions from the queue</div>
+                            </div>
+                            <div class="settings-control">
+                                <button class="ghost-button" id="clear-all-tasks-btn">Delete Suggestions</button>
+                            </div>
+                        </div>
+                        <div class="settings-row">
+                            <div>
+                                <div class="settings-label">Test Desktop Control</div>
+                                <div class="settings-description" id="desktop-test-status">Run a live macOS automation test: search Google for hello and open the second result. Uses AX-first control with adaptive vision.</div>
+                            </div>
+                            <div class="settings-control">
+                                <button class="ghost-button" id="test-browser-extension-btn">Test Desktop Control</button>
+                            </div>
+                        </div>
+                        <div class="settings-row" style="display:block;">
+                            <div>
+                                <div class="settings-label">Run Desktop Prompt</div>
+                                <div class="settings-description" id="desktop-prompt-status">Type what you want the AI to do on your Mac and run it through the same desktop-control loop as voice.</div>
+                            </div>
+                            <div style="margin-top:12px; display:flex; gap:10px; align-items:flex-end;">
+                                <textarea
+                                    id="desktop-prompt-input"
+                                    rows="3"
+                                    placeholder="Example: Open Gmail, find the latest email from Sarah, and draft a short reply."
+                                    style="flex:1; min-height:88px; resize:vertical; border-radius:16px; border:1px solid var(--separator); background:rgba(255,255,255,0.5); color:var(--text-primary); padding:12px 14px; font:inherit; line-height:1.45;"
+                                ></textarea>
+                                <button class="ghost-button" id="run-desktop-prompt-btn" style="white-space:nowrap;">Run Prompt</button>
+                            </div>
+                        </div>
+                        <div class="settings-row">
+                            <div>
+                                <div class="settings-label">Full Control</div>
+                                <div class="settings-description" id="extension-status-text">Checking Accessibility permission...</div>
+                            </div>
+                            <div class="settings-control" style="display:flex; gap:8px;">
+                                <button class="ghost-button" id="allow-full-control-btn">Allow Full Control</button>
+                                <button class="ghost-button" id="extension-refresh-btn">Refresh</button>
+                                <button class="ghost-button" id="extension-diagnostic-btn">Diagnostic</button>
+                            </div>
+                        </div>
+                        <div class="settings-row">
+                            <div>
+                                <div class="settings-label">Perception Mode</div>
+                                <div class="settings-description" id="desktop-perception-mode">Checking desktop perception mode...</div>
+                            </div>
+                        </div>
+                        <div class="settings-row" style="display:block;">
+                            <div>
+                                <div class="settings-label">Desktop Timeline</div>
+                                <div class="settings-description">Recent observe/act steps with perception mode, changes, and remaining gap.</div>
+                            </div>
+                            <div id="desktop-control-timeline" class="history-list" style="margin-top:12px;"></div>
+                        </div>
+                        <div class="settings-row">
+                            <div>
+                                <div class="settings-label">Voice Control</div>
+                                <div class="settings-description" id="voice-control-status">Checking voice control status...</div>
+                            </div>
+                            <div class="settings-control">
+                                <div class="toggle-switch" id="voice-control-toggle"></div>
+                            </div>
+                        </div>
+                        <div class="settings-row">
+                            <div>
+                                <div class="settings-label">Voice Shortcut</div>
+                                <div class="settings-description" id="voice-shortcut-value">Command/Ctrl + Shift + Space • Works globally with a floating HUD</div>
+                            </div>
+                            <div class="settings-control">
+                                <span class="ghost-button" id="voice-engine-pill" style="pointer-events:none;">OpenAI STT</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Browser History Section -->
+                <div class="settings-section">
+                    <div class="settings-card">
+                        <div class="settings-row">
+                            <div>
+                                <div class="settings-label">Browser History</div>
+                                <div class="settings-description" id="settings-history-meta">Recent browsing context from extension</div>
+                            </div>
+                            <div class="settings-control">
+                                <button class="ghost-button" id="history-refresh-btn">Refresh</button>
+                            </div>
+                        </div>
+                        <div id="settings-history-list" class="history-list"></div>
+                    </div>
+                </div>
+
+                <!-- Screen Captures Section -->
+                <div class="settings-section">
+                    <div class="settings-card">
+                        <div class="settings-row">
+                            <div>
+                                <div class="settings-label">Screen Captures</div>
+                                <div class="settings-description" id="capture-status-text">Capture service status unavailable</div>
+                            </div>
+                            <div class="settings-control">
+                                <button class="ghost-button" id="capture-now-btn">Capture Now</button>
+                            </div>
+                        </div>
+                        <div id="screen-captures-list" class="history-list"></div>
+                    </div>
+                </div>
+
+                <!-- Memory Graph Explorer Section -->
+                <div class="settings-section">
+                    <div class="settings-card">
+                        <div class="settings-row">
+                            <div>
+                                <div class="settings-label">Memory Graph</div>
+                                <div class="settings-description">Search and filter across graph nodes and raw events</div>
+                            </div>
+                            <div class="settings-control">
+                                <button class="ghost-button" id="memory-refresh-btn">Refresh</button>
+                            </div>
+                        </div>
+                        <div class="memory-status-container" style="padding: 0 20px 16px;">
+                            <div class="memory-status-grid">
+                                <div class="status-item">
+                                    <span class="status-label">Events</span>
+                                    <span class="status-value" id="mem-count-events">0</span>
+                                </div>
+                                <div class="status-item">
+                                    <span class="status-label">Nodes</span>
+                                    <span class="status-value" id="mem-count-nodes">0</span>
+                                </div>
+                                <div class="status-item">
+                                    <span class="status-label">Edges</span>
+                                    <span class="status-value" id="mem-count-edges">0</span>
+                                </div>
+                                <div class="status-item">
+                                    <span class="status-label">Processor</span>
+                                    <span class="status-value inactive" id="mem-processing-status">Idle</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div style="padding: 0 20px 16px; display: grid; grid-template-columns: 1fr 150px 90px; gap: 8px;">
+                            <input id="memory-search-input" type="text" placeholder="Search memory graph..." />
+                            <select id="memory-filter-type">
+                                <option value="all">All Layers</option>
+                                <option value="episode">Episodes</option>
+                                <option value="semantic">Semantics</option>
+                                <option value="cloud">Clouds</option>
+                                <option value="insight">Insights</option>
+                                <option value="raw_event">Raw Events</option>
+                            </select>
+                            <button class="ghost-button" id="search-memory-btn">Search</button>
+                        </div>
+                        <div id="memory-explorer-results" class="history-list"></div>
+                    </div>
+                </div>
+
+                <!-- Settings Footer -->
+                <div class="settings-footer">
+                    <div class="version-info">Version 1.0.0</div>
+                    <a class="sign-out-link" id="sign-out-link">Sign out</a>
+                </div>
+
+            </section>
+
+            <!-- ───── CHAT VIEW ───── -->
+            <section id="chat-view" class="view hidden">
+                <div class="chat-panel">
+                    <aside class="chat-history-panel">
+                        <div class="chat-history-header">
+                            <div class="settings-label">Chat History</div>
+                            <button class="ghost-button" id="new-chat-btn">New</button>
+                        </div>
+                        <div class="chat-history-list" id="chat-history-list"></div>
+                    </aside>
+                    <div class="chat-main">
+                        <div class="chat-main-header">
+                            <div class="settings-label" id="chat-thread-title">Current Chat</div>
+                        </div>
+                        <div class="chat-container">
+                            <div class="chat-messages" id="chat-messages">
+                                <div class="empty-state" style="text-align: center; padding: 60px 20px;">
+                                    <div class="empty-icon" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;">
+                                        <span class="material-symbols-outlined">forum</span>
+                                    </div>
+                                    <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">Start a conversation</div>
+                                    <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">Ask about your work, context, or next steps</div>
+                                </div>
+                            </div>
+                            <div class="chat-input-container">
+                                <div class="chat-input-wrapper">
+                                    <textarea 
+                                        id="chat-input" 
+                                        class="chat-input" 
+                                        placeholder="Type here..."
+                                        rows="1"
+                                    ></textarea>
+                                    <button id="send-chat-btn" class="send-button">
+                                        <span class="material-symbols-outlined">arrow_upward</span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+        </main>
+    </div>
+
+    <div id="celebration-overlay" class="celebration-overlay">
+        <div class="xp-popup">+25 XP</div>
+    </div>
+
+            <!-- ─── ADD TASK MODAL ─── -->
+            <div id="add-task-modal" class="modal-overlay hidden">
+                <div class="modal-content glass-card">
+                    <div class="modal-header">
+                        <h3>Add Suggestion</h3>
+                        <button class="close-modal" id="close-modal-btn">✕</button>
+                    </div>
+                    <div class="modal-body">
+                        <input type="text" id="task-title-input" placeholder="What needs to be done?">
+                        <textarea id="task-desc-input" placeholder="Add details or context (optional)"></textarea>
+                <div class="modal-options">
+                    <select id="task-priority-select">
+                        <option value="low">Low Priority</option>
+                        <option value="medium" selected>Medium Priority</option>
+                        <option value="high">High Priority</option>
+                    </select>
+                    <div class="toggle-wrap">
+                        <input type="checkbox" id="task-ai-toggle">
+                        <label for="task-ai-toggle">AI Assisted</label>
+                    </div>
+                </div>
+            </div>
+                    <div class="modal-footer">
+                        <button class="pill-btn" id="cancel-task-btn">Cancel</button>
+                        <button class="pill-btn pill-btn-primary" id="save-task-btn">Add to Suggestions</button>
+                    </div>
+            </div>
+        </div>
+
+        <!-- Memory Detail Modal -->
+        <div id="memory-detail-modal" class="modal-overlay hidden" style="z-index: 10001; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.4); backdrop-filter: blur(12px); display: none; align-items: center; justify-content: center;">
+            <div class="glass-card modal-content" style="max-width: 800px; width: 90%; max-height: 85vh; display:flex; flex-direction:column; padding:0; overflow:hidden; background: var(--bg2); border: 1px solid var(--border-color);">
+                <div style="padding: 24px; border-bottom: 1px solid var(--border-color); display:flex; justify-content:space-between; align-items:start;">
+                    <div>
+                        <div id="modal-memory-layer" style="font-size:10px; text-transform:uppercase; letter-spacing:1px; color:#d49fff; margin-bottom:8px;">Layer</div>
+                        <h2 id="modal-memory-title" class="section-title" style="margin:0; font-size:24px; color:var(--text-primary);">Memory Title</h2>
+                        <p id="modal-memory-time" style="font-size:12px; color:var(--text-secondary); margin-top:4px;">Time</p>
+                    </div>
+                    <button class="pill-btn pill-btn-ghost" onclick="app.closeMemoryModal()" style="padding: 8px;">✕</button>
+                </div>
+                <div style="flex:1; padding: 24px; overflow-y:auto;">
+                    <div id="modal-memory-narrative" style="font-size:16px; line-height:1.6; color:var(--text-primary); margin-bottom:24px; white-space:pre-wrap;">Narrative</div>
+                    <div style="margin-top:32px;">
+                        <h4 style="font-size:12px; text-transform:uppercase; color:var(--text-secondary); margin-bottom:12px;">Raw Stored Data</h4>
+                        <div style="position:relative;">
+                            <pre id="modal-memory-raw" style="background:#000; padding:16px; border-radius:12px; font-family:monospace; font-size:12px; color:#0f0; overflow:auto; max-height:300px; border: 1px solid rgba(0,255,0,0.1);"></pre>
+                            <button id="modal-copy-btn" class="pill-btn" style="position:absolute; top:12px; right:12px; background:rgba(255,255,255,0.1); border:none; font-size:10px;">Copy</button>
+                        </div>
+                    </div>
+                </div>
+                <div style="padding: 16px 24px; background: rgba(255,255,255,0.02); border-top: 1px solid var(--border-color); text-align:right;">
+                    <button class="pill-btn pill-btn-primary" onclick="app.closeMemoryModal()">Close Explorer</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="capture-text-modal" class="modal-overlay hidden" style="z-index: 10001; display: none;">
+            <div class="glass-card modal-content" style="max-width: 860px; width: 92%; max-height: 86vh; display:flex; flex-direction:column; padding:0; overflow:hidden; background: var(--bg2); border: 1px solid var(--border-color);">
+                <div class="modal-header" style="padding:20px 24px; border-bottom:1px solid var(--separator); margin:0;">
+                    <div>
+                        <h3 id="capture-modal-title" style="margin:0; font-size:18px; color:var(--text-primary);">Capture OCR Text</h3>
+                        <div id="capture-modal-meta" style="font-size:12px; color:var(--text-secondary); margin-top:6px;">Capture details</div>
+                    </div>
+                    <button class="close-modal" id="capture-modal-close-btn">✕</button>
+                </div>
+                <div style="padding:18px 24px; overflow:auto;">
+                    <pre id="capture-modal-text" style="white-space:pre-wrap; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; line-height:1.5; color:var(--text-primary); background:rgba(255,255,255,0.06); border:1px solid var(--separator); border-radius:10px; padding:14px; max-height:56vh; overflow:auto;"></pre>
+                </div>
+            </div>
+        </div>
+
+        <div id="voice-command-overlay" class="modal-overlay hidden" style="z-index: 10002; display: none;">
+            <div class="glass-card modal-content voice-overlay-card">
+                <div class="modal-header" style="margin:0;">
+                    <h3 id="voice-overlay-title" style="margin:0;">Voice Control</h3>
+                </div>
+                <div class="modal-body">
+                    <div id="voice-overlay-status" class="voice-overlay-status">Press the shortcut and start speaking.</div>
+                    <div id="voice-overlay-transcript" class="voice-overlay-transcript">Waiting for speech…</div>
+                    <div id="voice-overlay-meta" class="voice-overlay-meta"></div>
+                </div>
+            </div>
+        </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

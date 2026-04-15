@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DailySummary",
+  "type": "object",
+  "properties": {
+    "id": { "type": "string" },
+    "user_id": { "type": "string" },
+    "date": { "type": "string", "format": "date" },
+    "start_ts": { "type": "string", "format": "date-time" },
+    "end_ts": { "type": "string", "format": "date-time" },
+    "counts": {
+      "type": "object",
+      "properties": {
+        "emails": { "type": "integer" },
+        "calendar_events": { "type": "integer" },
+        "docs": { "type": "integer" },
+        "page_visits": { "type": "integer" }
+      }
+    },
+    "top_domains": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "top_contacts": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "notable_events": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "narrative": { "type": "string" },
+    "evidence_ids": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "IDs of events (messages, docs, calendar, pages) linked to this summary"
+    }
+  },
+  "required": ["id","user_id","date"]
+}

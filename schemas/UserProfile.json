@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "UserProfile",
+  "type": "object",
+  "properties": {
+    "id": { "type": "string" },
+    "persona": {
+      "type": "object",
+      "properties": {
+        "career_stage": { "type": "string", "enum": ["student","early_career","mid_career","senior"] },
+        "primary_domain": { "type": "string" },
+        "current_mode": { "type": "string", "enum": ["job_seeking","deep_work","networking","coasting"] }
+      },
+      "required": ["career_stage"]
+    },
+    "goals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string" },
+          "cluster": { "type": "string" },
+          "deadline": { "type": "string", "format": "date-time" },
+          "priority": { "type": "integer", "minimum": 1, "maximum": 3 }
+        }
+      }
+    },
+    "learned": {
+      "type": "object",
+      "properties": {
+        "cluster_weights": { "type": "object", "additionalProperties": { "type": "number" } },
+        "productive_hours": { "type": "array", "items": { "type": "integer" } },
+        "avg_reply_delay_by_type": { "type": "object", "additionalProperties": { "type": "number" } },
+        "avoidance_patterns": { "type": "array", "items": { "type": "string" } },
+        "typical_week_shape": { "type": "object" }
+      }
+    },
+    "comm_style": {
+      "type": "object",
+      "properties": {
+        "formality": { "type": "string", "enum": ["casual","formal","mixed"] },
+        "avg_email_length": { "type": "string", "enum": ["short","medium","long"] },
+        "uses_bullet_points": { "type": "boolean" },
+        "sign_off_phrases": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "preferences": {
+      "type": "object",
+      "properties": {
+        "gmail": { "type": "boolean" },
+        "drive": { "type": "boolean" },
+        "browser": { "type": "boolean" }
+      }
+    }
+  },
+  "required": ["id"]
+}

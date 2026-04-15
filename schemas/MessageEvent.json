@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MessageEvent",
+  "type": "object",
+  "properties": {
+    "id": { "type": "string" },
+    "user_id": { "type": "string" },
+    "from": { "type": "string" },
+    "to": { "type": "array", "items": { "type": "string" } },
+    "subject": { "type": "string" },
+    "snippet": { "type": "string" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "opened_count": { "type": "integer" },
+    "reply_status": { "type": "string", "enum": ["no_reply","replied","replied_late"] }
+  },
+  "required": ["id","user_id","from","to","subject","timestamp"]
+}

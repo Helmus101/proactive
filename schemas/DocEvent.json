@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DocEvent",
+  "type": "object",
+  "properties": {
+    "doc_id": { "type": "string" },
+    "user_id": { "type": "string" },
+    "doc_name": { "type": "string" },
+    "last_modified": { "type": "string", "format": "date-time" },
+    "shared_with": { "type": "array", "items": { "type": "string" } },
+    "state": { "type": "string", "enum": ["draft","in_review","submitted","abandoned"] }
+  },
+  "required": ["doc_id","user_id","doc_name","last_modified"]
+}

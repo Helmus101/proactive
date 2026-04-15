@@ -1,0 +1,10 @@
+{
+  "name": "com.proactive.browser_agent",
+  "description": "Proactive Browser Agent Native Host",
+  "path": "/Users/willem/Documents/coding/anqer-cto-2/proactive/native-host.sh",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://hfmkbcpgmdkdbfmgllkdbfmgllkdbfmg/",
+    "chrome-extension://makgfndanddgnddobippodmiiepocamj/"
+  ]
+}
