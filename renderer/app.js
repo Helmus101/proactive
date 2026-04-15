@@ -838,14 +838,18 @@ class WeaveApp {
                 const queries = Array.isArray(data.queries) && data.queries.length ? ` (${data.queries.slice(0, 2).join(", ")}...)` : "";
                 text = `Reconstructing query angles${queries} · ${data.strategy_mode || "memory"}${scope}`;
             } else if (step === "query_reconstruction") {
+                const queries = Array.isArray(data.transformed_queries) && data.transformed_queries.length ? ` (${data.transformed_queries[0].slice(0, 30)}...)` : "";
                 const terms = Array.isArray(data.lexical_terms) && data.lexical_terms.length ? ` · Terms: ${data.lexical_terms.slice(0, 3).join(", ")}` : "";
-                text = `Transforming queries for high-precision anchoring${terms}`;
+                text = `Transforming queries for high-precision anchoring${queries}${terms}`;
             } else if (step === "passive_insufficient") {
                 text = `Initial layer pass incomplete (score: ${data.passive_score || 0}) · Deepening search`;
             } else if (step === "passive_sufficient") {
                 text = `Found strong match in Core layers (score: ${data.passive_score || 0})`;
             } else if (step === "memory_retrieval") {
-                text = `Retrieving memory for${queryHint} (${data.query_count || 0} queries)`;
+                const reconstructed = Array.isArray(data.reconstructed_queries) && data.reconstructed_queries.length 
+                    ? ` ("${data.reconstructed_queries[0].slice(0, 40)}...")` 
+                    : queryHint;
+                text = `Retrieving memory for${reconstructed} (${data.query_count || 0} queries)`;
             } else if (step === "temporal_widen") {
                 text = `Sparse results · Widening temporal window`;
             } else if (step === "deep_scan_triggered") {
@@ -944,13 +948,20 @@ class WeaveApp {
         this.pushMessageToActiveChat('assistant', bounded, retrieval, thinkingTrace);
         this.renderChatHistory();
     }
-
     appendThinkingPanel() {
-        const wrapper = document.createElement('div');
+        const wrapper = document.createElement("div");
         wrapper.innerHTML = `
             <div class="thinking-panel expanded">
-                <div class="thinking-live-label">Thinking <span class="thinking-word" id="thinking-word-live">...</span></div>
-                <div class="thinking-step-label"></div>
+                <div class="discovery-orbit">
+                    <div class="orbit-core"></div>
+                    <div class="orbit-satellite s1"></div>
+                    <div class="orbit-satellite s2"></div>
+                    <div class="orbit-satellite s3"></div>
+                </div>
+                <div class="thinking-content-labels">
+                    <div class="thinking-live-label">Thinking <span class="thinking-word" id="thinking-word-live">...</span></div>
+                    <div class="thinking-step-label"></div>
+                </div>
             </div>
         `;
         const panel = wrapper.firstElementChild;

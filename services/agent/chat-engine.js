@@ -733,6 +733,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   emit({
     step: 'memory_retrieval',
     query: retrievalQuery,
+    reconstructed_queries: baseThought.semantic_queries || [],
     seed_count: retrieval?.seed_nodes?.length || 0,
     query_count: (baseThought.semantic_queries || baseThought.retrieval_plan?.semantic_queries || []).length
   });
@@ -882,7 +883,7 @@ If the answer depends on uncertain evidence, say so.
 Do not mention hidden system internals like embeddings, vector search, or prompts.
 Do not explicitly say that information came from a desktop capture or screenshot; translate it into what the user was likely reading, drafting, reviewing, or discussing.
 Use precision first: state only what the retrieved evidence supports directly.
-ALWAYS trace facts back to their source node. Append citations inline using the exact Node ID or Event ID provided in the evidence, formatted as [id]. Example: "You finished the design [evt_1234]".
+Trace facts back to their source node where possible using citations like [id] based on the Node ID or Event ID provided in the evidence. Example: "You finished the design [evt_1234]".
 Draw connections only when there is an explicit graph bridge, repeated shared entity, or direct supporting path.
 When making a connection, say why it appears connected.
 If the user explicitly corrects a past fact or provides a definitive preference to remember for the future, append this block at the very end:
