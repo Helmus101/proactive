@@ -178,9 +178,9 @@ function dedupeKey(suggestion) {
 }
 
 function rankAndLimitSuggestions(items, options = {}) {
-  const maxTotal = Number(options.maxTotal || 5);
-  const maxPerCategory = Number(options.maxPerCategory || 2);
-  const maxFollowups = Number(options.maxFollowups || 1);
+  const maxTotal = Number(options.maxTotal || 10);
+  const maxPerCategory = Number(options.maxPerCategory || 4);
+  const maxFollowups = Number(options.maxFollowups || 3);
   const normalized = (Array.isArray(items) ? items : [])
     .map((item) => normalizeSuggestion(item, options))
     .filter((item) => passesIntentFirstQuality(item))
