@@ -56,6 +56,7 @@ class WeaveApp {
         window.electronAPI.onVoiceCommandToggle?.((payload) => this.handleVoiceCommandToggle(payload));
         window.electronAPI.onVoiceSessionUpdate?.((payload) => this.handleVoiceSessionUpdate(payload));
         await this.loadInitialData();
+        setInterval(() => this.updateChatSyncStatus(), 10000);
     }
 
     cacheDom() {
@@ -753,6 +754,28 @@ class WeaveApp {
         return `${pct}% intent confidence`;
     }
 
+
+    async updateChatSyncStatus() {
+        const statusEl = document.getElementById('chat-sync-status');
+        if (!statusEl) return;
+
+        try {
+            const status = await window.electronAPI.getMemoryGraphStatus();
+            const isSyncing = status?.episodeStatus === 'running' || status?.syncStatus === 'running';
+            const textEl = statusEl.querySelector('.sync-text');
+            
+            if (isSyncing) {
+                statusEl.classList.add('syncing');
+                if (textEl) textEl.textContent = 'Syncing memory...';
+            } else {
+                statusEl.classList.remove('syncing');
+                if (textEl) textEl.textContent = 'Memory synced';
+            }
+        } catch (e) {
+            console.warn('Failed to update sync status:', e);
+        }
+    }
+
     async setupChat() {
         this.chatSessions = await this.loadChatSessions();
         const sorted = [...this.chatSessions].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
@@ -775,6 +798,7 @@ class WeaveApp {
 
         this.renderChatHistory();
         this.renderActiveChat();
+        this.updateChatSyncStatus();
     }
 
     async sendChatMessage() {
@@ -796,6 +820,7 @@ class WeaveApp {
         this.pushMessageToActiveChat('user', message);
         this.renderChatHistory();
         this.renderActiveChat();
+        this.updateChatSyncStatus();
         this.chatInput.value = '';
         this.chatInput.style.height = '44px';
 
@@ -808,17 +833,22 @@ class WeaveApp {
             let text = '';
             if (step === 'query_analysis') {
                 const scope = data.time_scope && data.time_scope !== 'all_time' ? ` · ${data.time_scope}` : '';
-                text = `Analyzing query · ${data.strategy_mode || 'memory'}${scope}`;
+                const queries = Array.isArray(data.queries) && data.queries.length ? ` (${data.queries.slice(0, 2).join(', ')}...)` : '';
+                text = `Reconstructing query angles${queries} · ${data.strategy_mode || 'memory'}${scope}`;
+            } else if (step === 'passive_insufficient') {
+                text = `Initial layer pass incomplete (score: ${data.passive_score || 0}) · Deepening search`;
+            } else if (step === 'passive_sufficient') {
+                text = `Found strong match in Core layers (score: ${data.passive_score || 0})`;
             } else if (step === 'memory_retrieval') {
-                text = `Searching memory · ${data.query_count || 0} queries`;
+                text = `Retrieving from ${data.query_count || 0} reconstructed queries`;
             } else if (step === 'temporal_widen') {
-                text = `Widening time window`;
+                text = `Sparse results · Widening temporal window`;
             } else if (step === 'graph_expansion') {
-                text = `Expanding graph · ${data.expanded_count || 0} nodes`;
+                text = `Walking Knowledge Graph · ${data.expanded_count || 0} related nodes`;
             } else if (step === 'web_search') {
-                text = `Searching web`;
+                text = `Consulting external web sources`;
             } else if (step === 'composing') {
-                text = `Composing answer...`;
+                text = `Synthesizing final answer...`;
             }
             if (text) label.textContent = text;
             this.scrollChatToBottom();
@@ -1186,6 +1216,7 @@ class WeaveApp {
         this.saveChatSessions();
         this.renderChatHistory();
         this.renderActiveChat();
+        this.updateChatSyncStatus();
         this.chatInput?.focus();
         return chat;
     }
@@ -1194,6 +1225,7 @@ class WeaveApp {
         this.activeChatId = null;
         this.renderChatHistory();
         this.renderActiveChat();
+        this.updateChatSyncStatus();
         this.chatInput?.focus();
     }
 
@@ -1202,6 +1234,7 @@ class WeaveApp {
         this.activeChatId = chatId;
         this.renderChatHistory();
         this.renderActiveChat();
+        this.updateChatSyncStatus();
 
         // Respond to main process requests to flush chat sessions to memory
         if (window.electronAPI && window.electronAPI.onMemoryGraphUpdate) {
