@@ -3737,6 +3737,8 @@ async function generateProactiveTasksFromData(userData) {
 }
 
 // Get browsing history directly from Chrome, Brave, Arc and Safari
+let safariFullDiskAccessWarned = false;
+
 async function getBrowserHistory() {
   const history = [];
 
@@ -3820,10 +3822,12 @@ async function readChromiumHistoryDB(dbPath, browserName) {
             visitCount: row.visit_count || 1,
             browser: browserName
           }));
-          try {
-            console.log(`${browserName} (${dbPath}): ${entries.length} URLs`);
-          } catch (logErr) {
-            if (String(logErr?.code || '') !== 'EIO') throw logErr;
+          if (entries.length > 0) {
+            try {
+              console.log(`${browserName} (${dbPath}): ${entries.length} URLs`);
+            } catch (logErr) {
+              if (String(logErr?.code || '') !== 'EIO') throw logErr;
+            }
           }
           resolve(entries);
         }
@@ -3910,7 +3914,10 @@ async function getSafariHistory() {
       fs.copyFileSync(safariHistoryPath, tmpPath);
     } catch (e) {
       if (e.code === 'EPERM') {
-        console.log('Skipping Safari history — Full Disk Access is required for this terminal/app.');
+        if (!safariFullDiskAccessWarned) {
+          console.log('Skipping Safari history — Full Disk Access is required for this terminal/app.');
+          safariFullDiskAccessWarned = true;
+        }
       } else {
         console.warn('Could not copy Safari history DB:', e.message);
       }
