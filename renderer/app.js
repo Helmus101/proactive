@@ -2720,7 +2720,6 @@ class WeaveApp {
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#39;');
     }
-}
 
     handleMemoryGraphUpdate(payload = {}) {
         const syncStatusEl = document.getElementById("chat-sync-status");
@@ -2761,6 +2760,7 @@ class WeaveApp {
             }
         } catch (e) { }
     }
+}
 
 document.addEventListener('DOMContentLoaded', () => {
     window.app = new WeaveApp();
