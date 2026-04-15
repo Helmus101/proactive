@@ -486,7 +486,8 @@ function buildMultiAngleQueryBundle(baseText, {
   candidateType = '',
   appScope = [],
   sourceScope = [],
-  mode = 'chat'
+  mode = 'chat',
+  deepScan = false
 } = {}) {
   const strippedNoiseTerms = extractNoiseTerms(baseText);
   const cleaned = stripEmbeddingWeakTerms(stripQuestionFormatting(baseText));
@@ -515,6 +516,7 @@ function buildMultiAngleQueryBundle(baseText, {
     surface: '',
     structural: '',
     outcome: '',
+    deep: '',
     entity: entity || '',
     extra: []
   };
@@ -539,6 +541,10 @@ function buildMultiAngleQueryBundle(baseText, {
   });
   bundle.structural = structuralCandidates[0] || [exactTokens[0] || '', candidateType || '', 'structure'].filter(Boolean).join(' ').trim();
   bundle.outcome = safeUnique([entity, ...outcomeTerms], 4).join(' ').trim() || '';
+  
+  if (deepScan) {
+    bundle.deep = safeUnique([entity, 'relationship', 'patterns', 'habits', coreState], 4).join(' ').trim();
+  }
 
   const extras = [];
   if (entity && coreState) uniquePush(extras, `${entity} ${coreState}`, 3);
@@ -548,6 +554,8 @@ function buildMultiAngleQueryBundle(baseText, {
 
   const semanticQueries = [];
   const lensQueries = [bundle.literal, bundle.technical, bundle.conceptual, bundle.surface, bundle.structural];
+  if (bundle.deep) lensQueries.push(bundle.deep);
+  
   // 5-lens default, then fill with precise extras up to max.
   lensQueries.forEach((query) => uniquePush(semanticQueries, query, max));
   if (cleanedExact.length >= 4) uniquePush(semanticQueries, cleanedExact, max);
@@ -782,12 +790,16 @@ function buildRetrievalThought({
   const webGate = inferWebGate(query || mergedText);
   const preferredSourceTypes = inferPreferredSourceTypes(mergedText || query, candidateType);
   const hardSourceTypes = inferHardSourceTypes(mergedText || query, candidateType);
+  
+  const requiresDeepContext = /\b(relationship|pattern|habit|preference|long-term|study habits|multi-hop|recurring|theme|trend|habitual|regularly|typical)\b/i.test(mergedText || query);
+
   const structuredQueries = buildMultiAngleQueryBundle(mergedText || query, {
     max: 7,
     candidateType,
     appScope: apps,
     sourceScope: hardSourceTypes || preferredSourceTypes || [],
-    mode
+    mode,
+    deepScan: requiresDeepContext
   });
   let semanticQueries = Array.isArray(structuredQueries?.semantic_queries) && structuredQueries.semantic_queries.length
     ? structuredQueries.semantic_queries
