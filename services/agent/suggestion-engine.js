@@ -164,7 +164,7 @@ module.exports = {
 };
 
 function isConcreteActionLabel(text = '') {
-  return /\b(open|draft|reply|send|prepare|review|confirm|research|finish|complete|schedule|summarize|update|submit|resolve|fix|call|book|share|close|ship)\b/i.test(String(text || ''));
+  return /\b(open|draft|reply|send|prepare|review|confirm|research|finish|complete|schedule|summarize|update|submit|resolve|fix|call|book|share|wish|check\s*in|reconnect)\b/i.test(String(text || ''));
 }
 
 function firstEvidenceLine(evidence = []) {
@@ -247,11 +247,15 @@ function actionLabelForTitle(title = '') {
 
 function normalizeSuggestionType(value = '', fallbackText = '') {
   const raw = String(value || '').toLowerCase().trim();
-  if (raw === 'study' || raw === 'relationship') return raw;
+  const valid = ['study', 'relationship', 'work', 'personal', 'creative', 'followup'];
+  if (valid.includes(raw)) return raw;
   const hay = `${raw} ${String(fallbackText || '').toLowerCase()}`;
   if (/\bstudy|quiz|exam|class|assignment|homework|lecture|review|flashcard|vocab\b/.test(hay)) return 'study';
   if (/\brelationship|follow ?up|reply|check-?in|reconnect|birthday|anniversary|friend|mentor|alex|maya|sam|leo\b/.test(hay)) return 'relationship';
-  return 'study';
+  if (/\bwork|project|client|meeting|presentation|proposal|deadline|task|job\b/.test(hay)) return 'work';
+  if (/\bpersonal|home|health|fitness|hobby|family|bill|shopping\b/.test(hay)) return 'personal';
+  if (/\bcreative|design|writing|art|music|video|ideation|brainstorm\b/.test(hay)) return 'creative';
+  return 'work';
 }
 
 function normalizeTimeAnchor(value = '') {
@@ -622,25 +626,23 @@ async function generateTopTodosFromMemoryQuery(llmConfig, options = {}) {
 
   const standingNotes = String(options?.standing_notes || '').trim();
   const phase1Prompt = `
-You are deciding next actions from memory.
-First ask memory this question: "What are the top five things to do now?"
-Then return exactly 5 AI-generated considerations as a strict JSON array of plain strings.
+  You are deciding next actions from memory.
+  First ask memory this question: "What are the top five things to do now?"
+  Then return exactly 5 AI-generated considerations as a strict JSON array of plain strings.
 
-Return strict JSON array of strings only:
-[
+  Return strict JSON array of strings only:
+  [
   "Action 1 description based on context",
   "Action 2 description based on context",
   "Action 3 description based on context",
   "Action 4 description based on context",
   "Action 5 description based on context"
-]
+  ]
 
-RULES:
-- Use only STANDING NOTES + MEMORY EVIDENCE + GRAPH EDGES.
-- Suggestion domains are ONLY:
-  - study (review due, weak concept, unfinished session, deadline risk)
-  - relationship (follow-up, check-in, reply needed, reconnect, milestone)
-- Prefer semantic tasks and insight-backed actions over raw-event cleanup.
+  RULES:
+  - Use only STANDING NOTES + MEMORY EVIDENCE + GRAPH EDGES.
+  - Instruct the LLM to look for any relevant tasks or follow-ups in the retrieved memory evidence.
+  - Prefer semantic tasks and insight-backed actions over raw-event cleanup.
 
 STANDING NOTES:
 ${standingNotes || 'None'}
@@ -668,13 +670,13 @@ Now generate final proactive suggestions in this exact internal template:
 Format them exactly into the following strict JSON array:
 [
   {
-    "type": "study|relationship",
+    "type": "work|followup|study|personal|creative|relationship",
     "title": "single concrete action",
     "reason": "why now in one sentence",
     "description": "optional short context",
     "outcome": "one clear expected outcome",
     "evidence": ["memory_id_or_event_id"],
-    "time_anchor": "today|this week|before tomorrow's class|now",
+    "time_anchor": "today|this week|now",
     "priority": "low|medium|high",
     "confidence": 0.0,
     "primary_action": "button label",
@@ -685,7 +687,7 @@ Format them exactly into the following strict JSON array:
 ]
 
 Rules:
-- Allowed suggestion types are only: study, relationship.
+- Allowed suggestion types include work, followup, study, personal, creative, relationship.
 - Keep titles imperative and specific.
 - Every title must name a concrete target (person/topic/task/artifact/deadline).
 - One suggestion = one job only.
@@ -706,7 +708,7 @@ Rules:
       title: cleanSingleActionTitle(raw?.title || ''),
       description: raw?.description || '',
       reason: raw?.reason || '',
-      category: normalizeSuggestionType(raw?.type || raw?.category || '', `${raw?.title || ''} ${raw?.reason || ''}`) === 'relationship' ? 'followup' : 'study',
+      category: normalizeSuggestionType(raw?.type || raw?.category || '', `${raw?.title || ''} ${raw?.reason || ''}`),
       priority: raw?.priority || 'medium',
       confidence: Number(raw?.confidence || 0.58),
       created_at: new Date(now).toISOString()
@@ -736,7 +738,7 @@ Rules:
       description: normalized.description || normalized.intent || '',
       reason: normalized.reason || 'Because current memory signals show this specific action is due now.',
       outcome,
-      category: suggestionType === 'relationship' ? 'followup' : 'study',
+      category: suggestionType === 'relationship' ? 'followup' : suggestionType,
       priority: normalized.priority || 'medium',
       confidence: Number(normalized.confidence || 0.58),
       time_anchor: timeAnchor,
@@ -777,7 +779,7 @@ Rules:
       secondary_action: String(raw?.secondary_action || '').trim() || null,
       ai_generated: true,
       ai_doable: false,
-      action_type: suggestionType === 'relationship' ? 'relationship_followup' : 'study_review',
+      action_type: suggestionType === 'relationship' ? 'relationship_followup' : `${suggestionType}_review`,
       execution_mode: 'manual',
       assignee: 'human',
       source: 'memory-query-top5',
@@ -794,7 +796,6 @@ Rules:
 
   const filteredBuilt = built
     .filter((item) => item?.title && item?.reason)
-    .filter((item) => ['study', 'relationship'].includes(String(item.type || '').toLowerCase()))
     .filter((item) => !isWeakTitle(item.title))
     .filter((item) => Array.isArray(item.evidence) && item.evidence.length > 0)
     .slice(0, 5);
@@ -842,7 +843,7 @@ Rules:
   description (optional),
   reason (one sentence grounded in memory),
   time_anchor (optional, e.g. "now" or "today 10:00"),
-  category (optional: work|followup|study|personal),
+  category (optional: work|followup|study|personal|creative|relationship),
   priority (optional: low|medium|high).
 - Return strict JSON only.
 
