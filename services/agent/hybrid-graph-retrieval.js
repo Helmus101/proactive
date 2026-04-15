@@ -14,13 +14,13 @@ const DEFAULT_HOP_LIMIT = 2;
 const MAX_EXPANDED = 10;
 
 const LAYER_RANKS = {
-  'core': 4,
-  'insight': 3,
+  'core': 5,
+  'insight': 4,
   'cloud': 3,
   'semantic': 2,
   'episode': 1,
-  'event': 0,
-  'raw_event': 0
+  'raw': 0,
+  'event': 0
 };
 
 const EDGE_WEIGHTS = {
@@ -361,7 +361,7 @@ async function lexicalSearchDocs(terms = [], filters = {}) {
         content_type: metadata.content_type || metadata.envelope?.metadata?.content_type || null,
         uncertainty: metadata.capture_uncertainty || metadata.envelope?.metadata?.capture_uncertainty || null,
         source_refs: metadata.source_refs || [],
-        base_score: 1 / (1 + Math.max(0, Number(row.bm25_score || 0))),
+        base_score: 1 / (1 + Math.exp(Number(row.bm25_score || 0))),
         match_reason: `lexical:${terms.join(',')}`
       };
     })
@@ -501,12 +501,47 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
   return { expandedNodes: expanded, edgePaths };
 }
 
+function alphaBlendedSearch(lexicalRanking, semanticRankings, alpha = 0.45) {
+  const scores = new Map();
+  const allSemantic = [].concat(...semanticRankings);
+  const keys = new Set([
+    ...lexicalRanking.map((r) => r.key),
+    ...allSemantic.map((r) => r.key)
+  ]);
+
+  for (const key of keys) {
+    const lex = lexicalRanking.find((r) => r.key === key);
+    const sem = allSemantic.filter((r) => r.key === key).sort((a, b) => b.base_score - a.base_score)[0];
+
+    const sScore = sem ? sem.base_score : 0;
+    const lScore = lex ? lex.base_score : 0;
+
+    // Alpha-blending: sScore is cosine (0-1), lScore is normalized BM25 (0-1)
+    const combined = (alpha * sScore) + ((1 - alpha) * lScore);
+
+    if (combined > 0) {
+      scores.set(key, {
+        row: sem || lex,
+        score: combined
+      });
+    }
+  }
+
+  return Array.from(scores.values())
+    .map((item) => ({
+      ...item.row,
+      fused_score: Number(item.score.toFixed(6))
+    }))
+    .sort((a, b) => b.fused_score - a.fused_score);
+}
+
 async function buildHybridGraphRetrieval({
   query,
   options = {},
   seedLimit = DEFAULT_SEED_LIMIT,
   hopLimit = DEFAULT_HOP_LIMIT,
-  recursionDepth = 0
+  recursionDepth = 0,
+  passiveOnly = false
 } = {}) {
   const basePlan = options.retrieval_thought || buildRetrievalThought({
     query,
@@ -537,40 +572,39 @@ async function buildHybridGraphRetrieval({
   };
 
   const nodeRows = await loadMemoryNodeCandidates(retrievalPlan.filters);
-  const lexicalRanking = await lexicalSearchDocs(retrievalPlan.lexical_terms || [], retrievalPlan.filters);
+  
+  let finalNodeRows = nodeRows;
+  let finalFilters = retrievalPlan.filters;
+
+  if (passiveOnly) {
+    const passiveLayers = ['core', 'insight', 'cloud'];
+    finalNodeRows = nodeRows.filter(r => passiveLayers.includes(r.layer));
+    finalFilters = { ...finalFilters, passive_only: true };
+  }
+
+  const lexicalRanking = await lexicalSearchDocs(retrievalPlan.lexical_terms || [], finalFilters);
   const semanticRankings = retrievalPlan.mode === 'queryless'
     ? []
-    : await vectorSearchNodes(nodeRows, retrievalPlan.semantic_queries || retrievalPlan.search_queries || []);
-  const coreRanking = await coreDownRanking(nodeRows, retrievalPlan, 80);
-  const recencyRanking = retrievalPlan.mode === 'queryless'
+    : await vectorSearchNodes(finalNodeRows, retrievalPlan.semantic_queries || retrievalPlan.search_queries || []);
+  const coreRanking = await coreDownRanking(finalNodeRows, retrievalPlan, 80);
+  const recencyRanking = (retrievalPlan.mode === 'queryless' && !passiveOnly)
     ? await querylessRecentDocs(retrievalPlan.filters, 24)
     : [];
 
-  const entryMode = String(retrievalPlan.entry_mode || 'hybrid');
-  const rankingPool = [];
-  if (entryMode === 'core_first') {
-    rankingPool.push(coreRanking, lexicalRanking, ...semanticRankings, recencyRanking);
-  } else if (entryMode === 'query_first') {
-    rankingPool.push(lexicalRanking, ...semanticRankings, coreRanking, recencyRanking);
-  } else {
-    rankingPool.push(lexicalRanking, ...semanticRankings, coreRanking, recencyRanking);
-  }
-
-  let fused = reciprocalRankFusion(rankingPool.filter((ranking) => Array.isArray(ranking) && ranking.length));
+  const alpha = options.alpha !== undefined ? options.alpha : 0.45;
+  let fused = alphaBlendedSearch(lexicalRanking, [...semanticRankings, coreRanking, recencyRanking], alpha);
 
   // Recursive Retrieval Pass
-  if (recursionDepth > 0) {
+  if (recursionDepth > 0 && !passiveOnly) {
     const anchorNodes = fused
-      .filter(row => (row.layer === 'core' || row.layer === 'insight') && row.base_score > 0.6)
+      .filter(row => (row.layer === 'core' || row.layer === 'insight') && row.fused_score > 0.6)
       .slice(0, 3);
     
     if (anchorNodes.length > 0) {
       const recursionQueries = anchorNodes.map(node => node.text.slice(0, 300));
-      const recursionRankings = await vectorSearchNodes(nodeRows, recursionQueries);
+      const recursionRankings = await vectorSearchNodes(finalNodeRows, recursionQueries);
       if (recursionRankings.length > 0) {
-        // Add recursion results to ranking pool and re-fuse
-        rankingPool.push(...recursionRankings);
-        fused = reciprocalRankFusion(rankingPool.filter((ranking) => Array.isArray(ranking) && ranking.length));
+        fused = alphaBlendedSearch(lexicalRanking, [...semanticRankings, ...recursionRankings, coreRanking, recencyRanking], alpha);
       }
     }
   }

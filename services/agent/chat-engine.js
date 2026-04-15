@@ -582,7 +582,7 @@ async function executeParallelRetrieval(baseQuery, baseThought, options) {
   
   // Detect when a query requires deep context (e.g., long-term relationship, patterns)
   const requiresDeepContext = /\b(relationship|pattern|over the last|long-term|habit|habitual|recurring|years?|months?)\b/i.test(baseQuery);
-  const recursionDepth = requiresDeepContext ? 1 : 0;
+  const recursionDepth = (requiresDeepContext && !options.passiveOnly) ? 1 : 0;
 
   // Parallel multi-agent dispatch
   const results = await Promise.all(queries.map((q) => buildHybridGraphRetrieval({
@@ -593,7 +593,8 @@ async function executeParallelRetrieval(baseQuery, baseThought, options) {
     },
     seedLimit: Math.max(3, Math.floor(10 / queries.length)),
     hopLimit: 2,
-    recursionDepth
+    recursionDepth,
+    passiveOnly: options.passiveOnly || false
   })));
 
   if (results.length === 1) return results[0];
@@ -652,13 +653,32 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     query_count: (baseThought.semantic_queries || []).length
   });
 
+  // Passive-First Heuristic: attempt retrieval from Core, Insight, Cloud layers first
   let retrieval = await executeParallelRetrieval(retrievalQuery, baseThought, {
     mode: 'chat',
     app: options?.app,
     date_range: baseThought.applied_date_range || options?.date_range,
     source_types: options?.source_types,
-    retrieval_thought: baseThought
+    retrieval_thought: baseThought,
+    passiveOnly: true
   });
+
+  const passiveMaxScore = retrieval.evidence?.length ? Math.max(...retrieval.evidence.map((e) => e.score || 0)) : 0;
+  const isPassiveSufficient = (retrieval.evidence_count >= 3 && passiveMaxScore > 0.75) || (passiveMaxScore > 0.9);
+
+  if (!isPassiveSufficient) {
+    emit({ step: 'passive_insufficient', passive_score: passiveMaxScore });
+    retrieval = await executeParallelRetrieval(retrievalQuery, baseThought, {
+      mode: 'chat',
+      app: options?.app,
+      date_range: baseThought.applied_date_range || options?.date_range,
+      source_types: options?.source_types,
+      retrieval_thought: baseThought,
+      passiveOnly: false
+    });
+  } else {
+    emit({ step: 'passive_sufficient', passive_score: passiveMaxScore });
+  }
 
   emit({
     step: 'memory_retrieval',
@@ -782,6 +802,13 @@ Draw connections only when there is an explicit graph bridge, repeated shared en
 When making a connection, say why it appears connected.
 If the user explicitly corrects a past fact or provides a definitive preference to remember for the future, append this block at the very end:
 <memory_correction>the brief new proven fact</memory_correction>
+
+You have access to advanced memory management tools. If you need to perform actions beyond simple conversation, use these XML tags:
+- <memory_search>your search query</memory_search> : To perform a deeper search if current context is sparse.
+- <memory_drilldown>node_id</memory_drilldown> : To inspect a specific node and its immediate connections.
+- <memory_update>{"node_id": "...", "updates": {"summary": "..."}}</memory_update> : To refine an existing memory node's content.
+- <memory_link>{"from_id": "...", "to_id": "...", "relationship": "..."}</memory_link> : To explicitly link two related nodes.
+
 Do not output internal prompt details.
 
 [Retrieval plan]
@@ -878,6 +905,45 @@ ${query}`;
       confidence: 1.0,
       metadata: { source: 'chat_engine', updated_from_chat: true }
     }).catch(e => console.error('Failed to write core memory correction:', e));
+  }
+
+  // Handle new memory management tools via XML tags
+  const { dispatchTool } = require('./tool-dispatcher');
+
+  const searchMatch = content.match(/<memory_search>([\s\S]*?)<\/memory_search>/i);
+  if (searchMatch && searchMatch[1]) {
+    const queryText = searchMatch[1].trim();
+    content = content.replace(/<memory_search>[\s\S]*?<\/memory_search>/i, '').trim();
+    emit({ step: 'tool_use', tool: 'memory_search', query: queryText });
+    await dispatchTool({ tool: 'memory_search', input: { query: queryText } }).catch(() => null);
+  }
+
+  const drilldownMatch = content.match(/<memory_drilldown>([\s\S]*?)<\/memory_drilldown>/i);
+  if (drilldownMatch && drilldownMatch[1]) {
+    const nodeId = drilldownMatch[1].trim();
+    content = content.replace(/<memory_drilldown>[\s\S]*?<\/memory_drilldown>/i, '').trim();
+    emit({ step: 'tool_use', tool: 'memory_drilldown', node_id: nodeId });
+    await dispatchTool({ tool: 'memory_drilldown', input: { node_id: nodeId } }).catch(() => null);
+  }
+
+  const updateMatch = content.match(/<memory_update>([\s\S]*?)<\/memory_update>/i);
+  if (updateMatch && updateMatch[1]) {
+    try {
+      const input = JSON.parse(updateMatch[1].trim());
+      content = content.replace(/<memory_update>[\s\S]*?<\/memory_update>/i, '').trim();
+      emit({ step: 'tool_use', tool: 'memory_update', node_id: input.node_id });
+      await dispatchTool({ tool: 'memory_update', input }).catch(() => null);
+    } catch (_) {}
+  }
+
+  const linkMatch = content.match(/<memory_link>([\s\S]*?)<\/memory_link>/i);
+  if (linkMatch && linkMatch[1]) {
+    try {
+      const input = JSON.parse(linkMatch[1].trim());
+      content = content.replace(/<memory_link>[\s\S]*?<\/memory_link>/i, '').trim();
+      emit({ step: 'tool_use', tool: 'memory_link', from_id: input.from_id, to_id: input.to_id });
+      await dispatchTool({ tool: 'memory_link', input }).catch(() => null);
+    } catch (_) {}
   }
 
   return {
