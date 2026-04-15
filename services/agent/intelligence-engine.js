@@ -6,7 +6,11 @@ function graphDerivation() {
   // eslint-disable-next-line global-require
   return require('./graph-derivation');
 }
-const { upsertMemoryNode, upsertMemoryEdge, upsertRetrievalDoc } = require('./graph-store');
+const { upsertMemoryNode, upsertMemoryEdge, upsertRetrievalDoc, asObj } = require('./graph-store');
+
+function uniq(items, limit = 24) {
+  return Array.from(new Set((items || []).filter(Boolean))).slice(0, limit);
+}
 
 const DEEPSEEK_ENDPOINT = 'https://api.deepseek.com/v1/chat/completions';
 const llmCache = new Map();
@@ -607,6 +611,105 @@ async function runDailyInsights(apiKey) {
   }
 }
 
+async function runLivingCoreJob(apiKey) {
+  try {
+    const insightRows = await db.allQuery(
+      `SELECT id, subtype, title, summary, canonical_text, confidence, source_refs, metadata
+       FROM memory_nodes
+       WHERE layer = 'insight' AND status = 'promoted' AND confidence >= 0.9
+       ORDER BY confidence DESC
+       LIMIT 40`
+    ).catch(() => []);
+
+    if (!insightRows.length) return [];
+
+    const insights = insightRows.map(row => ({
+      ...row,
+      metadata: (() => { try { return JSON.parse(row.metadata || '{}'); } catch (_) { return {}; } })(),
+      source_refs: (() => { try { return JSON.parse(row.source_refs || '[]'); } catch (_) { return []; } })()
+    }));
+
+    const prompt = `
+You are synthesizing the "Living Core" of a user's memory. This represents durable, long-term knowledge, core beliefs, and fundamental user context derived from repeated insights.
+
+Review the following insights and synthesize them into 1-3 "Core" nodes that represent fundamental, near-permanent truths about the user's work, interests, or identity.
+
+Return strict JSON:
+[
+  {
+    "title": "...",
+    "summary": "...",
+    "confidence": 0.0,
+    "related_insight_ids": ["..."]
+  }
+]
+
+Insights:
+${JSON.stringify(insights.map(i => ({ id: i.id, title: i.title, summary: i.summary, confidence: i.confidence })))}
+`;
+
+    const payload = await callLLM(prompt, normalizeLLMConfig(apiKey || process.env.DEEPSEEK_API_KEY || null), 0.2);
+    const rows = Array.isArray(payload) ? payload : [];
+    const created = [];
+
+    for (const item of rows) {
+      const coreId = `core_${crypto.createHash('sha1').update(`${item.title}`).digest('hex').slice(0, 16)}`;
+      const title = String(item.title).trim().slice(0, 180);
+      const summary = String(item.summary).trim().slice(0, 500);
+      const confidence = Math.max(0.9, Math.min(0.99, Number(item.confidence || 0.92)));
+      
+      const relatedInsightIds = Array.isArray(item.related_insight_ids) ? item.related_insight_ids : [];
+      const sourceRefs = uniq(insights.filter(i => relatedInsightIds.includes(i.id)).flatMap(i => i.source_refs), 100);
+
+      await upsertMemoryNode({
+        id: coreId,
+        layer: 'core',
+        subtype: 'living_core',
+        title,
+        summary,
+        canonicalText: `${title}\n${summary}`,
+        confidence,
+        status: 'active',
+        sourceRefs,
+        metadata: {
+          related_insight_ids: relatedInsightIds,
+          synthesized_at: new Date().toISOString()
+        },
+        graphVersion: 'living_core_v1'
+      });
+
+      for (const insightId of relatedInsightIds) {
+        await upsertMemoryEdge({
+          fromNodeId: insightId,
+          toNodeId: coreId,
+          edgeType: 'PROMOTED_FROM',
+          weight: confidence,
+          traceLabel: 'Insight promoted to Living Core',
+          evidenceCount: 1,
+          metadata: {}
+        });
+      }
+
+      await upsertRetrievalDoc({
+        docId: `node:${coreId}`,
+        sourceType: 'node',
+        nodeId: coreId,
+        timestamp: new Date().toISOString(),
+        text: `${title}\n${summary}`,
+        metadata: {
+          layer: 'core',
+          subtype: 'living_core'
+        }
+      });
+      created.push(coreId);
+    }
+    return created;
+  } catch (e) {
+    console.warn('[runLivingCoreJob] failed:', e?.message || e);
+    return [];
+  }
+}
+
 async function buildGlobalGraph() {
   const result = await graphDerivation().deriveGraphFromEvents({
     versionSeed: 'current'
@@ -633,5 +736,6 @@ module.exports = {
   runSemanticSummaryWindow,
   runWeeklyInsightJob,
   runDailyInsights,
+  runLivingCoreJob,
   buildGlobalGraph
 };

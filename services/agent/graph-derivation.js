@@ -695,6 +695,93 @@ function inferCaptureEpisodeSubtype(group) {
   return group.typeGroup || 'desktop';
 }
 
+function extractIdentifier(node) {
+  const title = String(node.title || '').toLowerCase().trim();
+  const subtype = node.subtype;
+  if (subtype === 'person') {
+    const emailMatch = title.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
+    if (emailMatch) return `email:${emailMatch[0]}`;
+    return `name:${title}`;
+  }
+  if (subtype === 'link') {
+    try {
+      const url = new URL(node.metadata?.url || node.title);
+      return `url:${url.origin}${url.pathname}`;
+    } catch (_) {
+      return `url:${title}`;
+    }
+  }
+  return null;
+}
+
+async function resolveCrossAppEntities(version) {
+  try {
+    const nodes = await db.allQuery(
+      `SELECT * FROM memory_nodes WHERE graph_version = ? AND layer = 'semantic'`,
+      [version]
+    ).catch(() => []);
+
+    if (!nodes.length) return;
+
+    const parsedNodes = nodes.map(n => ({
+      ...n,
+      metadata: asObj(n.metadata),
+      source_refs: asObj(n.source_refs),
+      embedding: asObj(n.embedding)
+    }));
+
+    const merged = new Map();
+    const toDelete = new Set();
+
+    for (const node of parsedNodes) {
+      const iden = extractIdentifier(node);
+      if (!iden) continue;
+
+      if (merged.has(iden)) {
+        const existing = merged.get(iden);
+        // Merge!
+        existing.source_refs = uniq([...(existing.source_refs || []), ...(node.source_refs || [])], 100);
+        existing.confidence = Math.max(existing.confidence, node.confidence);
+        // Keep the more descriptive title/summary
+        if (String(node.summary || '').length > String(existing.summary || '').length) {
+          existing.summary = node.summary;
+          existing.title = node.title;
+        }
+        toDelete.add(node.id);
+        
+        // Update edges
+        await db.runQuery(
+          `UPDATE memory_edges SET from_node_id = ? WHERE from_node_id = ?`,
+          [existing.id, node.id]
+        );
+        await db.runQuery(
+          `UPDATE memory_edges SET to_node_id = ? WHERE to_node_id = ?`,
+          [existing.id, node.id]
+        );
+      } else {
+        merged.set(iden, node);
+      }
+    }
+
+    // Update merged nodes and delete duplicates
+    for (const node of merged.values()) {
+      await upsertMemoryNode({
+        ...node,
+        sourceRefs: node.source_refs,
+        graphVersion: version
+      });
+    }
+
+    if (toDelete.size > 0) {
+      const placeholders = Array.from(toDelete).map(() => '?').join(',');
+      await db.runQuery(`DELETE FROM memory_nodes WHERE id IN (${placeholders})`, Array.from(toDelete));
+      await db.runQuery(`DELETE FROM retrieval_docs WHERE node_id IN (${placeholders})`, Array.from(toDelete));
+    }
+  } catch (e) {
+    console.warn('[resolveCrossAppEntities] failed:', e?.message || e);
+  }
+}
+
 async function writeEpisodeGroup(group, version) {
   const baseSubtype = group.typeGroup === 'desktop'
     ? inferCaptureEpisodeSubtype(group)
@@ -1066,6 +1153,8 @@ async function deriveGraphFromEvents({ eventIds = null, since = null, limit = 80
       }
     });
   }
+
+  await resolveCrossAppEntities(version);
 
   await logGraphVersion(version, 'completed', {
     envelope_count: envelopes.length,
