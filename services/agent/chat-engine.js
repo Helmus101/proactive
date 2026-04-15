@@ -233,6 +233,36 @@ function buildPriorityEvidenceLines(retrieval, drilldownEvidence = [], limit = 6
   return lines.slice(0, limit);
 }
 
+function buildGroundedFallbackAnswer(query, retrieval, drilldownEvidence = []) {
+  const lines = [];
+  const topEvidence = (retrieval?.evidence || []).slice(0, 5);
+  if (topEvidence.length) {
+    lines.push('Here is what I found in your memory:');
+    for (const ev of topEvidence) {
+      const snippet = String(ev.text || ev.title || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+      if (!snippet) continue;
+      const id = ev.id || ev.node_id || ev.event_id || 'memory';
+      lines.push(`- ${snippet} [${id}]`);
+    }
+  }
+
+  const raw = (drilldownEvidence || []).slice(0, 2);
+  if (raw.length) {
+    lines.push('');
+    lines.push('Raw supporting details:');
+    for (const item of raw) {
+      const id = item.id || 'event';
+      const snippet = String(item.text || '').replace(/\s+/g, ' ').trim().slice(0, 220);
+      lines.push(`- ${snippet} [${id}]`);
+    }
+  }
+
+  if (!lines.length) {
+    return "I couldn't find enough concrete memory evidence to answer that accurately. If you give me a timeframe or keyword, I'll run a deeper scan.";
+  }
+  return lines.join('\n');
+}
+
 async function fetchSourceLabels(refs = [], evidence = []) {
   const ids = uniq(refs, 16);
   const labels = [];
@@ -925,21 +955,32 @@ ${recentEpisodes.map((item) => `- ${item.title}: ${item.summary || ''}`).join('\
 [User question]
 ${query}`;
 
-  const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      model: 'deepseek-chat',
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.22,
-      max_tokens: 980
-    })
-  });
-  const data = await response.json().catch(() => ({}));
-  let content = data?.choices?.[0]?.message?.content || "I couldn't produce an answer from the current memory context.";
+  let content = "I couldn't produce an answer from the current memory context.";
+  try {
+    const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: 'deepseek-chat',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.22,
+        max_tokens: 980
+      })
+    });
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      throw new Error(`LLM request failed (${response.status})${body ? `: ${body.slice(0, 180)}` : ''}`);
+    }
+    const data = await response.json().catch(() => ({}));
+    content = data?.choices?.[0]?.message?.content || content;
+  } catch (llmError) {
+    emit({ step: 'llm_fallback', reason: String(llmError?.message || llmError) });
+    content = buildGroundedFallbackAnswer(query, retrieval, drilldownEvidence);
+  }
 
   const correctionMatch = content.match(/<memory_correction>([\s\S]*?)<\/memory_correction>/i);
   if (correctionMatch && correctionMatch[1]) {
