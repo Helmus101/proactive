@@ -478,27 +478,34 @@ function buildCloudCandidates(episodes) {
 
   for (const episode of episodes) {
     const people = uniq(episode.participants || [], 10);
-    const tasks = uniq((episode.semanticNodes || []).filter((node) => node.subtype === 'task').map((node) => node.title), 10);
+    const semanticNodes = episode.semanticNodes || [];
+    const tasks = uniq(semanticNodes.filter((node) => node.subtype === 'task').map((node) => node.title), 10);
     const topics = uniq([...(episode.topics || []), ...(episode.domains || [])], 10);
 
     for (const person of people) {
       const key = `person:${person.toLowerCase()}`;
-      const prev = personMentions.get(key) || { label: person, episodes: [] };
+      const prev = personMentions.get(key) || { label: person, episodes: [], semanticNodeIds: [] };
       prev.episodes.push(episode);
+      const semNode = semanticNodes.find(n => n.subtype === 'person' && n.title === person);
+      if (semNode) prev.semanticNodeIds.push(semNode.id);
       personMentions.set(key, prev);
     }
 
     for (const task of tasks) {
       const key = `task:${task.toLowerCase()}`;
-      const prev = taskMentions.get(key) || { label: task, episodes: [] };
+      const prev = taskMentions.get(key) || { label: task, episodes: [], semanticNodeIds: [] };
       prev.episodes.push(episode);
+      const semNode = semanticNodes.find(n => n.subtype === 'task' && n.title === task);
+      if (semNode) prev.semanticNodeIds.push(semNode.id);
       taskMentions.set(key, prev);
     }
 
     for (const topic of topics) {
       const key = `topic:${topic.toLowerCase()}`;
-      const prev = topicMentions.get(key) || { label: topic, episodes: [] };
+      const prev = topicMentions.get(key) || { label: topic, episodes: [], semanticNodeIds: [] };
       prev.episodes.push(episode);
+      const semNode = semanticNodes.find(n => (n.subtype === 'fact' || n.subtype === 'link') && n.title === topic);
+      if (semNode) prev.semanticNodeIds.push(semNode.id);
       topicMentions.set(key, prev);
     }
   }
@@ -535,6 +542,7 @@ function deriveClouds(episodes) {
         anchor_date: isoFromTs(anchor)?.slice(0, 10) || null,
         latest_activity_at: isoFromTs(latest),
         supporting_episode_ids: item.episodes.map((ep) => ep.id),
+        supporting_semantic_ids: uniq(item.semanticNodeIds),
         repeated_count: item.episodes.length
       }
     });
@@ -566,6 +574,7 @@ function deriveClouds(episodes) {
         anchor_date: isoFromTs(anchor)?.slice(0, 10) || null,
         latest_activity_at: isoFromTs(latest),
         supporting_episode_ids: item.episodes.map((ep) => ep.id),
+        supporting_semantic_ids: uniq(item.semanticNodeIds),
         repeated_count: item.episodes.length
       }
     });
@@ -592,6 +601,7 @@ function deriveClouds(episodes) {
         anchor_date: isoFromTs(anchor)?.slice(0, 10) || null,
         latest_activity_at: isoFromTs(latest),
         supporting_episode_ids: item.episodes.map((ep) => ep.id),
+        supporting_semantic_ids: uniq(item.semanticNodeIds),
         repeated_count: item.episodes.length
       }
     });
@@ -860,7 +870,7 @@ async function writeEpisodeGroup(group, version) {
 
     await upsertMemoryNode({
       id: rawNodeId,
-      layer: 'raw_event',
+      layer: 'raw',
       subtype: event.type_group || 'event',
       title: rawTitle,
       summary: rawSummary || 'Raw captured event',
@@ -908,7 +918,7 @@ async function writeEpisodeGroup(group, version) {
       timestamp: rawTs,
       text: rawCanonical,
       metadata: {
-        layer: 'raw_event',
+        layer: 'raw',
         subtype: event.type_group || 'event',
         source_refs: uniq([event.id, event.source_ref].filter(Boolean), 8),
         graph_version: version,
@@ -947,13 +957,14 @@ async function writeEpisodeGroup(group, version) {
     await upsertMemoryEdge({
       fromNodeId: group.id,
       toNodeId: node.id,
-      edgeType: node.edge_type,
+      edgeType: 'ABSTRACTED_TO',
       weight: node.confidence,
       traceLabel: node.trace_label,
       evidenceCount: episodeData.event_count,
       metadata: {
         episode_id: group.id,
-        subtype: node.subtype
+        subtype: node.subtype,
+        original_relation: node.edge_type
       }
     });
     await upsertRetrievalDoc({
@@ -1098,6 +1109,19 @@ async function deriveGraphFromEvents({ eventIds = null, since = null, limit = 80
         weight: cloud.confidence,
         traceLabel: cloud.title,
         evidenceCount: Number(cloud.metadata?.repeated_count || 1),
+        metadata: {
+          layer: 'cloud'
+        }
+      });
+    }
+    for (const semId of cloud.metadata?.supporting_semantic_ids || []) {
+      await upsertMemoryEdge({
+        fromNodeId: semId,
+        toNodeId: cloud.id,
+        edgeType: 'ABSTRACTED_TO',
+        weight: cloud.confidence,
+        traceLabel: 'Semantic node abstracted to recurring cloud pattern',
+        evidenceCount: 1,
         metadata: {
           layer: 'cloud'
         }
