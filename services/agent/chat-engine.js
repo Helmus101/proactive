@@ -658,6 +658,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
 
   emit({
     step: 'query_analysis',
+    query: retrievalQuery,
     intent: baseThought.mode || 'semantic',
     strategy_mode: baseThought.strategy_mode || 'memory_only',
     time_scope: baseThought.time_scope?.label || 'all_time',
@@ -694,6 +695,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
 
   emit({
     step: 'memory_retrieval',
+    query: retrievalQuery,
     seed_count: retrieval?.seed_nodes?.length || 0,
     query_count: (baseThought.semantic_queries || baseThought.retrieval_plan?.semantic_queries || []).length
   });
