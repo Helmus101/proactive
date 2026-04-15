@@ -282,16 +282,25 @@ function summarizeEpisode(group) {
   const domains = uniq(group.events.map((event) => event.domain).filter(Boolean), 4);
   const topics = uniq(group.events.flatMap((event) => event.topics || []), 10);
   const apps = uniq(group.events.map((event) => event.app).filter(Boolean), 4);
+  
+  // Heuristic for better title: prefer more specific event titles
+  let bestTitle = titles[0] || `${groupForTypeGroup(group.typeGroup)} episode`;
+  if (group.typeGroup === 'communication' && participants.length > 0) {
+    const pStr = participants.slice(0, 2).join(', ');
+    bestTitle = titles.find(t => t.toLowerCase().includes('re:')) || `Conversation with ${pStr}`;
+  } else if (group.typeGroup === 'calendar') {
+    bestTitle = titles.find(t => !/calendar|meeting/i.test(t)) || titles[0] || 'Calendar Event';
+  }
+
   const summary = [
-    titles.slice(0, 2).join(' | '),
-    participants.length ? `People: ${participants.join(', ')}` : '',
-    domains.length ? `Domains: ${domains.join(', ')}` : '',
-    apps.length ? `Apps: ${apps.join(', ')}` : '',
-    `${group.events.length} source events`
+    bestTitle,
+    participants.length ? `With: ${participants.join(', ')}` : '',
+    topics.length ? `Topics: ${topics.slice(0, 3).join(', ')}` : '',
+    `${group.events.length} activity signals`
   ].filter(Boolean).join(' • ');
 
   return {
-    title: titles[0] || `${groupForTypeGroup(group.typeGroup)} episode`,
+    title: bestTitle,
     summary,
     participants,
     domains,
@@ -384,28 +393,30 @@ function deriveSemanticNodes(group, episodeData) {
       .map((line) => line.trim())
       .filter((line) => /\b(todo|follow up|reply|send|prepare|review|fix|finish|draft|schedule|confirm)\b/i.test(line))
       .filter((line) => !/^(from|to|subject|date|cc)\s*:/i.test(line))
-      .filter((line) => line.length <= 180);
+      .filter((line) => line.length <= 180)
+      .map(line => ({ line, eventId: event.id }));
   }), 8);
   for (const task of taskLines) {
     nodes.push({
-      id: `sem_${stableHash(`task|${task}|${episodeId}`)}`,
+      id: `sem_${stableHash(`task|${task.line}|${episodeId}`)}`,
       layer: 'semantic',
       subtype: 'task',
-      title: task,
+      title: task.line,
       summary: `Open task signal from ${episodeData.title}`,
-      canonical_text: task,
+      canonical_text: task.line,
       confidence: 0.63,
       status: 'open',
-      source_refs: episodeData.source_refs,
+      source_refs: [task.eventId],
       metadata: {
-        title: task,
+        title: task.line,
         completed: false,
         anchor_at: anchorIso,
         anchor_date: anchorDate,
         episode_id: episodeId,
+        source_event_id: task.eventId,
         source_type_group: episodeData.source_type_group
       },
-      trace_label: task,
+      trace_label: task.line,
       edge_type: 'GENERATED_FROM'
     });
   }
@@ -413,30 +424,31 @@ function deriveSemanticNodes(group, episodeData) {
   const decisionSignals = uniq(group.events.flatMap((event) => {
     const lower = String(event.text || '').toLowerCase();
     const hits = [];
-    if (/\bdecided\b/.test(lower)) hits.push(`Decision in ${event.app || event.source}`);
-    if (/\bapproved\b/.test(lower)) hits.push(`Approval in ${event.app || event.source}`);
-    if (/\bship(ped|ping)?\b/.test(lower)) hits.push(`Shipping mentioned in ${event.app || event.source}`);
+    if (/\bdecided\b/.test(lower)) hits.push({ text: `Decision in ${event.app || event.source}`, eventId: event.id });
+    if (/\bapproved\b/.test(lower)) hits.push({ text: `Approval in ${event.app || event.source}`, eventId: event.id });
+    if (/\bship(ped|ping)?\b/.test(lower)) hits.push({ text: `Shipping mentioned in ${event.app || event.source}`, eventId: event.id });
     return hits;
   }), 6);
   for (const decision of decisionSignals) {
     nodes.push({
-      id: `sem_${stableHash(`decision|${decision}|${episodeId}`)}`,
+      id: `sem_${stableHash(`decision|${decision.text}|${episodeId}`)}`,
       layer: 'semantic',
       subtype: 'decision',
-      title: decision,
+      title: decision.text,
       summary: `Decision signal from ${episodeData.title}`,
-      canonical_text: decision,
+      canonical_text: decision.text,
       confidence: 0.61,
       status: 'active',
-      source_refs: episodeData.source_refs,
+      source_refs: [decision.eventId],
       metadata: {
-        decision,
+        decision: decision.text,
         anchor_at: anchorIso,
         anchor_date: anchorDate,
         episode_id: episodeId,
+        source_event_id: decision.eventId,
         source_type_group: episodeData.source_type_group
       },
-      trace_label: decision,
+      trace_label: decision.text,
       edge_type: 'GENERATED_FROM'
     });
   }
@@ -653,25 +665,28 @@ function deriveSemanticGroups(episodes) {
 function deriveInsights(clouds) {
   return clouds
     .filter((cloud) => Number(cloud.confidence || 0) >= 0.8 && Number(cloud.metadata?.repeated_count || 0) >= 3)
-    .map((cloud) => ({
-      id: `ins_${stableHash(`insight|${cloud.id}`)}`,
-      layer: 'insight',
-      subtype: cloud.subtype,
-      title: cloud.title,
-      summary: cloud.summary,
-      canonical_text: cloud.canonical_text,
-      confidence: Math.min(0.95, Number(cloud.confidence || 0) + 0.08),
-      status: 'promoted',
-      source_refs: cloud.source_refs,
-      metadata: {
-        promoted_from_cloud_id: cloud.id,
-        anchor_at: cloud.metadata?.anchor_at || null,
-        anchor_date: cloud.metadata?.anchor_date || null,
-        latest_activity_at: cloud.metadata?.latest_activity_at || null,
-        supporting_episode_ids: cloud.metadata?.supporting_episode_ids || [],
-        repeated_count: cloud.metadata?.repeated_count || 0
-      }
-    }));
+    .map((cloud) => {
+      const confidence = Number(cloud.confidence || 0);
+      const isVeryHighConfidence = confidence >= 0.92 && Number(cloud.metadata?.repeated_count || 0) >= 5;
+      return {
+        id: `ins_${stableHash(`insight|${cloud.id}`)}`,
+        layer: isVeryHighConfidence ? 'core' : 'insight',
+        subtype: cloud.subtype,
+        title: cloud.title,
+        summary: cloud.summary,
+        canonical_text: cloud.canonical_text,
+        confidence: Math.min(0.95, confidence + 0.12), // Stronger confidence for promoted insights
+        status: isVeryHighConfidence ? 'trusted' : 'promoted',
+        source_refs: cloud.source_refs,
+        metadata: {
+          ...cloud.metadata,
+          promoted_from_cloud_id: cloud.id,
+          is_high_value_pattern: true,
+          is_core_truth: isVeryHighConfidence,
+          insight_derivation_at: new Date().toISOString()
+        }
+      };
+    });
 }
 
 async function embedText(text) {
@@ -1012,6 +1027,22 @@ async function writeEpisodeGroup(group, version) {
         source_type_group: episodeData.source_type_group
       }
     });
+
+    // Stronger linkage: link semantic node back to its source raw_event if possible
+    if (node.metadata?.source_event_id) {
+      const rawNodeId = `raw_${stableHash(String(node.metadata.source_event_id))}`;
+      await upsertMemoryEdge({
+        fromNodeId: rawNodeId,
+        toNodeId: node.id,
+        edgeType: 'SUPPORTED_BY',
+        weight: 0.8,
+        traceLabel: 'Semantic extraction from raw event',
+        evidenceCount: 1,
+        metadata: {
+          event_id: node.metadata.source_event_id
+        }
+      }).catch(() => {});
+    }
   }
 
   const orderedEvents = [...group.events].sort((a, b) => parseTs(a.occurred_at || a.timestamp) - parseTs(b.occurred_at || b.timestamp));
