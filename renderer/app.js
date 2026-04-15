@@ -38,7 +38,6 @@ class WeaveApp {
         this.setupSuggestions();
         await this.setupChat();
         this.setupSettings();
-        this.setupLibrary();
         window.electronAPI.onProactiveSuggestions?.((suggestions) => {
             const normalized = this.normalizeTodos(suggestions || []);
             this.todos = normalized.filter((todo) => !todo.completed);
@@ -54,11 +53,9 @@ class WeaveApp {
             this.showMorningBrief(this.activeBriefId);
         });
         window.electronAPI.onPlannerStep?.((payload) => this.handlePlannerStep(payload));
-        window.electronAPI.onMemoryGraphUpdate?.((payload) => this.handleMemoryGraphUpdate(payload));
         window.electronAPI.onVoiceCommandToggle?.((payload) => this.handleVoiceCommandToggle(payload));
         window.electronAPI.onVoiceSessionUpdate?.((payload) => this.handleVoiceSessionUpdate(payload));
         await this.loadInitialData();
-        setInterval(() => this.updateChatSyncStatus(), 10000);
     }
 
     cacheDom() {
@@ -105,11 +102,6 @@ class WeaveApp {
         this.suggestionBaseUrlInput = document.getElementById('suggestion-llm-base-url');
         this.suggestionApiKeyInput = document.getElementById('suggestion-llm-api-key');
         this.suggestionProviderStatus = document.getElementById('suggestion-llm-status');
-        this.discoveryOrbitContainer = document.getElementById('discovery-orbit-container');
-        this.discoveryOrbitLabel = document.getElementById('discovery-orbit-label');
-        this.libraryList = document.getElementById("library-list");
-        this.libraryFilters = Array.from(document.querySelectorAll("[data-lib-filter]"));
-        this.settingsGraphContainer = document.getElementById("settings-graph-container");
     }
 
     async loadInitialData() {
@@ -160,12 +152,8 @@ class WeaveApp {
             button.classList.toggle('active', button.dataset.view === viewId);
         });
 
-        if (viewId === "library-view") {
-            this.renderLibrary("all");
-        }
         if (viewId === 'chat-view') {
             this.chatInput?.focus();
-            this.renderFullMemoryGraph();
             this.scrollChatToBottom();
         }
 
@@ -189,21 +177,6 @@ class WeaveApp {
         });
         this.manualGenerateSuggestionsButton?.addEventListener('click', async () => {
             await this.generateSuggestions({ replace: true, silent: false });
-        });
-
-        // Defensive delegation fallback: if cached references are missing or listeners fail,
-        // handle clicks at document level for the common control IDs.
-        document.addEventListener('click', async (ev) => {
-            try {
-                const target = ev.target.closest && ev.target.closest('#manual-generate-suggestions-btn, #refresh-tasks-btn');
-                if (!target) return;
-                ev.preventDefault();
-                // Use the app-scoped method (arrow captures `this`)
-                await this.generateSuggestions({ replace: true, silent: false });
-            } catch (err) {
-                console.error('[Renderer] fallback generateSuggestions handler failed:', err);
-                try { this.showToast('Suggestion generation failed'); } catch (_) {}
-            }
         });
 
         this.remindersList?.addEventListener('click', async (event) => {
@@ -780,28 +753,6 @@ class WeaveApp {
         return `${pct}% intent confidence`;
     }
 
-
-    async updateChatSyncStatus() {
-        const statusEl = document.getElementById('chat-sync-status');
-        if (!statusEl) return;
-
-        try {
-            const status = await window.electronAPI.getMemoryGraphStatus();
-            const isSyncing = status?.episodeStatus === 'running' || status?.syncStatus === 'running';
-            const textEl = statusEl.querySelector('.sync-text');
-            
-            if (isSyncing) {
-                statusEl.classList.add('syncing');
-                if (textEl) textEl.textContent = 'Syncing memory...';
-            } else {
-                statusEl.classList.remove('syncing');
-                if (textEl) textEl.textContent = 'Memory synced';
-            }
-        } catch (e) {
-            console.warn('Failed to update sync status:', e);
-        }
-    }
-
     async setupChat() {
         this.chatSessions = await this.loadChatSessions();
         const sorted = [...this.chatSessions].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
@@ -824,7 +775,6 @@ class WeaveApp {
 
         this.renderChatHistory();
         this.renderActiveChat();
-        this.updateChatSyncStatus();
     }
 
     async sendChatMessage() {
@@ -846,15 +796,31 @@ class WeaveApp {
         this.pushMessageToActiveChat('user', message);
         this.renderChatHistory();
         this.renderActiveChat();
-        this.updateChatSyncStatus();
         this.chatInput.value = '';
         this.chatInput.style.height = '44px';
 
         const thinkingPanel = this.appendThinkingPanel();
-        this.triggerSearchAnimation(true);
 
         const handleChatStep = (data) => {
-            this.updateThinkingPanel(thinkingPanel, data);
+            const label = thinkingPanel.querySelector('.thinking-step-label');
+            if (!label) return;
+            const step = data?.step || '';
+            let text = '';
+            if (step === 'query_analysis') {
+                const scope = data.time_scope && data.time_scope !== 'all_time' ? ` · ${data.time_scope}` : '';
+                text = `Analyzing query · ${data.strategy_mode || 'memory'}${scope}`;
+            } else if (step === 'memory_retrieval') {
+                text = `Searching memory · ${data.query_count || 0} queries`;
+            } else if (step === 'temporal_widen') {
+                text = `Widening time window`;
+            } else if (step === 'graph_expansion') {
+                text = `Expanding graph · ${data.expanded_count || 0} nodes`;
+            } else if (step === 'web_search') {
+                text = `Searching web`;
+            } else if (step === 'composing') {
+                text = `Composing answer...`;
+            }
+            if (text) label.textContent = text;
             this.scrollChatToBottom();
         };
 
@@ -866,12 +832,10 @@ class WeaveApp {
                 chat_history: contextWindow
             });
             if (window.electronAPI?.offChatStep) window.electronAPI.offChatStep();
-            this.triggerSearchAnimation(false);
             this.finalizeThinkingPanel(thinkingPanel, response);
             await this.typeAssistantResponse(response, { includeThinkingTrace: false });
         } catch (error) {
             console.error('Chat failed:', error);
-            this.triggerSearchAnimation(false);
             if (window.electronAPI?.offChatStep) window.electronAPI.offChatStep();
             this.finalizeThinkingPanel(thinkingPanel, {
                 thinking_trace: {
@@ -936,117 +900,42 @@ class WeaveApp {
         this.pushMessageToActiveChat('assistant', bounded, retrieval, thinkingTrace);
         this.renderChatHistory();
     }
+
     appendThinkingPanel() {
-        const wrapper = document.createElement("div");
-        const bootstrapStages = [
-            {
-                step: 'routing',
-                status: 'started',
-                label: 'Routing',
-                detail: 'Preparing the retrieval pipeline.'
-            }
-        ];
+        const wrapper = document.createElement('div');
         wrapper.innerHTML = `
             <div class="thinking-panel expanded">
-                <div class="thinking-live-label">Live retrieval pipeline</div>
-                <div class="thinking-step-label">Preparing retrieval...</div>
-                <div class="thinking-timeline">${this.renderThinkingTimeline(bootstrapStages)}</div>
-                <div class="thinking-final-card"></div>
+                <div class="thinking-live-label">Thinking <span class="thinking-word" id="thinking-word-live">...</span></div>
+                <div class="thinking-step-label"></div>
             </div>
         `;
         const panel = wrapper.firstElementChild;
-        panel.__thinkingStages = bootstrapStages;
         this.chatMessages.appendChild(panel);
         this.scrollChatToBottom();
         return panel;
-    }
-
-    normalizeThinkingStage(raw) {
-        if (typeof raw === 'string') {
-            return {
-                step: raw,
-                status: 'completed',
-                label: raw.replace(/_/g, ' '),
-                detail: ''
-            };
-        }
-        if (!raw || typeof raw !== 'object') return null;
-        return {
-            step: raw.step || 'thinking',
-            status: raw.status || 'completed',
-            label: raw.label || String(raw.step || 'thinking').replace(/_/g, ' '),
-            detail: raw.detail || '',
-            counts: raw.counts || {},
-            preview_items: Array.isArray(raw.preview_items) ? raw.preview_items : []
-        };
-    }
-
-    renderThinkingTimeline(stages = []) {
-        if (!Array.isArray(stages) || !stages.length) return '';
-        return stages.map((stage) => {
-            const counts = stage?.counts && typeof stage.counts === 'object'
-                ? Object.entries(stage.counts)
-                    .filter(([, value]) => value !== null && value !== undefined && value !== 0)
-                    .slice(0, 3)
-                    .map(([key, value]) => `${this.escapeHtml(String(key).replace(/_/g, ' '))}: ${this.escapeHtml(String(value))}`)
-                    .join(' • ')
-                : '';
-            const previews = Array.isArray(stage?.preview_items)
-                ? stage.preview_items.filter(Boolean).slice(0, 3)
-                : [];
-            return `
-                <div class="thinking-timeline-row status-${this.escapeHtml(stage.status || 'completed')}">
-                    <div class="thinking-timeline-marker"></div>
-                    <div class="thinking-timeline-body">
-                        <div class="thinking-timeline-head">
-                            <span class="thinking-timeline-title">${this.escapeHtml(stage.label || stage.step || 'stage')}</span>
-                            <span class="thinking-timeline-status">${this.escapeHtml(stage.status || 'completed')}</span>
-                        </div>
-                        ${stage.detail ? `<div class="thinking-timeline-detail">${this.escapeHtml(stage.detail)}</div>` : ''}
-                        ${counts ? `<div class="thinking-timeline-meta">${counts}</div>` : ''}
-                        ${previews.length ? `<div class="thinking-timeline-preview">${previews.map((item) => `<span class="thinking-trace-chip">${this.escapeHtml(String(item))}</span>`).join('')}</div>` : ''}
-                    </div>
-                </div>
-            `;
-        }).join('');
-    }
-
-    updateThinkingPanel(panel, payload) {
-        if (!panel) return;
-        const label = panel.querySelector('.thinking-step-label');
-        const timeline = panel.querySelector('.thinking-timeline');
-        const nextStage = this.normalizeThinkingStage(payload);
-        if (!nextStage || !timeline) return;
-
-        const stages = Array.isArray(panel.__thinkingStages) ? panel.__thinkingStages.slice() : [];
-        const existingIndex = stages.findIndex((item) => item.step === nextStage.step);
-        if (existingIndex >= 0) stages[existingIndex] = { ...stages[existingIndex], ...nextStage };
-        else stages.push(nextStage);
-        panel.__thinkingStages = stages;
-
-        if (label) {
-            label.textContent = nextStage.detail || `${nextStage.label} (${nextStage.status})`;
-        }
-        timeline.innerHTML = this.renderThinkingTimeline(stages);
     }
 
     finalizeThinkingPanel(panel, payload) {
         if (!panel) return;
         const retrieval = payload?.retrieval || null;
         const thinkingTrace = payload?.thinking_trace || retrieval?.thinking_trace || null;
-        const finalCard = panel.querySelector('.thinking-final-card');
-        const stages = Array.isArray(retrieval?.stage_trace) && retrieval.stage_trace.length
-            ? retrieval.stage_trace
-            : (Array.isArray(panel.__thinkingStages) ? panel.__thinkingStages : []);
         panel.classList.add('ready');
-        const label = panel.querySelector('.thinking-step-label');
-        const timeline = panel.querySelector('.thinking-timeline');
-        if (label) label.textContent = 'Retrieval complete.';
-        if (timeline) timeline.innerHTML = this.renderThinkingTimeline(stages);
-        if (finalCard) finalCard.innerHTML = this.renderThinkingTraceCard(thinkingTrace, { ...(retrieval || {}), stage_trace: stages });
+        panel.innerHTML = this.renderThinkingTraceCard(thinkingTrace, retrieval);
         this.scrollChatToBottom();
     }
 
+    startThinkingTicker(panel, phases) {
+        const word = panel.querySelector('#thinking-word-live');
+        let idx = 0;
+        return window.setInterval(() => {
+            if (!word) return;
+            idx = (idx + 1) % phases.length;
+            word.textContent = phases[idx];
+            word.classList.remove('thinking-word');
+            void word.offsetWidth;
+            word.classList.add('thinking-word');
+        }, 460);
+    }
 
     formatAssistantOutput(rawContent) {
         const text = String(rawContent || '')
@@ -1134,32 +1023,15 @@ class WeaveApp {
         const contextQueries = Array.isArray(trace?.search_queries?.context) ? trace.search_queries.context : [];
         const messageQueries = Array.isArray(trace?.search_queries?.messages) ? trace.search_queries.messages : [];
         const lexicalTerms = Array.isArray(trace?.search_queries?.lexical) ? trace.search_queries.lexical : [];
-        const webQueries = Array.isArray(trace?.search_queries?.web) ? trace.search_queries.web : [];
         const resultHeadline = trace?.results_summary?.headline || 'No retrieval results were available.';
         const resultDetails = Array.isArray(trace?.results_summary?.details) ? trace.results_summary.details : [];
         const dataSources = Array.isArray(trace?.memory_sources) ? trace.memory_sources : (Array.isArray(trace?.data_sources) ? trace.data_sources : []);
         const webSources = Array.isArray(trace?.web_sources) ? trace.web_sources : [];
         const seedResults = Array.isArray(trace?.seed_results) ? trace.seed_results.slice(0, 4) : [];
-        const primaryNodes = Array.isArray(trace?.primary_nodes) ? trace.primary_nodes.slice(0, 4) : [];
-        const supportNodes = Array.isArray(trace?.support_nodes) ? trace.support_nodes.slice(0, 4) : [];
-        const evidenceNodes = Array.isArray(trace?.evidence_nodes) ? trace.evidence_nodes.slice(0, 4) : [];
         const expandedResults = Array.isArray(trace?.graph_expansion_results) ? trace.graph_expansion_results.slice(0, 5) : [];
         const webResults = Array.isArray(trace?.web_results_summary) ? trace.web_results_summary.slice(0, 4) : [];
         const temporalReasoning = Array.isArray(trace?.temporal_reasoning) ? trace.temporal_reasoning : [];
-        const router = trace?.router || retrieval?.router || {};
-        const stageTrace = Array.isArray(trace?.stage_trace) ? trace.stage_trace : (Array.isArray(retrieval?.stage_trace) ? retrieval.stage_trace : []);
         const strategy = trace?.strategy || {};
-        const layers = Array.isArray(trace?.layers) ? trace.layers : [];
-        const maxDepth = layers.includes("raw") || layers.includes("event") ? 3 : (layers.includes("episode") ? 2 : (layers.includes("insight") || layers.includes("semantic") ? 1 : 0));
-        const depthLabels = ["Core", "Insight", "Episode", "Raw"];
-        const penetrationHtml = `
-            <div class="penetration-breadcrumb">
-                ${depthLabels.map((label, idx) => {
-                    const active = idx <= maxDepth;
-                    return `<span class="penetration-node ${active ? "active" : ""}">${this.escapeHtml(label)}</span>`;
-                }).join(`<span class="penetration-sep">/</span>`)}
-            </div>
-        `;
         const summaryBits = [];
 
         if (trace?.thinking_summary) summaryBits.push(trace.thinking_summary);
@@ -1167,17 +1039,8 @@ class WeaveApp {
         if (trace?.applied_date_range?.start && trace?.applied_date_range?.end) {
             summaryBits.push(`Window: ${trace.applied_date_range.start} -> ${trace.applied_date_range.end}`);
         }
-        if (trace?.date_filter_status && trace.date_filter_status !== "not_used") {
+        if (trace?.date_filter_status && trace.date_filter_status !== 'not_used') {
             summaryBits.push(`Filter ${trace.date_filter_status}`);
-        }
-        if (trace?.results_summary?.seed_count !== undefined) {
-            summaryBits.push(`${trace.results_summary.seed_count} Seeds`);
-        }
-        if (trace?.results_summary?.evidence_count !== undefined) {
-            summaryBits.push(`${trace.results_summary.evidence_count} Evidence`);
-        }
-        if (strategy?.recursion_depth > 0) {
-            summaryBits.push(`Deep Expansion`);
         }
 
         const filterHtml = filters.length
@@ -1187,27 +1050,15 @@ class WeaveApp {
             ? `
                 ${contextQueries.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Context</div><div class="thinking-trace-list">${contextQueries.map((item) => `<div>${this.escapeHtml(item)}</div>`).join('')}</div></div>` : ''}
                 ${messageQueries.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Messages</div><div class="thinking-trace-list">${messageQueries.map((item) => `<div>${this.escapeHtml(item)}</div>`).join('')}</div></div>` : ''}
-                ${webQueries.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Web</div><div class="thinking-trace-list">${webQueries.map((item) => `<div>${this.escapeHtml(item)}</div>`).join('')}</div></div>` : ''}
                 ${lexicalTerms.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Lexical</div><div class="thinking-trace-list">${lexicalTerms.map((item) => `<div>${this.escapeHtml(item)}</div>`).join('')}</div></div>` : ''}
             `
             : '<div class="thinking-trace-empty">No semantic queries were needed.</div>';
         const resultHtml = `
             <div class="thinking-trace-result-headline">${this.escapeHtml(resultHeadline)}</div>
             ${resultDetails.length ? `<div class="thinking-trace-list">${resultDetails.map((item) => `<div>${this.escapeHtml(item)}</div>`).join('')}</div>` : ''}
-            ${primaryNodes.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Primary nodes</div><div class="thinking-trace-list">${primaryNodes.map((item) => `<div>${this.escapeHtml(item.title || item.id)}${item.reason ? ` — ${this.escapeHtml(item.reason)}` : ''}</div>`).join('')}</div></div>` : ''}
             ${seedResults.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Seed results</div><div class="thinking-trace-list">${seedResults.map((item) => `<div>${this.escapeHtml(item.title || item.id)}${item.reason ? ` — ${this.escapeHtml(item.reason)}` : ''}</div>`).join('')}</div></div>` : ''}
-            ${supportNodes.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Support nodes</div><div class="thinking-trace-list">${supportNodes.map((item) => `<div>${this.escapeHtml(item.title || item.id)}</div>`).join('')}</div></div>` : ''}
-            ${evidenceNodes.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Evidence nodes</div><div class="thinking-trace-list">${evidenceNodes.map((item) => `<div>${this.escapeHtml(item.title || item.id)}</div>`).join('')}</div></div>` : ''}
-            ${expandedResults.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Edge expansion</div><div class="thinking-trace-list">${expandedResults.map((item) => `<div>${this.escapeHtml(item.title || item.id)}</div>`).join('')}</div></div>` : ''}
+            ${expandedResults.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Graph expansion</div><div class="thinking-trace-list">${expandedResults.map((item) => `<div>${this.escapeHtml(item.title || item.id)}</div>`).join('')}</div></div>` : ''}
             ${trace?.web_search_used && webResults.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Web results</div><div class="thinking-trace-list">${webResults.map((item) => `<div>${this.escapeHtml(item.title || item.url || '')}${item.url ? ` — ${this.escapeHtml(item.url)}` : ''}</div>`).join('')}</div></div>` : ''}
-        `;
-        const routerHtml = `
-            <div class="thinking-trace-body">${this.escapeHtml(router?.router_reason || trace?.thinking_summary || 'No retrieval summary available.')}</div>
-            <div class="thinking-trace-list" style="margin-top:8px;">
-                ${router?.source_mode ? `<div>Source mode: ${this.escapeHtml(router.source_mode)}</div>` : ''}
-                ${router?.summary_vs_raw ? `<div>Summary mode: ${this.escapeHtml(router.summary_vs_raw)}</div>` : ''}
-                ${router?.time_scope?.label ? `<div>Time scope: ${this.escapeHtml(router.time_scope.label)}</div>` : ''}
-            </div>
         `;
         const sourcesHtml = (dataSources.length || webSources.length)
             ? `
@@ -1215,9 +1066,6 @@ class WeaveApp {
                 ${webSources.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Web</div><div class="thinking-trace-list">${webSources.map((item) => `<div>${this.escapeHtml(item)}</div>`).join('')}</div></div>` : ''}
             `
             : '<div class="thinking-trace-empty">No supporting data sources were identified.</div>';
-        const stageHtml = stageTrace.length
-            ? `<div class="thinking-trace-list">${stageTrace.map((item) => `<div>${this.escapeHtml(item.label || item.step)} — ${this.escapeHtml(item.status || 'completed')}${item.detail ? `: ${this.escapeHtml(item.detail)}` : ''}</div>`).join('')}</div>`
-            : '<div class="thinking-trace-empty">No pipeline stages were recorded.</div>';
         const strategyHtml = `
             <div class="thinking-trace-body">${this.escapeHtml(trace?.thinking_summary || 'No retrieval summary available.')}</div>
             <div class="thinking-trace-list" style="margin-top:8px;">
@@ -1239,13 +1087,6 @@ class WeaveApp {
                     <span class="thinking-trace-summary">${this.escapeHtml(summaryBits.join(' • ') || 'Open to inspect the retrieval path.')}</span>
                 </summary>
                 <div class="thinking-trace-sections">
-                    <div class="thinking-trace-penetration">
-                        ${penetrationHtml}
-                    </div>
-                    <section class="thinking-trace-section">
-                        <div class="thinking-trace-section-title">Router decision</div>
-                        ${routerHtml}
-                    </section>
                     <section class="thinking-trace-section">
                         <div class="thinking-trace-section-title">Strategy & intent analysis</div>
                         ${strategyHtml}
@@ -1259,12 +1100,8 @@ class WeaveApp {
                         ${queryHtml}
                     </section>
                     <section class="thinking-trace-section">
-                        <div class="thinking-trace-section-title">Ranking / packed context</div>
+                        <div class="thinking-trace-section-title">Ranking / result summary</div>
                         ${resultHtml}
-                    </section>
-                    <section class="thinking-trace-section">
-                        <div class="thinking-trace-section-title">Pipeline stages</div>
-                        ${stageHtml}
                     </section>
                     <section class="thinking-trace-section">
                         <div class="thinking-trace-section-title">Source list</div>
@@ -1349,7 +1186,6 @@ class WeaveApp {
         this.saveChatSessions();
         this.renderChatHistory();
         this.renderActiveChat();
-        this.updateChatSyncStatus();
         this.chatInput?.focus();
         return chat;
     }
@@ -1358,7 +1194,6 @@ class WeaveApp {
         this.activeChatId = null;
         this.renderChatHistory();
         this.renderActiveChat();
-        this.updateChatSyncStatus();
         this.chatInput?.focus();
     }
 
@@ -1367,9 +1202,21 @@ class WeaveApp {
         this.activeChatId = chatId;
         this.renderChatHistory();
         this.renderActiveChat();
-        this.updateChatSyncStatus();
 
         // Respond to main process requests to flush chat sessions to memory
+        if (window.electronAPI && window.electronAPI.onMemoryGraphUpdate) {
+            window.electronAPI.onMemoryGraphUpdate((data) => {
+                try {
+                    if (data && data.type === 'request_chat_save') {
+                        const trimmed = (this.chatSessions || []).map((session) => ({
+                            ...session,
+                            messages: (session.messages || []).slice(-120)
+                        })).slice(0, 25);
+                        if (window.electronAPI?.saveChatSessionsToMemory) window.electronAPI.saveChatSessionsToMemory(trimmed);
+                    }
+                } catch (e) { /* ignore */ }
+            });
+        }
     }
 
     pushMessageToActiveChat(role, content, retrieval = null, thinkingTrace = null) {
@@ -1471,12 +1318,163 @@ class WeaveApp {
     }
 
     setupSettings() {
-        this.captureToggle = document.getElementById("capture-toggle");
-        this.captureToggle?.addEventListener("click", async () => {
-            this.captureToggle.classList.toggle("active");
-            const enabled = this.captureToggle.classList.contains("active");
+        const darkModeToggle = document.getElementById('dark-mode-toggle');
+        darkModeToggle?.addEventListener('click', () => {
+            darkModeToggle.classList.toggle('active');
+            const nextTheme = darkModeToggle.classList.contains('active') ? 'dark' : 'light';
+            localStorage.setItem('theme', nextTheme);
+            this.applyTheme(nextTheme);
+            this.showToast(`Theme: ${nextTheme}`);
+        });
+
+        const compactModeToggle = document.getElementById('compact-view-toggle');
+        compactModeToggle?.addEventListener('click', () => {
+            compactModeToggle.classList.toggle('active');
+            this.compactMode = compactModeToggle.classList.contains('active');
+            localStorage.setItem('compactMode', String(this.compactMode));
+            this.applyCompactMode();
+        });
+
+        const notificationsToggle = document.getElementById('notifications-toggle');
+        notificationsToggle?.addEventListener('click', async () => {
+            notificationsToggle.classList.toggle('active');
+            this.notificationsEnabled = notificationsToggle.classList.contains('active');
+            localStorage.setItem('notificationsEnabled', String(this.notificationsEnabled));
+            if (this.notificationsEnabled && 'Notification' in window) {
+                try { await Notification.requestPermission(); } catch (_) {}
+            }
+            this.showToast(`Notifications ${this.notificationsEnabled ? 'enabled' : 'disabled'}`);
+        });
+
+        const soundToggle = document.getElementById('sound-toggle');
+        soundToggle?.addEventListener('click', () => {
+            soundToggle.classList.toggle('active');
+            this.soundEnabled = soundToggle.classList.contains('active');
+            localStorage.setItem('soundEnabled', String(this.soundEnabled));
+            if (this.soundEnabled) this.playUiSound('toggle');
+        });
+
+        const captureToggle = document.getElementById('capture-toggle');
+        captureToggle?.addEventListener('click', async () => {
+            captureToggle.classList.toggle('active');
+            const enabled = captureToggle.classList.contains('active');
             await this.setDesktopCaptureEnabled(enabled);
         });
+
+        const formality = document.getElementById('formality-slider');
+        const verbosity = document.getElementById('verbosity-slider');
+
+        [formality, verbosity].forEach((slider) => {
+            slider?.addEventListener('input', () => this.updatePersonalityPreview());
+        });
+
+        const saveSuggestionProviderSettings = async () => {
+            const provider = this.suggestionProviderSelect?.value || 'deepseek';
+            const payload = {
+                provider,
+                model: String(this.suggestionModelInput?.value || '').trim(),
+                baseUrl: String(this.suggestionBaseUrlInput?.value || '').trim(),
+                apiKey: String(this.suggestionApiKeyInput?.value || '').trim()
+            };
+            try {
+                const saved = await window.electronAPI.saveSuggestionLLMSettings(payload);
+                this.renderSuggestionProviderStatus(saved);
+                this.showToast(`Suggestion provider saved: ${saved?.provider || provider}`);
+            } catch (error) {
+                console.error('Failed to save suggestion provider settings:', error);
+                this.showToast('Failed to save suggestion provider');
+            }
+        };
+        const refreshSuggestionProviderFields = () => {
+            const provider = this.suggestionProviderSelect?.value || 'deepseek';
+            if (this.suggestionBaseUrlInput) this.suggestionBaseUrlInput.disabled = provider !== 'ollama';
+        };
+        this.suggestionProviderSelect?.addEventListener('change', saveSuggestionProviderSettings);
+        this.suggestionProviderSelect?.addEventListener('change', refreshSuggestionProviderFields);
+        this.suggestionModelInput?.addEventListener('change', saveSuggestionProviderSettings);
+        this.suggestionBaseUrlInput?.addEventListener('change', saveSuggestionProviderSettings);
+        this.suggestionApiKeyInput?.addEventListener('change', saveSuggestionProviderSettings);
+        refreshSuggestionProviderFields();
+
+        document.getElementById('google-connect-btn')?.addEventListener('click', async () => {
+            try {
+                await window.electronAPI.startGoogleAuth();
+                this.showToast('Google connected');
+                await this.loadGoogleStatus();
+            } catch (error) {
+                console.error('Google auth failed:', error);
+                this.showToast('Google connection failed');
+            }
+        });
+
+        document.getElementById('sign-out-link')?.addEventListener('click', () => {
+            localStorage.clear();
+            window.location.reload();
+        });
+
+        document.getElementById('delete-all-data-btn')?.addEventListener('click', async () => {
+            const confirmed = window.confirm('Delete all local data and relaunch the app?');
+            if (!confirmed) return;
+            try {
+                await window.electronAPI.deleteAllSettings();
+            } catch (error) {
+                console.error('Delete all data failed:', error);
+                this.showToast('Delete all data failed');
+            }
+        });
+
+        document.getElementById('clear-all-tasks-btn')?.addEventListener('click', async () => {
+            const confirmed = window.confirm('Delete all suggestions?');
+            if (!confirmed) return;
+            try {
+                await window.electronAPI.clearSuggestions();
+                await window.electronAPI.savePersistentTodos([]);
+                this.todos = [];
+                this.expandedCards.clear();
+                this.renderSuggestions();
+                this.showToast('All suggestions deleted');
+            } catch (error) {
+                console.error('Failed to clear all suggestions:', error);
+                this.showToast('Failed to clear suggestions');
+            }
+        });
+
+        document.getElementById('test-browser-extension-btn')?.addEventListener('click', () => this.testBrowserExtensionTask());
+        this.desktopPromptRunButton?.addEventListener('click', () => this.runDesktopPromptTask());
+        this.desktopPromptInput?.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                this.runDesktopPromptTask();
+            }
+        });
+        document.getElementById('allow-full-control-btn')?.addEventListener('click', () => this.openFullControlSettings());
+        document.getElementById('extension-refresh-btn')?.addEventListener('click', () => this.loadExtensionStatus());
+        document.getElementById('extension-diagnostic-btn')?.addEventListener('click', () => this.runExtensionDiagnostic());
+        this.voiceControlToggle?.addEventListener('click', async () => {
+            const nextEnabled = !this.voiceControlToggle.classList.contains('active');
+            await this.setVoiceControlEnabled(nextEnabled);
+        });
+
+        document.getElementById('history-refresh-btn')?.addEventListener('click', () => this.loadBrowserHistory());
+        document.getElementById('capture-now-btn')?.addEventListener('click', () => this.captureNow());
+        document.getElementById('memory-refresh-btn')?.addEventListener('click', () => this.loadMemoryGraphStatus());
+        document.getElementById('search-memory-btn')?.addEventListener('click', () => this.searchMemoryGraph());
+        this.memorySearchInput?.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') this.searchMemoryGraph();
+        });
+
+        document.getElementById('memory-detail-modal')?.addEventListener('click', (event) => {
+            if (event.target?.id === 'memory-detail-modal') this.closeMemoryModal();
+        });
+
+        document.getElementById('modal-copy-btn')?.addEventListener('click', () => {
+            const raw = document.getElementById('modal-memory-raw')?.textContent || '';
+            navigator.clipboard.writeText(raw);
+            this.showToast('Memory JSON copied');
+        });
+
+        this.syncSettingsUI();
+        this.updatePersonalityPreview();
     }
 
     syncSettingsUI() {
@@ -1596,6 +1594,33 @@ class WeaveApp {
         }
     }
 
+    async testBrowserExtensionTask() {
+        const button = document.getElementById('test-browser-extension-btn');
+        if (button) button.textContent = 'Running...';
+        this.setDesktopTestStatus('Starting desktop test…');
+        try {
+            const status = await window.electronAPI.getAccessibilityStatus();
+            if (!status?.trusted) {
+                throw new Error(status?.error || 'Accessibility permission is not enabled');
+            }
+            const result = await window.electronAPI.executeAITask({
+                id: `test_google_${Date.now()}`,
+                title: 'Search Google for hello and open the second result',
+                url: 'https://www.google.com',
+                ai_draft: 'Go to google.com, search for hello, click the second search result, and report which page opened.',
+                agentMode: true
+            });
+            this.setDesktopTestStatus(`Completed: ${result?.result || 'opened the requested result.'}`);
+            this.showToast(`Desktop automation test completed: ${result?.result || 'success'}`);
+        } catch (error) {
+            console.error('Desktop automation test failed:', error);
+            const failure = error?.failure_reason || error?.error || error?.message || 'Unknown failure';
+            this.setDesktopTestStatus(`Failed: ${failure}`);
+            this.showToast(`Desktop automation test failed: ${failure}`);
+        } finally {
+            if (button) button.textContent = 'Test Desktop Control';
+        }
+    }
 
     async runDesktopPromptTask() {
         const prompt = String(this.desktopPromptInput?.value || '').trim();
@@ -1614,8 +1639,9 @@ class WeaveApp {
 
         try {
             const status = await window.electronAPI.getAccessibilityStatus();
-            if (!status?.trusted) throw new Error(status?.error || 'Accessibility permission is not enabled');
-
+            if (!status?.trusted) {
+                throw new Error(status?.error || 'Accessibility permission is not enabled');
+            }
             const result = await window.electronAPI.executeAITask({
                 id: `settings_prompt_${Date.now()}`,
                 title: prompt,
@@ -1626,37 +1652,68 @@ class WeaveApp {
                 execution_mode: 'settings_prompt',
                 agentMode: true
             });
-
             const summary = result?.result || 'desktop action completed';
-            this.setDesktopTestStatus(`Result: ${String(summary).slice(0, 200)}`);
-            this.showToast('Desktop prompt completed');
-        } catch (err) {
-            console.error('Desktop prompt failed:', err);
-            this.showToast('Desktop prompt failed');
+            this.setDesktopPromptStatus(`Completed: ${summary}`);
+            this.setDesktopTestStatus(`Completed: ${summary}`);
+            this.showToast(`Desktop prompt completed: ${summary}`);
+        } catch (error) {
+            console.error('Desktop prompt failed:', error);
+            const failure = error?.failure_reason || error?.error || error?.message || 'Unknown failure';
+            this.setDesktopPromptStatus(`Failed: ${failure}`);
+            this.setDesktopTestStatus(`Failed: ${failure}`);
+            this.showToast(`Desktop prompt failed: ${failure}`);
         } finally {
             if (this.desktopPromptRunButton) {
                 this.desktopPromptRunButton.disabled = false;
-                this.desktopPromptRunButton.textContent = 'Run';
+                this.desktopPromptRunButton.textContent = 'Run Prompt';
             }
+        }
+    }
+
+    handlePlannerStep(payload = {}) {
+        if (!this.desktopTestStatus || !payload) return;
+        if (payload.phase === 'thinking') {
+            if (Date.now() - this.lastPlannerStatusAt < 400) return;
+            this.lastPlannerStatusAt = Date.now();
+            this.setDesktopTestStatus('Thinking through the next desktop action…');
+            this.setDesktopPromptStatus('Thinking through the next desktop action…');
+            if (this.voiceSession?.status === 'acting') {
+                this.updateVoiceOverlay({
+                    title: 'Acting…',
+                    status: 'Planning the next desktop step.',
+                    transcript: this.voiceSession?.transcript || 'Voice command in progress…',
+                    meta: ''
+                });
+            }
+            return;
+        }
+        const stage = this.capitalize(payload.stage || 'working');
+        const action = payload.action ? String(payload.action).replace(/_/g, ' ').toLowerCase() : 'planning';
+        const location = [payload.app, payload.window].filter(Boolean).join(' / ');
+        const driver = payload.driver ? ` • ${String(payload.driver).toUpperCase()}` : '';
+        const reason = payload.reason ? ` • ${payload.reason}` : '';
+        const failure = payload.failure_reason ? ` • ${payload.failure_reason}` : '';
+        const progress = Number.isFinite(payload.navigation_progress) ? ` • progress ${payload.navigation_progress}` : '';
+        const effect = payload.effect_summary ? ` • ${payload.effect_summary}` : '';
+        const remaining = payload.remaining_gap ? ` • next: ${payload.remaining_gap}` : '';
+        const vision = payload.vision_used ? ' • vision assist' : ' • AX-first';
+        const statusText = `${stage}: ${action}${driver}${location ? ` • ${location}` : ''}${progress}${reason}${effect}${remaining}${failure}${vision}`;
+        this.lastPlannerStatusAt = Date.now();
+        this.setDesktopTestStatus(statusText);
+        this.setDesktopPromptStatus(statusText);
+        this.appendDesktopTimelineEntry(payload);
+        if (this.voiceSession?.status === 'acting') {
+            this.updateVoiceOverlay({
+                title: 'Acting…',
+                status: `${stage}: ${action}`,
+                transcript: this.voiceSession?.transcript || 'Voice command in progress…',
+                meta: [payload.effect_summary, payload.remaining_gap].filter(Boolean).join(' • ')
+            });
         }
     }
 
     setDesktopPromptStatus(text) {
         if (this.desktopPromptStatus) this.desktopPromptStatus.textContent = text;
-    }
-
-    updateDiscoveryOrbit(payload = {}) {
-        if (!this.discoveryOrbitContainer) return;
-        const isThinking = false;
-        if (isThinking) {
-            this.discoveryOrbitContainer.classList.remove("hidden");
-            if (this.discoveryOrbitLabel) {
-                const action = payload.action ? "Thinking: " + payload.action.replace(/_/g, " ") + "..." : "Discovery Thinking...";
-                this.discoveryOrbitLabel.textContent = action;
-            }
-        } else {
-            this.discoveryOrbitContainer.classList.add("hidden");
-        }
     }
 
     async openFullControlSettings() {
@@ -2021,6 +2078,21 @@ class WeaveApp {
         this.voiceOverlay.style.display = 'none';
     }
 
+    async runExtensionDiagnostic() {
+        try {
+            const result = await window.electronAPI.accessibilityRunDiagnostic();
+            if (result?.status === 'ok' || result?.status === 'success') {
+                const activeTitle = result?.observation?.window_title || result?.observation?.frontmost_app || 'Desktop context found';
+                this.showToast(`Diagnostic OK: ${activeTitle}`);
+            } else {
+                this.showToast(`Diagnostic failed: ${result?.error || 'Unknown error'}`);
+            }
+            await this.loadExtensionStatus();
+        } catch (error) {
+            console.error('Extension diagnostic failed:', error);
+            this.showToast('Extension diagnostic failed');
+        }
+    }
 
     async loadSensorData() {
         try {
@@ -2626,227 +2698,8 @@ class WeaveApp {
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#39;');
     }
-
-    handleMemoryGraphUpdate(payload = {}) {
-        const syncStatusEl = document.getElementById("chat-sync-status");
-        const processingStatusEl = document.getElementById("mem-processing-status");
-        
-        if (syncStatusEl) {
-            const textEl = syncStatusEl.querySelector(".sync-text");
-            if (textEl) textEl.textContent = "Syncing memory...";
-            syncStatusEl.classList.add("syncing");
-            
-            clearTimeout(this._syncResetTimer);
-            this._syncResetTimer = setTimeout(() => {
-                if (textEl) textEl.textContent = "Memory synced";
-                syncStatusEl.classList.remove("syncing");
-            }, 3000);
-        }
-
-        if (processingStatusEl) {
-            processingStatusEl.textContent = "Processing...";
-            processingStatusEl.classList.remove("inactive");
-            processingStatusEl.classList.add("active");
-            
-            clearTimeout(this._procResetTimer);
-            this._procResetTimer = setTimeout(() => {
-                processingStatusEl.textContent = "Idle";
-                processingStatusEl.classList.remove("active");
-                processingStatusEl.classList.add("inactive");
-            }, 3000);
-        }
-
-        try {
-            if (payload && payload.type === "request_chat_save") {
-                const trimmed = (this.chatSessions || []).map((session) => ({
-                    ...session,
-                    messages: (session.messages || []).slice(-120)
-                })).slice(0, 25);
-                if (window.electronAPI?.saveChatSessionsToMemory) window.electronAPI.saveChatSessionsToMemory(trimmed);
-            }
-        } catch (e) { }
-    }
-
-
-    setupLibrary() {
-        this.libraryFilters.forEach(chip => {
-            chip.addEventListener('click', () => {
-                this.libraryFilters.forEach(c => c.classList.remove('active'));
-                chip.classList.add('active');
-                this.renderLibrary(chip.dataset.libFilter);
-            });
-        });
-    }
-
-    async renderLibrary(filter = "all") {
-        if (!this.libraryList) return;
-        this.libraryList.innerHTML = '<div class="graph-placeholder">Loading library...</div>';
-        try {
-            const { nodes } = await window.electronAPI.getFullMemoryGraph();
-            const filtered = nodes.filter(n => filter === "all" || n.layer === filter);
-            if (!filtered.length) {
-                this.libraryList.innerHTML = '<div class="empty-state">No items found in this category.</div>';
-                return;
-            }
-            this.libraryList.innerHTML = filtered.map(node => `
-                <div class="library-card" onclick="app.openMemoryDetailById('${node.id}')">
-                    <div class="library-card-layer">${node.layer}</div>
-                    <div class="library-card-title">${this.escapeHtml(node.title)}</div>
-                    <div class="library-card-summary">${this.escapeHtml(node.summary || "")}</div>
-                    <div class="library-card-footer">
-                        <span>${node.subtype || ""}</span>
-                    </div>
-                </div>
-            `).join("");
-        } catch (err) {
-            console.error("Library load error:", err);
-            this.libraryList.innerHTML = '<div class="empty-state">Failed to load library.</div>';
-        }
-    }
-
-        async renderFullMemoryGraph() {
-        if (!this.settingsGraphContainer) return;
-        this.settingsGraphContainer.innerHTML = '<div class="graph-placeholder">Initializing graph...</div>';
-        try {
-            const { nodes, edges } = await window.electronAPI.getFullMemoryGraph();
-            if (!nodes || !nodes.length) {
-                this.settingsGraphContainer.innerHTML = '<div class="graph-placeholder">No memory nodes yet.</div>';
-                return;
-            }
-
-            // Filter out orphaned edges
-            const nodeIds = new Set(nodes.map(n => n.id));
-            const filteredEdges = (edges || []).filter(e => {
-                const s = typeof e.source === 'object' ? e.source.id : e.source;
-                const t = typeof e.target === 'object' ? e.target.id : e.target;
-                return nodeIds.has(s) && nodeIds.has(t);
-            });
-
-            this.settingsGraphContainer.innerHTML = "";
-            const width = this.settingsGraphContainer.clientWidth || 800;
-            const height = 400;
-
-            const layers = ['core', 'insight', 'cloud', 'semantic', 'episode', 'event'];
-            const layerX = (layer) => {
-                const index = layers.indexOf(layer);
-                if (index === -1) return width / 2;
-                return (width / (layers.length + 1)) * (index + 1);
-            };
-
-            const svg = d3.select(this.settingsGraphContainer)
-                .append("svg")
-                .attr("width", width)
-                .attr("height", height);
-
-            // Add background brackets and labels
-            layers.forEach((layer) => {
-                const x = layerX(layer);
-                svg.append("line")
-                    .attr("x1", x)
-                    .attr("y1", 30)
-                    .attr("x2", x)
-                    .attr("y2", height - 30)
-                    .attr("stroke", "var(--glass-border)")
-                    .attr("stroke-width", 1)
-                    .attr("stroke-dasharray", "4,4");
-                
-                svg.append("text")
-                    .attr("x", x)
-                    .attr("y", 20)
-                    .attr("text-anchor", "middle")
-                    .attr("fill", "var(--text-tertiary)")
-                    .attr("font-size", "10px")
-                    .attr("font-weight", "600")
-                    .attr("style", "text-transform: uppercase; letter-spacing: 0.05em;")
-                    .text(layer);
-            });
-
-            const simulation = d3.forceSimulation(nodes)
-                .force("link", d3.forceLink(filteredEdges).id(d => d.id).distance(60))
-                .force("charge", d3.forceManyBody().strength(-80))
-                .force("center", d3.forceCenter(width / 2, height / 2))
-                .force("x", d3.forceX(d => layerX(d.layer)).strength(1.2))
-                .force("y", d3.forceY(height / 2).strength(0.15));
-
-            const link = svg.append("g")
-                .selectAll("line")
-                .data(filteredEdges)
-                .enter().append("line")
-                .attr("class", "graph-link")
-                .attr("stroke", "var(--accent-blue)")
-                .attr("stroke-opacity", 0.25)
-                .attr("stroke-width", d => Math.sqrt(d.weight || 1));
-
-            const node = svg.append("g")
-                .selectAll("circle")
-                .data(nodes)
-                .enter().append("circle")
-                .attr("class", "graph-node")
-                .attr("r", d => d.layer === "core" ? 7 : 4)
-                .attr("fill", d => {
-                    if (d.layer === "core") return "var(--accent-coral)";
-                    if (d.layer === "insight") return "var(--accent-amber)";
-                    if (d.layer === "cloud") return "var(--accent-teal)";
-                    if (d.layer === "semantic") return "var(--accent-blue)";
-                    return "var(--text-tertiary)";
-                })
-                .attr("stroke", "var(--glass-bg)")
-                .attr("stroke-width", 1.5)
-                .call(d3.drag()
-                    .on("start", (event) => {
-                        if (!event.active) simulation.alphaTarget(0.3).restart();
-                        event.subject.fx = event.subject.x;
-                        event.subject.fy = event.subject.y;
-                    })
-                    .on("drag", (event) => {
-                        event.subject.fx = event.x;
-                        event.subject.fy = event.y;
-                    })
-                    .on("end", (event) => {
-                        if (!event.active) simulation.alphaTarget(0);
-                        event.subject.fx = null;
-                        event.subject.fy = null;
-                    }))
-                .on("click", (event, d) => this.openMemoryDetailById(d.id));
-
-            node.append("title").text(d => `${d.title}\n(${d.layer})`);
-
-            simulation.on("tick", () => {
-                link.attr("x1", d => d.source.x)
-                    .attr("y1", d => d.source.y)
-                    .attr("x2", d => d.target.x)
-                    .attr("y2", d => d.target.y);
-                node.attr("cx", d => d.x)
-                    .attr("cy", d => d.y);
-            });
-        } catch (err) {
-            console.error("Graph render error:", err);
-            this.settingsGraphContainer.innerHTML = '<div class="graph-placeholder">Failed to load graph.</div>';
-        }
-    }
-
-    async openMemoryDetailById(nodeId) {
-        try {
-            const { nodes } = await window.electronAPI.getFullMemoryGraph();
-            const node = nodes.find(n => n.id === nodeId);
-            if (node) {
-                this.memorySearchResults = [node];
-                this.openMemoryModal(0);
-            }
-        } catch (err) {
-            console.error("Failed to open memory detail:", err);
-        }
-    }
-
-    triggerSearchAnimation(active) {
-        const scanningIndicator = document.getElementById("scanning-indicator");
-        if (scanningIndicator) scanningIndicator.classList.toggle("active", active);
-        const chatPanel = document.querySelector(".chat-panel");
-        if (chatPanel) {
-            chatPanel.classList.toggle("searching", active);
-        }
-    }
 }
+
 document.addEventListener('DOMContentLoaded', () => {
     window.app = new WeaveApp();
 });

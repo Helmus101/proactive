@@ -39,15 +39,6 @@ const EDGE_INVERSIONS = {
   'DEPENDS_ON': 'PREREQUISITE_FOR'
 };
 
-const MEMORY_LAYERS = {
-  RAW: 'raw',
-  EPISODE: 'episode',
-  SEMANTIC: 'semantic',
-  CLOUD: 'cloud',
-  INSIGHT: 'insight',
-  CORE: 'core'
-};
-
 async function upsertGraphNode({
   id,
   type,
@@ -135,33 +126,6 @@ async function upsertMemoryNode({
     },
     embedding
   }).catch(() => {});
-}
-
-async function updateMemoryNode(id, updates = {}) {
-  const existing = await db.getQuery(`SELECT * FROM memory_nodes WHERE id = ?`, [id]);
-  if (!existing) return null;
-
-  const metadata = { ...asObj(existing.metadata), ...asObj(updates.metadata) };
-  const node = {
-    id: existing.id,
-    layer: updates.layer || existing.layer,
-    subtype: updates.subtype || existing.subtype,
-    title: updates.title || existing.title,
-    summary: updates.summary || existing.summary,
-    canonicalText: updates.canonical_text || existing.canonical_text,
-    confidence: updates.confidence !== undefined ? updates.confidence : existing.confidence,
-    status: updates.status || existing.status,
-    sourceRefs: updates.source_refs || asObj(existing.source_refs),
-    metadata,
-    graphVersion: existing.graph_version,
-    createdAt: existing.created_at,
-    updatedAt: new Date().toISOString(),
-    embedding: updates.embedding || asObj(existing.embedding),
-    anchorDate: updates.anchor_date || existing.anchor_date
-  };
-
-  await upsertMemoryNode(node);
-  return node;
 }
 
 async function upsertGraphEdge({
@@ -258,10 +222,15 @@ async function upsertRetrievalDoc({
   await db.runQuery(
     `INSERT OR REPLACE INTO retrieval_docs
      (doc_id, source_type, node_id, event_id, app, timestamp, text, metadata)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-     [docId, sourceType, nodeId, eventId, app, timestamp, content, JSON.stringify(metadata || {})]
-     );
-     }
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [docId, sourceType, nodeId, eventId, app, timestamp, content, JSON.stringify(metadata || {})]
+  );
+  await db.runQuery(`DELETE FROM retrieval_docs_fts WHERE doc_id = ?`, [docId]).catch(() => {});
+  await db.runQuery(
+    `INSERT INTO retrieval_docs_fts (doc_id, text) VALUES (?, ?)`,
+    [docId, content]
+  );
+}
 
 async function removeNodeArtifactsByVersion(version) {
   if (!version) return;
@@ -274,6 +243,9 @@ async function removeNodeArtifactsByVersion(version) {
 
   const placeholders = ids.map(() => '?').join(',');
   await db.runQuery(`DELETE FROM retrieval_docs WHERE node_id IN (${placeholders})`, ids).catch(() => {});
+  for (const id of ids) {
+    await db.runQuery(`DELETE FROM retrieval_docs_fts WHERE doc_id = ?`, [`node:${id}`]).catch(() => {});
+  }
   await db.runQuery(`DELETE FROM edges WHERE from_id IN (${placeholders}) OR to_id IN (${placeholders})`, [...ids, ...ids]).catch(() => {});
   await db.runQuery(`DELETE FROM nodes WHERE id IN (${placeholders})`, ids).catch(() => {});
 }
@@ -285,6 +257,9 @@ async function removeMemoryArtifactsByVersion(version) {
   if (!ids.length) return;
   const placeholders = ids.map(() => '?').join(',');
   await db.runQuery(`DELETE FROM retrieval_docs WHERE node_id IN (${placeholders})`, ids).catch(() => {});
+  for (const id of ids) {
+    await db.runQuery(`DELETE FROM retrieval_docs_fts WHERE doc_id = ?`, [`node:${id}`]).catch(() => {});
+  }
   await db.runQuery(`DELETE FROM memory_edges WHERE from_node_id IN (${placeholders}) OR to_node_id IN (${placeholders})`, [...ids, ...ids]).catch(() => {});
   await db.runQuery(`DELETE FROM memory_nodes WHERE id IN (${placeholders})`, ids).catch(() => {});
   await removeNodeArtifactsByVersion(version).catch(() => {});
@@ -295,6 +270,7 @@ async function clearZeroBaseMemory({ includeEvents = false } = {}) {
     `DELETE FROM memory_edges`,
     `DELETE FROM memory_nodes`,
     `DELETE FROM suggestion_artifacts`,
+    `DELETE FROM retrieval_docs_fts`,
     `DELETE FROM retrieval_docs`,
     `DELETE FROM text_chunks`,
     `DELETE FROM graph_versions`,
@@ -348,10 +324,8 @@ module.exports = {
   asObj,
   toText,
   stableHash,
-  MEMORY_LAYERS,
   upsertGraphNode,
   upsertMemoryNode,
-  updateMemoryNode,
   upsertGraphEdge,
   upsertMemoryEdge,
   buildRetrievalDocText,

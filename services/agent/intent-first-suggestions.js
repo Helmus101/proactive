@@ -26,9 +26,7 @@ function normalizeCategory(category) {
   if (raw.includes('follow')) return 'followup';
   if (raw.includes('creative')) return 'creative';
   if (raw.includes('personal')) return 'personal';
-  if (raw.includes('study')) return 'study';
-  if (raw.includes('relationship')) return 'relationship';
-  if (raw.includes('plan') || raw.includes('work')) return 'work';
+  if (raw.includes('plan')) return 'work';
   return 'work';
 }
 
@@ -178,9 +176,9 @@ function dedupeKey(suggestion) {
 }
 
 function rankAndLimitSuggestions(items, options = {}) {
-  const maxTotal = Number(options.maxTotal || 10);
-  const maxPerCategory = Number(options.maxPerCategory || 4);
-  const maxFollowups = Number(options.maxFollowups || 3);
+  const maxTotal = Number(options.maxTotal || 5);
+  const maxPerCategory = Number(options.maxPerCategory || 2);
+  const maxFollowups = Number(options.maxFollowups || 1);
   const normalized = (Array.isArray(items) ? items : [])
     .map((item) => normalizeSuggestion(item, options))
     .filter((item) => passesIntentFirstQuality(item))

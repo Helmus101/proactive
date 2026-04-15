@@ -54,7 +54,7 @@ let activeStudySession = null;
 const DEFAULT_VOICE_SHORTCUT = 'CommandOrControl+Shift+Space';
 const LEGACY_VOICE_SHORTCUT = 'CommandOrControl+Space';
 const PLANNER_STEP_THROTTLE_MS = 700;
-const SCREENSHOT_RETENTION_DAYS = 36500;
+const SCREENSHOT_RETENTION_DAYS = 7;
 
 // Memory Graph Processing Timers
 let episodeGenerationTimer = null;
@@ -62,7 +62,6 @@ let suggestionEngineTimer = null;
 let semanticsTimer = null;
 let dailyInsightTimer = null;
 let weeklyInsightTimer = null;
-let livingCoreTimer = null;
 let episodeJobLock = false;
 let suggestionJobLock = false;
 let lastSuggestionLockSkipLogAt = 0;
@@ -164,8 +163,20 @@ function inferStudySignal(text = '', metadata = {}) {
 }
 
 function pruneOldSensorCaptures(events = []) {
-  // Pruning disabled to ensure nothing is deleted
-  return Array.isArray(events) ? events : [];
+  const retentionMs = SCREENSHOT_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  const cutoff = Date.now() - retentionMs;
+  const kept = [];
+  for (const event of Array.isArray(events) ? events : []) {
+    const ts = Number(event?.timestamp || 0);
+    if (!ts || ts >= cutoff) {
+      kept.push(event);
+      continue;
+    }
+    if (event?.imagePath && fs.existsSync(event.imagePath)) {
+      try { fs.unlinkSync(event.imagePath); } catch (_) {}
+    }
+  }
+  return kept;
 }
 
 function startScreenshotCleanupLoop() {
@@ -890,8 +901,21 @@ function shouldFilterCapture(text, windowTitle, appName, url) {
 }
 
 async function deleteSensitiveCapture(imagePath, eventId, reason) {
-  // Total Data Durability: deletion disabled
-  console.log(`[Content Filter] Sensitive content detected but deletion skipped for durability: ${reason}`);
+  try {
+    // Delete the image file
+    if (fs.existsSync(imagePath)) {
+      fs.unlinkSync(imagePath);
+    }
+    
+    // Remove from sensor events
+    const events = getSensorEvents();
+    const filteredEvents = events.filter(event => event.id !== eventId);
+    store.set('sensorEvents', filteredEvents);
+    
+    console.log(`[Content Filter] Deleted sensitive capture: ${reason}`);
+  } catch (error) {
+    console.error('[Content Filter] Failed to delete sensitive capture:', error);
+  }
 }
 
 function runVisionOCR(imagePath) {
@@ -1113,7 +1137,13 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   }
 
   const existing = pruneOldSensorCaptures(getSensorEvents());
-  const nextEvents = [event, ...existing];
+  const nextEvents = [event, ...existing].slice(0, settings.maxEvents);
+  const retainedPaths = new Set(nextEvents.map(item => item.imagePath));
+  existing.forEach(item => {
+    if (item.imagePath && !retainedPaths.has(item.imagePath) && fs.existsSync(item.imagePath)) {
+      try { fs.unlinkSync(item.imagePath); } catch (_) {}
+    }
+  });
 
   store.set('sensorEvents', nextEvents);
   
@@ -1498,7 +1528,7 @@ async function runEpisodeGeneration() {
   episodeJobLock = true;
   
   try {
-    console.log('[EpisodeJob] Running 90-minute episode generation...');
+    console.log('[EpisodeJob] Running 30-minute episode generation...');
     const { runEpisodeJob } = require('./services/agent/intelligence-engine');
     
     store.set('memoryGraphHealth', {
@@ -1761,25 +1791,6 @@ async function runDailyInsightsScheduled() {
   }
 }
 
-async function runLivingCoreJobScheduled() {
-  try {
-    const apiKey = process.env.DEEPSEEK_API_KEY;
-    if (!apiKey) {
-      console.warn("[LivingCore] No DeepSeek API key, skipping Living Core synthesis");
-      return;
-    }
-    console.log("[LivingCore] Running Living Core synthesis job...");
-    const { runLivingCoreJob } = require("./services/agent/intelligence-engine");
-    const created = await runLivingCoreJob(apiKey);
-    console.log("[LivingCore] Created core nodes:", created.length);
-    if (mainWindow && mainWindow.webContents) {
-      mainWindow.webContents.send("memory-graph-update", { type: "living_core_completed", count: created.length, timestamp: Date.now() });
-    }
-  } catch (e) {
-    console.error("[LivingCore] Error:", e?.message || e);
-  }
-}
-
 function startMemoryGraphProcessing() {
   console.log('[MemoryGraph] Starting automated processing...');
   store.set('memoryGraphHealth', {
@@ -1804,16 +1815,16 @@ function startMemoryGraphProcessing() {
     // schedule first aligned run, then set repeating intervals
     setTimeout(() => {
       runEpisodeGeneration().catch((e) => console.warn('[MemoryGraph] Aligned episode generation failed:', e?.message || e));
-      try { episodeGenerationTimer = setInterval(runEpisodeGeneration, 90 * 60 * 1000); } catch (_) {}
+      try { episodeGenerationTimer = setInterval(runEpisodeGeneration, halfHourMs); } catch (_) {}
       // also kick off semantic window at same boundary
       runSemanticWindowGeneration().catch((e) => console.warn('[MemoryGraph] Aligned semantic window failed:', e?.message || e));
       try { semanticsTimer = setInterval(runSemanticWindowGeneration, halfHourMs); } catch (_) {}
     }, delay);
-    console.log('[MemoryGraph] Aligned episode (90m) & semantic (30m) scheduling, first run in', Math.round(delay / 1000), 's');
+    console.log('[MemoryGraph] Aligned episode & semantic scheduling to half-hour boundaries, first run in', Math.round(delay / 1000), 's');
   } catch (e) {
     console.warn('[MemoryGraph] Failed to schedule aligned half-hour jobs, falling back to interval timers:', e?.message || e);
     if (episodeGenerationTimer) clearInterval(episodeGenerationTimer);
-    episodeGenerationTimer = setInterval(runEpisodeGeneration, 90 * 60 * 1000);
+    episodeGenerationTimer = setInterval(runEpisodeGeneration, 30 * 60 * 1000);
     if (semanticsTimer) clearInterval(semanticsTimer);
     semanticsTimer = setInterval(runSemanticWindowGeneration, 30 * 60 * 1000);
   }
@@ -1827,7 +1838,6 @@ function startMemoryGraphProcessing() {
 
   // Schedule daily insights (every day at 23:00 local time by default)
   scheduleDailyInsights();
-  scheduleLivingCore();
   
   // Warm the graph immediately on startup, then follow with the scheduled loop.
   setTimeout(() => {
@@ -1879,20 +1889,6 @@ function scheduleDailyInsights() {
   console.log('[DailyInsight] Scheduled for:', next.toLocaleString());
 }
 
-function scheduleLivingCore() {
-  if (livingCoreTimer) clearTimeout(livingCoreTimer);
-  const now = new Date();
-  const next = new Date(now);
-  next.setHours(1, 0, 0, 0);
-  if (next <= now) next.setDate(next.getDate() + 1);
-  const delay = next.getTime() - now.getTime();
-  livingCoreTimer = setTimeout(async function tick() {
-    await runLivingCoreJobScheduled();
-    livingCoreTimer = setTimeout(tick, 24 * 60 * 60 * 1000);
-  }, delay);
-  console.log("[LivingCore] Scheduled for:", next.toLocaleString());
-}
-
 function stopMemoryGraphProcessing() {
   if (episodeGenerationTimer) {
     clearInterval(episodeGenerationTimer);
@@ -1905,10 +1901,6 @@ function stopMemoryGraphProcessing() {
   if (weeklyInsightTimer) {
     clearTimeout(weeklyInsightTimer);
     weeklyInsightTimer = null;
-  }
-  if (livingCoreTimer) {
-    clearTimeout(livingCoreTimer);
-    livingCoreTimer = null;
   }
   console.log('[MemoryGraph] Automated processing stopped');
 }
@@ -3706,8 +3698,6 @@ async function generateProactiveTasksFromData(userData) {
 }
 
 // Get browsing history directly from Chrome, Brave, Arc and Safari
-let safariFullDiskAccessWarned = false;
-
 async function getBrowserHistory() {
   const history = [];
 
@@ -3791,12 +3781,10 @@ async function readChromiumHistoryDB(dbPath, browserName) {
             visitCount: row.visit_count || 1,
             browser: browserName
           }));
-          if (entries.length > 0) {
-            try {
-              console.log(`${browserName} (${dbPath}): ${entries.length} URLs`);
-            } catch (logErr) {
-              if (String(logErr?.code || '') !== 'EIO') throw logErr;
-            }
+          try {
+            console.log(`${browserName} (${dbPath}): ${entries.length} URLs`);
+          } catch (logErr) {
+            if (String(logErr?.code || '') !== 'EIO') throw logErr;
           }
           resolve(entries);
         }
@@ -3883,10 +3871,7 @@ async function getSafariHistory() {
       fs.copyFileSync(safariHistoryPath, tmpPath);
     } catch (e) {
       if (e.code === 'EPERM') {
-        if (!safariFullDiskAccessWarned) {
-          console.log('Skipping Safari history — Full Disk Access is required for this terminal/app.');
-          safariFullDiskAccessWarned = true;
-        }
+        console.log('Skipping Safari history — Full Disk Access is required for this terminal/app.');
       } else {
         console.warn('Could not copy Safari history DB:', e.message);
       }
@@ -6539,7 +6524,7 @@ ipcMain.handle('search-graph', async (event, query, filters = {}) => {
 
     // Check database state
     const nodeCount = await db.getQuery(`SELECT COUNT(*) as count FROM nodes`);
-    const eventCount = await db.getQuery(`SELECT COUNT(*) as count FROM events`).catch(() => ({ count: 0 }));
+    const eventCount = await db.getQuery(`SELECT COUNT(*) as count FROM events`);
     console.log('[search-graph] Database state:', { nodes: nodeCount.count, events: eventCount.count });
 
     let results = [];
@@ -6669,6 +6654,7 @@ function normalizeChatSessionSnapshot(sessions = []) {
   if (!Array.isArray(sessions)) return [];
   return sessions
     .filter((session) => session && session.id)
+    .slice(0, 40)
     .map((session) => ({
       id: String(session.id),
       title: String(session.title || 'New chat').slice(0, 180),
@@ -6677,6 +6663,7 @@ function normalizeChatSessionSnapshot(sessions = []) {
       messages: Array.isArray(session.messages)
         ? session.messages
             .filter((msg) => msg && typeof msg.content === 'string')
+            .slice(-180)
             .map((msg) => ({
               role: msg.role === 'assistant' ? 'assistant' : 'user',
               content: String(msg.content || '').slice(0, 32000),
@@ -6693,6 +6680,14 @@ async function saveChatSessionsToDb(sessions = []) {
   const keepIds = normalized.map((session) => session.id).filter(Boolean);
   const placeholders = keepIds.map(() => '?').join(',');
 
+  if (keepIds.length) {
+    await db.runQuery(`DELETE FROM chat_messages WHERE session_id NOT IN (${placeholders})`, keepIds).catch(() => {});
+    await db.runQuery(`DELETE FROM chat_sessions WHERE id NOT IN (${placeholders})`, keepIds).catch(() => {});
+  } else {
+    await db.runQuery(`DELETE FROM chat_messages`).catch(() => {});
+    await db.runQuery(`DELETE FROM chat_sessions`).catch(() => {});
+    return { saved: 0 };
+  }
 
   for (const session of normalized) {
     const createdIso = new Date(session.createdAt || Date.now()).toISOString();
@@ -6709,8 +6704,8 @@ async function saveChatSessionsToDb(sessions = []) {
       const messageId = chatMessageId(session.id, msg, idx);
       await db.runQuery(
         `INSERT OR REPLACE INTO chat_messages
-           (id, session_id, role, content, retrieval, thinking_trace, ts, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, session_id, role, content, retrieval, thinking_trace, ts, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           messageId,
           session.id,
@@ -6819,7 +6814,7 @@ ipcMain.handle('save-chat-sessions-to-memory', async (event, sessions) => {
     await saveChatSessionsToDb(sessions).catch((e) => {
       console.warn('[save-chat-sessions-to-memory] durable save failed', e?.message || e);
     });
-    for (const session of sessions) {
+    for (const session of sessions.slice(0, 50)) {
       try {
         const meta = {
           session_id: session.id,
@@ -6828,7 +6823,7 @@ ipcMain.handle('save-chat-sessions-to-memory', async (event, sessions) => {
           saved_from_ui: true
         };
         // Persist each message as a raw event so it enters the L1 event stream
-        for (const msg of (session.messages || [])) {
+        for (const msg of (session.messages || []).slice(-200)) {
           await ingestRawEvent({
             type: 'chat_message',
             timestamp: msg.ts ? new Date(msg.ts).toISOString() : new Date().toISOString(),
@@ -6893,18 +6888,6 @@ function scheduleDailyChatSave() {
 setInterval(() => {
   try { scheduleDailyChatSave(); } catch (e) { /* ignore */ }
 }, 60 * 60 * 1000);
-
-// Full Memory Graph for Settings Explorer
-ipcMain.handle("get-full-memory-graph", async () => {
-  try {
-    const nodes = await db.allQuery(`SELECT id, layer, subtype, title, summary, metadata FROM memory_nodes LIMIT 2000`).catch(() => []);
-    const edges = await db.allQuery(`SELECT from_node_id AS source, to_node_id AS target, edge_type, weight FROM memory_edges LIMIT 5000`).catch(() => []);
-    return { nodes, edges };
-  } catch (err) {
-    console.error("Failed to fetch full memory graph:", err);
-    return { nodes: [], edges: [] };
-  }
-});
 
 // AI Assistant Chat Logic
 ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
@@ -6979,7 +6962,7 @@ ipcMain.handle('generate-proactive-todos', async (event) => {
     const hasConcreteAction = (label = '') => /\b(open|draft|reply|send|prepare|review|confirm|research|finish|complete|schedule|summarize|update|submit|resolve|fix|call|book|share|wish|check\s*in|reconnect)\b/i.test(String(label || ''));
     const looksValidAISuggestion = (item) => Boolean(
       item &&
-      ['study', 'relationship', 'work', 'personal', 'creative', 'followup'].includes(String(item.type || '').toLowerCase()) &&
+      ['study', 'relationship'].includes(String(item.type || '').toLowerCase()) &&
       item.title &&
       item.reason &&
       Array.isArray(item.evidence) &&
@@ -9110,14 +9093,14 @@ ipcMain.handle('get-memory-graph-status', async () => {
   try {
     const db = require('./services/db');
     
-    const eventCount = await db.getQuery(`SELECT COUNT(*) as count FROM events`).catch(() => ({ count: 0 }));
-    const nodeCounts = await db.allQuery(`SELECT layer, COUNT(*) as count FROM memory_nodes GROUP BY layer`).catch(() => []);
-    const edgeCount = await db.getQuery(`SELECT COUNT(*) as count FROM memory_edges`).catch(() => ({ count: 0 }));
-    const sourceCounts = await db.allQuery(`SELECT source as source_type, COUNT(*) as count FROM events GROUP BY source`).catch(() => []);
+    const eventCount = await db.getQuery(`SELECT COUNT(*) as count FROM events`);
+    const nodeCounts = await db.allQuery(`SELECT layer, COUNT(*) as count FROM memory_nodes GROUP BY layer`);
+    const edgeCount = await db.getQuery(`SELECT COUNT(*) as count FROM memory_edges`);
+    const sourceCounts = await db.allQuery(`SELECT COALESCE(source_type, type) as source_type, COUNT(*) as count FROM events GROUP BY COALESCE(source_type, type)`);
     const typedRawCounts = await db.allQuery(
-      `SELECT source as source_type, COUNT(*) as count, MAX(timestamp) as latest
+      `SELECT COALESCE(source_type, type) as source_type, COUNT(*) as count, MAX(COALESCE(occurred_at, timestamp)) as latest
        FROM events
-       GROUP BY source`
+       GROUP BY COALESCE(source_type, type)`
     ).catch(() => []);
     const retrievalDocCount = await db.getQuery(`SELECT COUNT(*) as count FROM retrieval_docs`).catch(() => ({ count: 0 }));
     const suggestionCount = await db.getQuery(`SELECT COUNT(*) as count FROM suggestion_artifacts`).catch(() => ({ count: 0 }));
@@ -9215,7 +9198,7 @@ ipcMain.handle('search-memory-graph', async (event, query, options = {}) => {
       try {
         const { buildRetrievalThought } = require('./services/agent/retrieval-thought-system');
         const { buildHybridGraphRetrieval } = require('./services/agent/hybrid-graph-retrieval');
-        const thought = await buildRetrievalThought({
+        const thought = buildRetrievalThought({
           query: effectiveQuery,
           mode: 'chat',
           dateRange: dateRange || null,
@@ -9230,8 +9213,8 @@ ipcMain.handle('search-memory-graph', async (event, query, options = {}) => {
             source_types: normalizedDataSource ? [normalizedDataSource] : null,
             retrieval_thought: thought
           },
-          seedLimit: 12,
-          hopLimit: 4
+          seedLimit: 6,
+          hopLimit: 2
         }).catch(() => null);
         const routedEvidence = Array.isArray(routed?.evidence) ? routed.evidence : [];
         if (routedEvidence.length) {

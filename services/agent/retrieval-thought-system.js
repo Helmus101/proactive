@@ -99,13 +99,6 @@ function extractNoiseTerms(text) {
   return Array.from(matches).slice(0, 12);
 }
 
-function buildLexicalTerms(text, limit = 12) {
-  const exact = extractExactTokens(text);
-  const quoted = extractQuotedPhrases(text).map((item) => item.toLowerCase());
-  const normalized = normalizeTerms(text);
-  return safeUnique([...exact, ...quoted, ...normalized], limit);
-}
-
 function clamp(num, min, max) {
   return Math.max(min, Math.min(max, num));
 }
@@ -294,11 +287,9 @@ function widenTemporalWindow(dateRange, now = new Date()) {
   const spanMs = Math.max(1, end.getTime() - start.getTime());
   const dayMs = 24 * 60 * 60 * 1000;
 
-  // Multi-step widening logic
   if (spanMs <= 6 * 60 * 60 * 1000) {
-    // Widening from a few hours to a full day
     return buildTemporalRange({
-      label: 'widened_to_full_day',
+      label: 'widened_same_day',
       start: startOfDay(start),
       end: endOfDay(end),
       granularity: 'day',
@@ -306,7 +297,6 @@ function widenTemporalWindow(dateRange, now = new Date()) {
     });
   }
   if (spanMs <= dayMs * 1.1) {
-    // Widening from 1 day to 3 days
     const widenedStart = startOfDay(new Date(end.getFullYear(), end.getMonth(), end.getDate() - 2));
     return buildTemporalRange({
       label: 'widened_to_3_days',
@@ -317,7 +307,6 @@ function widenTemporalWindow(dateRange, now = new Date()) {
     });
   }
   if (spanMs <= dayMs * 3.2) {
-    // Widening from 3 days to 7 days
     const widenedStart = startOfDay(new Date(end.getFullYear(), end.getMonth(), end.getDate() - 6));
     return buildTemporalRange({
       label: 'widened_to_7_days',
@@ -327,34 +316,10 @@ function widenTemporalWindow(dateRange, now = new Date()) {
       source: 'widened'
     });
   }
-  if (spanMs <= dayMs * 7.2) {
-    // Widening from 7 days to 14 days
-    const widenedStart = startOfDay(new Date(end.getFullYear(), end.getMonth(), end.getDate() - 13));
-    return buildTemporalRange({
-      label: 'widened_to_14_days',
-      start: widenedStart,
-      end: endOfDay(end),
-      granularity: 'range',
-      source: 'widened'
-    });
-  }
-  if (spanMs <= dayMs * 14.2) {
-    // Widening from 14 days to 30 days
-    const widenedStart = startOfDay(new Date(end.getFullYear(), end.getMonth(), end.getDate() - 29));
-    return buildTemporalRange({
-      label: 'widened_to_30_days',
-      start: widenedStart,
-      end: endOfDay(end),
-      granularity: 'range',
-      source: 'widened'
-    });
-  }
 
-  // Fallback: double the window, capped at 90 days
-  const extraSpan = Math.min(spanMs, dayMs * 90);
-  const widenedStart = new Date(start.getTime() - extraSpan);
+  const widenedStart = startOfDay(new Date(end.getFullYear(), end.getMonth(), end.getDate() - 13));
   return buildTemporalRange({
-    label: 'widened_double_span',
+    label: 'widened_to_14_days',
     start: widenedStart,
     end: endOfDay(end > now ? now : end),
     granularity: 'range',
@@ -399,19 +364,16 @@ function stripQuestionFormatting(text) {
 function inferApps(text) {
   const lower = safeText(text).toLowerCase();
   const apps = [];
-  if (/\bgmail|email|inbox|thread|correspondence|mail\b/.test(lower)) apps.push('Gmail');
-  if (/\bmessages|imessage|sms|text message|pap|whatsapp|signal|telegram\b/.test(lower)) apps.push('Messages');
-  if (/\bslack|channel|dm|direct message\b/.test(lower)) apps.push('Slack');
-  if (/\bchrome|browser|extension|website|url|webpage|visited\b/.test(lower)) apps.push('Chrome');
-  if (/\bgithub|pull request|pr|repo|repository|commit|issue\b/.test(lower)) apps.push('GitHub');
-  if (/\bdocs|document|doc|slides|deck|spreadsheet|sheets\b/.test(lower)) apps.push('Google Docs');
-  if (/\bcalendar|meeting|agenda|invite|event|sync\b/.test(lower)) apps.push('Calendar');
-  if (/\bnotion|page|workspace|database\b/.test(lower)) apps.push('Notion');
-  if (/\bcursor|vscode|code editor|coding|ide|editor\b/.test(lower)) apps.push('Cursor');
-  if (/\bxcode|ios dev|swift\b/.test(lower)) apps.push('Xcode');
-  if (/\bfigma|design|prototype\b/.test(lower)) apps.push('Figma');
-  if (/\bzoom|teams|video call\b/.test(lower)) apps.push('Video');
-  return apps.slice(0, 4);
+  if (/\bgmail|email|inbox|thread\b/.test(lower)) apps.push('Gmail');
+  if (/\bmessages|imessage|sms|text message|pap\b/.test(lower)) apps.push('Messages');
+  if (/\bslack\b/.test(lower)) apps.push('Slack');
+  if (/\bchrome|browser|extension\b/.test(lower)) apps.push('Chrome');
+  if (/\bgithub|pull request|pr\b/.test(lower)) apps.push('GitHub');
+  if (/\bdocs|document|doc|slides|deck\b/.test(lower)) apps.push('Google Docs');
+  if (/\bcalendar|meeting|agenda\b/.test(lower)) apps.push('Calendar');
+  if (/\bnotion\b/.test(lower)) apps.push('Notion');
+  if (/\bcursor|vscode|code editor\b/.test(lower)) apps.push('Cursor');
+  return apps.slice(0, 3);
 }
 
 function inferSurfaceFamilies(text, candidateType = '', appScope = [], sourceScope = []) {
@@ -451,14 +413,12 @@ function inferActionStateTerms(text, candidateType = '') {
 function inferConceptualTerms(text, candidateType = '') {
   const lower = `${safeText(text)} ${safeText(candidateType)}`.toLowerCase();
   const hints = [];
-  if (/\bwaitlist|signup|sign up|form\b/.test(lower)) hints.push('user signups', 'conversion funnel', 'landing page', 'database schema');
-  if (/\brelationship|contact|follow up|follow-up|person\b/.test(lower)) hints.push('relationship health', 'next best action', 'recent interactions', 'personal history');
-  if (/\bmeeting|calendar|event\b/.test(lower)) hints.push('meeting prep', 'attendee context', 'calendar plan', 'previous syncs');
-  if (/\berror|bug|issue|extension\b/.test(lower)) hints.push('runtime failure', 'implementation context', 'debugging flow', 'stack trace analysis');
-  if (/\bproposal|doc|deck|report\b/.test(lower)) hints.push('document review', 'comments', 'share decision', 'v1 draft');
-  if (/\bcoding|implementation|feature|fix\b/.test(lower)) hints.push('code architecture', 'pull request context', 'logic flow', 'component structure');
-  if (/\bmarketing|growth|metrics|data\b/.test(lower)) hints.push('performance metrics', 'growth strategy', 'user engagement', 'conversion rate');
-  return safeUnique(hints, 6);
+  if (/\bwaitlist|signup|sign up|form\b/.test(lower)) hints.push('user signups', 'conversion funnel', 'landing page');
+  if (/\brelationship|contact|follow up|follow-up|person\b/.test(lower)) hints.push('relationship health', 'next best action', 'recent interactions');
+  if (/\bmeeting|calendar|event\b/.test(lower)) hints.push('meeting prep', 'attendee context', 'calendar plan');
+  if (/\berror|bug|issue|extension\b/.test(lower)) hints.push('runtime failure', 'implementation context', 'debugging flow');
+  if (/\bproposal|doc|deck|report\b/.test(lower)) hints.push('document review', 'comments', 'share decision');
+  return safeUnique(hints, 4);
 }
 
 function inferOutcomeTerms(text, candidateType = '') {
@@ -521,128 +481,127 @@ function buildMessageQueriesFromBundle(bundle, { max = 5 } = {}) {
   return queries.filter(Boolean).slice(0, max);
 }
 
-async function buildMultiAngleQueryBundle(baseText, {
+function buildMultiAngleQueryBundle(baseText, {
   max = 7,
   candidateType = '',
   appScope = [],
   sourceScope = [],
-  mode = 'chat',
-  deepScan = false
+  mode = 'chat'
 } = {}) {
-  const apiKey = process.env.DEEPSEEK_API_KEY;
+  const strippedNoiseTerms = extractNoiseTerms(baseText);
   const cleaned = stripEmbeddingWeakTerms(stripQuestionFormatting(baseText));
-  let finalQueries = [];
-  let llmSourceMode = null;
+  const cleanedExact = safeText(cleaned).replace(/\s+/g, ' ').trim();
+  const terms = normalizeTerms(cleaned);
+  const namedEntities = extractNamedEntities(baseText);
+  const exactTokens = extractExactTokens(baseText);
+  const apps = inferApps(baseText);
+  const technicalHints = safeUnique([
+    ...inferTechnicalHints(baseText),
+    ...inferCoOccurringTerms(baseText, candidateType).filter((item) => /\.[a-z]{2,4}\b|handler|schema|database|library|stack trace|error|exception|function|manifest/i.test(item))
+  ], 5);
+  const surfaceFamilies = inferSurfaceFamilies(baseText, candidateType, appScope, sourceScope);
+  const actionStateTerms = inferActionStateTerms(baseText, candidateType);
+  const conceptualTerms = inferConceptualTerms(baseText, candidateType);
+  const outcomeTerms = inferOutcomeTerms(baseText, candidateType);
+  const inverse = inferInverseFrame(baseText);
+  const entity = namedEntities[0] || terms[0] || '';
+  const coreState = actionStateTerms[0] || terms[1] || '';
+  const contextTerm = exactTokens[0] || technicalHints[0] || apps[0] || candidateType || terms[2] || '';
 
-  if (apiKey) {
-    const prompt = `
-    You are a retrieval query generator and router for an AI memory system. 
-    Your goal is to:
-    1. Decide the best source for the information: "memory" (personal history/context), "web" (public knowledge), or "hybrid" (both).
-    2. Generate exactly 7 distinct search queries for vector search across the user's memory.
-    
-    Use Intent Decomposition and Semantic Expansion for queries:
-    1. Literal: The cleaned user query.
-    2. Decomposed (Sub-intent 1): A specific sub-task or entity mentioned.
-    3. Decomposed (Sub-intent 2): Another specific sub-task or entity.
-    4. Expanded (Semantic 1): Using synonyms or related concepts.
-    5. Expanded (Semantic 2): Broader context or thematic expansion.
-    6. Contextual: Search for the likely environment (app, site, or situation).
-    7. Thematic: Search for the overarching project or topic.
-    
-    Return strict JSON: {"source_mode": "memory"|"web"|"hybrid", "queries": ["query 1", "query 2", "query 3", "query 4", "query 5", "query 6", "query 7"]}
-    
-    User Query: "${baseText.replace(/"/g, '\\"')}"
-    `;
-    try {
-      const result = await callLLM(prompt, apiKey, 0.3);
-      if (result && Array.isArray(result.queries)) {
-        finalQueries = result.queries.slice(0, 7);
-      }
-      if (result && result.source_mode) {
-        llmSourceMode = result.source_mode;
-      }
-    } catch (e) {
-      console.warn('[retrieval-thought] LLM query generation failed:', e.message);
-    }
-  }
+  const bundle = {
+    literal: '',
+    conceptual: '',
+    technical: '',
+    surface: '',
+    structural: '',
+    outcome: '',
+    entity: entity || '',
+    extra: []
+  };
 
-  // Fallback to heuristics if LLM failed or no API key
-  if (finalQueries.length < 7) {
-    const intent = inferIntent(baseText, mode, candidateType);
-    const terms = normalizeTerms(cleaned);
-    const namedEntities = extractNamedEntities(baseText);
-    const entity = namedEntities[0] || terms[0] || '';
-    const clusters = getThematicClusters(baseText);
-    const synonyms = expandSynonyms(terms.slice(0, 3));
-    const decomposition = { intent, entity, terms, clusters };
-    const semanticQueries = [];
-    uniquePush(semanticQueries, cleaned, 7);
-    if (intent === 'fact') uniquePush(semanticQueries, `${entity} exact details`.trim(), 7);
-    else if (intent === 'proactive') uniquePush(semanticQueries, `${entity} next steps and actions`.trim(), 7);
-    else uniquePush(semanticQueries, `${entity} current status and progress`.trim(), 7);
-    buildCrossLayerQueries(decomposition).forEach(q => uniquePush(semanticQueries, q, 7));
-    if (synonyms.length > terms.length) {
-      const extraSynonym = synonyms.find(s => !terms.includes(s.toLowerCase()));
-      if (extraSynonym) uniquePush(semanticQueries, `${entity} ${extraSynonym}`.trim(), 7);
-    }
-    uniquePush(semanticQueries, `${entity} ${clusters[0].replace(/_/g, ' ')}`.trim(), 7);
-    const filler = [`${entity} recent context`, `${entity} implementation details`, `${entity} related activity`, `${entity} overview`, `${entity} background`];
-    for (const f of filler) {
-      if (semanticQueries.length >= 7) break;
-      uniquePush(semanticQueries, f, 7);
-    }
-    finalQueries = semanticQueries.slice(0, 7);
-  }
+  bundle.literal = [entity, coreState, contextTerm].filter(Boolean).join(' ').trim() || cleanedExact;
+  bundle.conceptual = safeUnique([entity, ...conceptualTerms, coreState], 4).join(' ').trim() || bundle.literal;
+  bundle.technical = safeUnique([entity, coreState, ...technicalHints], 5).join(' ').trim() || '';
+  const surfaceCandidates = buildSurfaceSyntaxQueries({
+    entity,
+    stateTerms: actionStateTerms,
+    technicalHints,
+    exactTokens,
+    surfaceFamilies,
+    candidateType
+  });
+  bundle.surface = surfaceCandidates[0] || [entity, contextTerm || 'dashboard', coreState || 'status'].filter(Boolean).join(' ').trim();
+  const structuralCandidates = buildStructuralQueries({
+    entity,
+    exactTokens,
+    technicalHints,
+    candidateType
+  });
+  bundle.structural = structuralCandidates[0] || [exactTokens[0] || '', candidateType || '', 'structure'].filter(Boolean).join(' ').trim();
+  bundle.outcome = safeUnique([entity, ...outcomeTerms], 4).join(' ').trim() || '';
+
+  const extras = [];
+  if (entity && coreState) uniquePush(extras, `${entity} ${coreState}`, 3);
+  if (exactTokens[0] && bundle.literal) uniquePush(extras, `${exactTokens[0]} ${bundle.literal}`, 3);
+  if (mode === 'suggestion' && candidateType) uniquePush(extras, `${candidateType} ${bundle.outcome || bundle.literal}`.trim(), 3);
+  bundle.extra = extras.slice(0, 2);
+
+  const semanticQueries = [];
+  const lensQueries = [bundle.literal, bundle.technical, bundle.conceptual, bundle.surface, bundle.structural];
+  // 5-lens default, then fill with precise extras up to max.
+  lensQueries.forEach((query) => uniquePush(semanticQueries, query, max));
+  if (cleanedExact.length >= 4) uniquePush(semanticQueries, cleanedExact, max);
+  for (const phrase of extractQuotedPhrases(baseText)) uniquePush(semanticQueries, phrase, max);
+  [bundle.outcome, ...bundle.extra].forEach((query) => uniquePush(semanticQueries, query, max));
+  if (inverse) uniquePush(semanticQueries, inverse, max);
+  if (apps[0] && bundle.surface) uniquePush(semanticQueries, `${apps[0]} ${bundle.surface}`, max);
+  if (entity && bundle.structural) uniquePush(semanticQueries, `${entity} ${bundle.structural}`, max);
+
+  const lexicalTerms = safeUnique([
+    ...normalizeTerms(cleanedExact).slice(0, 10),
+    ...extractQuotedPhrases(baseText).map((item) => item.toLowerCase()),
+    ...exactTokens,
+    ...namedEntities.map((item) => item.toLowerCase()),
+    ...surfaceFamilies.flatMap((family) => {
+      if (family === 'communication') return ['subject:', 'from:', 'thread:'];
+      if (family === 'coding') return ['commit:', 'pr:'];
+      return [];
+    })
+  ], 18).filter((term) => isUsefulLexicalTerm(term)).slice(0, 18);
 
   return {
-    query_bundle: {
-      intent: inferIntent(baseText, mode, candidateType),
-      entity: extractNamedEntities(baseText)[0] || normalizeTerms(cleaned)[0] || '',
-      clusters: getThematicClusters(baseText),
-      semantic_queries: finalQueries,
-      source_mode: llmSourceMode || 'memory'
-    },
-    semantic_queries: finalQueries,
-    message_queries: [],
-    lexical_terms: [], // Removed lexical terms
+    query_bundle: bundle,
+    semantic_queries: semanticQueries.slice(0, max),
+    message_queries: buildMessageQueriesFromBundle(bundle, { max: 5 }),
+    lexical_terms: lexicalTerms,
     debug: {
-      intent: inferIntent(baseText, mode, candidateType),
-      clusters: getThematicClusters(baseText),
-      entities: extractNamedEntities(baseText)
+      inferred_entities: namedEntities,
+      inferred_surfaces: surfaceFamilies,
+      inferred_technical_hints: technicalHints,
+      stripped_noise_terms: strippedNoiseTerms
     }
   };
 }
 
-
 function inferTechnicalHints(text) {
   const lower = safeText(text).toLowerCase();
   const hints = [];
-  if (/\bextension|manifest|background\.js|service worker|native messaging|content script\b/.test(lower)) {
-    hints.push('manifest.json', 'background script', 'native messaging', 'content script', 'chrome extension');
+  if (/\bextension|manifest|background\.js|service worker|native messaging\b/.test(lower)) {
+    hints.push('manifest.json', 'background script', 'native messaging');
   }
-  if (/\bbug|error|exception|fail|issue|crash|failing|failed\b/.test(lower)) {
-    hints.push('stack trace', 'runtime error', 'debugging', 'error logs', 'exception details');
+  if (/\bbug|error|exception|fail|issue|crash\b/.test(lower)) {
+    hints.push('stack trace', 'runtime error', 'debugging');
   }
-  if (/\bemail|thread|reply|message|gmail|slack\b/.test(lower)) {
-    hints.push('subject line', 'reply needed', 'email thread', 'message history', 'sender info');
+  if (/\bemail|thread|reply\b/.test(lower)) {
+    hints.push('subject line', 'reply needed', 'email thread');
   }
-  if (/\bmeeting|calendar|event|sync|call\b/.test(lower)) {
-    hints.push('agenda', 'attendees', 'calendar event', 'meeting notes', 'invite details');
+  if (/\bmeeting|calendar|event\b/.test(lower)) {
+    hints.push('agenda', 'attendees', 'calendar event');
   }
-  if (/\bproposal|doc|draft|slide|deck|report|spec|brief\b/.test(lower)) {
-    hints.push('draft', 'comments', 'document', 'v1 version', 'review feedback');
+  if (/\bproposal|doc|draft|slide|deck|report\b/.test(lower)) {
+    hints.push('draft', 'comments', 'document');
   }
-  if (/\bdatabase|schema|sql|query|table|migration\b/.test(lower)) {
-    hints.push('schema definition', 'database migration', 'sql query', 'row count', 'table structure');
-  }
-  if (/\bapi|endpoint|request|response|handler|webhook\b/.test(lower)) {
-    hints.push('api endpoint', 'request payload', 'handler function', 'webhook trigger', 'json response');
-  }
-  if (/\bui|component|react|style|css|html|layout\b/.test(lower)) {
-    hints.push('react component', 'ui layout', 'css styles', 'frontend logic', 'view structure');
-  }
-  return Array.from(new Set(hints)).slice(0, 8);
+  return Array.from(new Set(hints)).slice(0, 4);
 }
 
 function inferCoOccurringTerms(text, candidateType = '') {
@@ -664,81 +623,16 @@ function inferInverseFrame(text) {
   return '';
 }
 
-function expandSynonyms(terms = []) {
-  const synonyms = {
-    'bug': ['error', 'issue', 'failure', 'crash', 'exception'],
-    'email': ['message', 'gmail', 'thread', 'correspondence'],
-    'meeting': ['calendar', 'event', 'agenda', 'call', 'sync'],
-    'doc': ['document', 'proposal', 'brief', 'spec', 'deck'],
-    'code': ['implementation', 'script', 'function', 'handler', 'fix'],
-    'status': ['progress', 'update', 'current state', 'where things stand'],
-    'contact': ['person', 'relationship', 'interaction', 'meeting'],
-    'signup': ['conversion', 'waitlist', 'registration', 'user acquisition']
-  };
-  const expanded = [...terms];
-  terms.forEach(t => {
-    const lower = t.toLowerCase();
-    if (synonyms[lower]) {
-      expanded.push(...synonyms[lower]);
-    }
-  });
-  return safeUnique(expanded, 12);
-}
-
-function getThematicClusters(text) {
-  const lower = safeText(text).toLowerCase();
-  const clusters = [];
-  if (/\b(bug|error|issue|crash|fix|implementation|code|tsx|js|ts)\b/.test(lower)) {
-    clusters.push('technical_debt_and_execution');
-  }
-  if (/\b(email|message|slack|thread|reply|contact|person|interaction)\b/.test(lower)) {
-    clusters.push('communication_and_relationships');
-  }
-  if (/\b(meeting|calendar|event|agenda|sync|call)\b/.test(lower)) {
-    clusters.push('planning_and_coordination');
-  }
-  if (/\b(doc|document|proposal|brief|spec|deck|report)\b/.test(lower)) {
-    clusters.push('documentation_and_strategy');
-  }
-  if (/\b(signup|waitlist|conversion|user|marketing|landing)\b/.test(lower)) {
-    clusters.push('growth_and_product_metrics');
-  }
-  return clusters.length ? clusters : ['general_activity'];
-}
-
-function buildCrossLayerQueries(decomposition) {
-  const { intent, entity, terms, clusters } = decomposition;
-  const queries = [];
-  const base = entity || terms[0] || 'activity';
-  const cluster = clusters[0] || '';
-
-  // Episodic: Specific events and actions
-  queries.push(`${base} ${terms[1] || 'recent action'}`.trim());
-  
-  // Semantic: Conceptual knowledge and facts
-  queries.push(`${base} ${cluster.replace(/_/g, ' ')} context`.trim());
-  
-  // Core: Long-term patterns and importance
-  queries.push(`${base} significance and patterns`.trim());
-
-  return queries;
-}
-
 function inferIntent(text, mode, candidateType = '') {
   const lower = `${safeText(text)} ${safeText(candidateType)}`.toLowerCase();
-  
-  // Fact: point-in-time recovery
-  if (/\b(what was|what did|where is|exact|verbatim|quote|when|at what time|on [A-Z][a-z]+)\b/.test(lower)) {
-    return 'fact';
+  if (/\bwhat was i doing|what happened|20 minutes ago|30 minutes ago|an hour ago\b/.test(lower)) {
+    return 'recall recent activity from time-anchored context';
   }
-  
-  // Proactive: future-looking/actionable
-  if (/\b(should|next|action|todo|plan|prepare|prep|upcoming|future|suggest)\b/.test(lower) || mode === 'suggestion') {
-    return 'proactive';
-  }
-  
-  // State: current/ongoing status
-  return 'state';
+  if (/\bemail|reply|thread|message|inbox\b/.test(lower)) return 'recover communication context and next action';
+  if (/\bmeeting|calendar|agenda\b/.test(lower)) return 'recover meeting context and preparation needs';
+  if (/\bbug|error|extension|manifest|background\.js\b/.test(lower)) return 'recover implementation context and technical evidence';
+  if (mode === 'suggestion') return 'infer the next concrete action from recent evidence';
+  return 'recover the most relevant context across recent work';
 }
 
 function inferEntryMode(text, intent = '', mode = 'chat') {
@@ -752,15 +646,10 @@ function inferEntryMode(text, intent = '', mode = 'chat') {
 
 function inferPreferredSourceTypes(text, candidateType = '') {
   const lower = `${safeText(text)} ${safeText(candidateType)}`.toLowerCase();
-  const preferred = [];
-  if (/\bemail|gmail|thread|reply|message|inbox|correspondence\b/.test(lower)) preferred.push('communication');
-  if (/\bmeeting|calendar|agenda|attendees|event|sync\b/.test(lower)) preferred.push('calendar');
-  if (/\bwhat was i doing|what happened|extension|chrome|cursor|screen|desktop|activity|visited\b/.test(lower)) preferred.push('desktop', 'communication', 'calendar');
-  if (/\bdecision|decided|choice|resolution\b/.test(lower)) preferred.push('decision');
-  if (/\bfact|detail|specific|verbatim|quote\b/.test(lower)) preferred.push('fact');
-  if (/\btask|todo|action|plan|next steps\b/.test(lower)) preferred.push('task');
-  if (/\bperson|who is|contact|relationship\b/.test(lower)) preferred.push('person');
-  return safeUnique(preferred, 5);
+  if (/\bemail|gmail|thread|reply|message|inbox\b/.test(lower)) return ['communication'];
+  if (/\bmeeting|calendar|agenda|attendees|event\b/.test(lower)) return ['calendar'];
+  if (/\bwhat was i doing|what happened|extension|chrome|cursor|screen|desktop\b/.test(lower)) return ['desktop', 'communication', 'calendar'];
+  return [];
 }
 
 function inferHardSourceTypes(text, candidateType = '') {
@@ -773,7 +662,7 @@ function inferHardSourceTypes(text, candidateType = '') {
 
 function inferSummaryVsRaw(text) {
   const lower = safeText(text).toLowerCase();
-  if (/\b(exact|verbatim|quote|quoted|precise|wording|show me the email|exact email|exact message|what did .* say|ocr|screenshot|image|reading from|screen|capture|text in|visible)\b/.test(lower)) {
+  if (/\b(exact|verbatim|quote|quoted|precise|wording|show me the email|exact email|exact message|what did .* say)\b/.test(lower)) {
     return 'raw';
   }
   if (/\b(status|progress|update|where do things stand|what's the status|how is .* going|what did i work on|summary)\b/.test(lower)) {
@@ -816,43 +705,6 @@ function inferWebGate(query) {
     return { strategyMode: 'memory_then_web', webGateReason: 'The question appears current or public-facing, so web corroboration may be needed after memory retrieval.' };
   }
   return { strategyMode: 'memory_only', webGateReason: 'Memory retrieval should be sufficient unless the internal evidence is weak.' };
-}
-
-function inferRouterDecision(text, llmSourceMode, webGate) {
-  const lower = safeText(text).toLowerCase();
-  const looksPersonal = /\b(i|my|me|mine)\b/.test(lower);
-  const asksLifeContext = /\b(what did i|did i|my study|my habits|follow up with|unfinished tasks|my notes|my history|my project|my work|my life)\b/.test(lower);
-  const asksCurrentWorld = /\b(latest|current|today|news|public|internet|web|look up|online|how does .* work|what is)\b/.test(lower);
-  const asksBlend = /\b(using my|based on my|with my notes|my context and|my history and|combine)\b/.test(lower);
-  const asksSelfProfileWriting = /\b(write|draft|create|generate|make)\b.*\b(bio|biography|profile|about me|personal summary|intro|introduction)\b|\b(bio|biography|profile|about me|personal summary|intro|introduction)\b.*\b(me|myself|my)\b/.test(lower);
-
-  let sourceMode = 'memory_only';
-  let routerReason = 'The request appears grounded in personal memory and local context.';
-
-  if (asksSelfProfileWriting) {
-    sourceMode = 'memory_only';
-    routerReason = 'The request is asking for a personal bio/profile grounded in memory and prior context.';
-  } else if (llmSourceMode === 'web') {
-    sourceMode = 'web_only';
-    routerReason = 'The structured router classified this as external or current information.';
-  } else if (llmSourceMode === 'hybrid') {
-    sourceMode = 'memory_then_web';
-    routerReason = 'The structured router classified this as needing memory context plus external corroboration.';
-  } else if (asksBlend || (looksPersonal && asksCurrentWorld)) {
-    sourceMode = 'memory_then_web';
-    routerReason = 'The request mixes personal context with current or public information.';
-  } else if (asksCurrentWorld && !looksPersonal && !asksLifeContext) {
-    sourceMode = 'web_only';
-    routerReason = 'The request appears focused on current or public world knowledge.';
-  } else if (looksPersonal || asksLifeContext) {
-    sourceMode = 'memory_only';
-    routerReason = 'The request appears focused on personal activity, memory, or prior context.';
-  } else if (webGate?.strategyMode === 'memory_then_web') {
-    sourceMode = 'memory_then_web';
-    routerReason = webGate.webGateReason || 'The request may need web corroboration after memory retrieval.';
-  }
-
-  return { sourceMode, routerReason };
 }
 
 function shouldUseQuerylessMode(text, dateRange) {
@@ -898,9 +750,7 @@ function buildMessageQueries(baseText, { max = 5, candidateType = '' } = {}) {
   return queries.filter(Boolean).slice(0, max);
 }
 
-const { callLLM } = require('./intelligence-engine');
-
-async function buildRetrievalThought({
+function buildRetrievalThought({
   query = '',
   mode = 'chat',
   candidate = null,
@@ -932,55 +782,38 @@ async function buildRetrievalThought({
   const webGate = inferWebGate(query || mergedText);
   const preferredSourceTypes = inferPreferredSourceTypes(mergedText || query, candidateType);
   const hardSourceTypes = inferHardSourceTypes(mergedText || query, candidateType);
-  
-  const requiresDeepContext = /\b(relationship|pattern|habit|preference|long-term|study habits|multi-hop|recurring|theme|trend|habitual|regularly|typical)\b/i.test(mergedText || query);
-
-  const structuredQueries = await buildMultiAngleQueryBundle(mergedText || query, {
+  const structuredQueries = buildMultiAngleQueryBundle(mergedText || query, {
     max: 7,
     candidateType,
     appScope: apps,
     sourceScope: hardSourceTypes || preferredSourceTypes || [],
-    mode,
-    deepScan: requiresDeepContext
+    mode
   });
-  let semanticQueries = Array.isArray(structuredQueries?.semantic_queries) && structuredQueries.semantic_queries.length === 7
+  let semanticQueries = Array.isArray(structuredQueries?.semantic_queries) && structuredQueries.semantic_queries.length
     ? structuredQueries.semantic_queries
-    : sanitizeQueryList(structuredQueries?.semantic_queries || [], 7);
-  
-  if (semanticQueries.length < 7) {
+    : fallbackSemanticQueries(mergedText || query, candidateType, 7);
+  semanticQueries = sanitizeQueryList(semanticQueries, 7);
+  if (semanticQueries.length < 5) {
     const filler = sanitizeQueryList(fallbackSemanticQueries(mergedText || query, candidateType, 7), 7);
-    for (const q of filler) {
-      uniquePush(semanticQueries, q, 7);
-      if (semanticQueries.length >= 7) break;
-    }
+    for (const q of filler) uniquePush(semanticQueries, q, 7);
   }
-  
-  const messageQueries = [];
+  const messageQueries = sanitizeQueryList(Array.isArray(structuredQueries?.message_queries) ? structuredQueries.message_queries : [], 5);
   const intent = inferIntent(query || mergedText, mode, candidateType);
   const entryMode = inferEntryMode(query || mergedText, intent, mode);
-  const alpha = (summaryVsRaw === 'raw' || entryMode === 'query_first') ? 0.35 : 0.65;
   const reasoning = [];
-  const lexicalTerms = buildLexicalTerms(mergedText || query);
-  
+  const lexicalTerms = ((structuredQueries && structuredQueries.lexical_terms) ? structuredQueries.lexical_terms : []).filter((term) => isUsefulLexicalTerm(term));
+  if (!lexicalTerms.length) {
+    lexicalTerms.push(
+      ...Array.from(new Set([
+        ...normalizeTerms(stripEmbeddingWeakTerms(mergedText || query)).slice(0, 10),
+        ...extractExactTokens(mergedText || query),
+        ...extractQuotedPhrases(mergedText || query).map((item) => item.toLowerCase()),
+        ...extractNamedEntities(mergedText || query).map((item) => item.toLowerCase())
+      ])).filter((term) => isUsefulLexicalTerm(term)).slice(0, 16)
+    );
+  }
   const temporalReasoning = [];
-  const llmSource = structuredQueries?.query_bundle?.source_mode || null;
-  const router = inferRouterDecision(mergedText || query, llmSource, webGate);
-  const strategyMode = router.sourceMode;
-
-  const webQueries = sanitizeQueryList(
-    safeUnique([
-      ...(structuredQueries?.semantic_queries || []),
-      ...fallbackSemanticQueries(mergedText || query, candidateType, 5)
-    ], 7),
-    7
-  );
-
-  const querySets = {
-    memory_queries: semanticQueries,
-    message_queries: messageQueries,
-    web_queries: webQueries
-  };
-
+  const strategyMode = webGate.strategyMode;
   const filters = {
     app: apps.length ? apps : null,
     date_range: normalizedDateRange,
@@ -989,9 +822,7 @@ async function buildRetrievalThought({
 
   reasoning.push(`Intent: ${intent}.`);
   reasoning.push(`Entry mode: ${entryMode}.`);
-  reasoning.push(`Router source mode: ${strategyMode}.`);
-  reasoning.push('Mode: Agentic Retrieval Router (LLM-based source selection + 7-Query Batch).');
-  reasoning.push('Batching: Enforced strict 7-query limit.');
+  reasoning.push('Mode: semantic multi-query retrieval with literal, conceptual, technical, surface, and outcome angles.');
   reasoning.push(`Summary mode: ${summaryVsRaw === 'raw' ? 'raw evidence retrieval' : 'bounded summary retrieval'}.`);
   if (apps.length) reasoning.push(`App hints: ${apps.join(', ')}.`);
   if (hardSourceTypes?.length) reasoning.push(`Hard source scope: ${hardSourceTypes.join(', ')}.`);
@@ -1006,16 +837,12 @@ async function buildRetrievalThought({
     temporalReasoning.push('No temporal window inferred from the user phrasing.');
   }
   reasoning.push('Embedding rule: relative time and vague deixis are handled by filters, not semantic queries.');
-  reasoning.push(`Router reason: ${router.routerReason}`);
   reasoning.push(`Web gate: ${webGate.webGateReason}`);
 
   return {
     mode: 'semantic',
     strategy_mode: strategyMode,
-    source_mode: strategyMode,
-    router_reason: router.routerReason,
     entry_mode: entryMode,
-    alpha,
     summary_vs_raw: summaryVsRaw,
     time_scope: {
       label: normalizedDateRange?.label || inferredTemporalWindow?.label || defaultRecentWindow?.label || 'all_time',
@@ -1029,7 +856,6 @@ async function buildRetrievalThought({
     semantic_queries: semanticQueries,
     message_queries: messageQueries,
     lexical_terms: lexicalTerms,
-    query_sets: querySets,
     query_bundle: structuredQueries?.query_bundle || null,
     query_debug: structuredQueries?.debug || {
       inferred_entities: extractNamedEntities(mergedText || query),
@@ -1049,12 +875,11 @@ async function buildRetrievalThought({
       attempted: false,
       widened: false
     },
-    seed_limit: 20,
-    hop_limit: 10,
-    context_budget_tokens: mode === 'suggestion' ? 1200 : 2000,
+    seed_limit: mode === 'suggestion' ? 4 : 5,
+    hop_limit: 2,
+    context_budget_tokens: mode === 'suggestion' ? 550 : 800,
     search_queries: semanticQueries,
     search_queries_messages: messageQueries,
-    web_queries: webQueries,
     app_hints: apps,
     date_range: normalizedDateRange,
     reasoning
@@ -1065,17 +890,12 @@ function summarizeRetrievalThought(thought) {
   const plan = thought || {};
   const lines = [];
   lines.push(`Retrieval thought mode=${plan.mode || 'semantic'} strategy=${plan.strategy_mode || 'memory_only'} entry=${plan.entry_mode || 'hybrid'} intent=${plan.intent || 'unknown'}.`);
-  if (plan.source_mode) lines.push(`Router source mode=${plan.source_mode}.`);
-  if (plan.router_reason) lines.push(`Router reason=${plan.router_reason}`);
   lines.push(`Summary mode=${plan.summary_vs_raw || 'summary'}.`);
   if (Array.isArray(plan.semantic_queries || plan.search_queries) && (plan.semantic_queries || plan.search_queries).length) {
     lines.push(`Screen queries: ${(plan.semantic_queries || plan.search_queries).join(' | ')}.`);
   }
   if (Array.isArray(plan.message_queries || plan.search_queries_messages) && (plan.message_queries || plan.search_queries_messages).length) {
     lines.push(`Message queries: ${(plan.message_queries || plan.search_queries_messages).join(' | ')}.`);
-  }
-  if (Array.isArray(plan.web_queries) && plan.web_queries.length) {
-    lines.push(`Web queries: ${plan.web_queries.join(' | ')}.`);
   }
   return lines.concat(Array.isArray(plan.reasoning) ? plan.reasoning : []);
 }
@@ -1117,7 +937,7 @@ function buildSpeculativePrefetchPlan() {
     intent: 'Speculative prefetch of recent context to prime cache',
     semantic_queries: ['recent open loops', 'ongoing task status', 'unanswered communications'],
     message_queries: [],
-    lexical_terms: [],
+    lexical_terms: ['todo', 'draft', 'review'],
     query_bundle: null,
     query_debug: null,
     preferred_source_types: [],
@@ -1148,6 +968,5 @@ module.exports = {
   buildMessageQueries,
   buildMultiAngleQueryBundle,
   isMessageLikeRow,
-  inferSurfaceFamilies,
   buildSpeculativePrefetchPlan
 };

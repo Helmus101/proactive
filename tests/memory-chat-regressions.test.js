@@ -6,7 +6,6 @@ const { buildThinkingTrace } = require('../services/agent/chat-engine');
 const { normalizeEventEnvelope } = require('../services/ingestion');
 const { clusterEnvelopes } = require('../services/agent/graph-derivation');
 const { buildRetrievalThought } = require('../services/agent/retrieval-thought-system');
-const { buildHybridGraphRetrieval } = require('../services/agent/hybrid-graph-retrieval');
 const { planNextAction, normalizeDesktopGoal } = require('../services/agent/agentPlanner');
 
 async function testEpisodeSeedSourceRefs() {
@@ -184,8 +183,8 @@ function testEpisodeAnchorStaysOnFirstDay() {
   assert.strictEqual(new Date(groups[0].latestTs).toISOString(), '2026-04-04T08:00:00.000Z');
 }
 
-async function testRetrievalThoughtExtractsExactTerms() {
-  const thought = await buildRetrievalThought({
+function testRetrievalThoughtExtractsExactTerms() {
+  const thought = buildRetrievalThought({
     query: 'What was the exact email from alexandra@albertschool.com about manifest.json yesterday?'
   });
 
@@ -194,12 +193,13 @@ async function testRetrievalThoughtExtractsExactTerms() {
   assert.ok(thought.semantic_queries.some((item) => /manifest\.json/i.test(item)));
   assert.deepStrictEqual(thought.filters.source_types, ['communication']);
   assert.ok(thought.query_bundle);
+  assert.ok(/^(Subject:|From:|Thread:)/.test(thought.query_bundle.surface));
   assert.ok(Array.isArray(thought.query_debug?.stripped_noise_terms));
   assert.ok(thought.query_debug.stripped_noise_terms.includes('yesterday'));
 }
 
-async function testRetrievalThoughtDefaultsToSevenDaySummaryWindow() {
-  const thought = await buildRetrievalThought({
+function testRetrievalThoughtDefaultsToSevenDaySummaryWindow() {
+  const thought = buildRetrievalThought({
     query: "What's the status of the Weave waitlist form?"
   });
 
@@ -210,543 +210,28 @@ async function testRetrievalThoughtDefaultsToSevenDaySummaryWindow() {
   assert.ok(thought.applied_date_range?.start);
   assert.ok(thought.applied_date_range?.end);
   assert.ok(thought.semantic_queries.length >= 5 && thought.semantic_queries.length <= 7);
+  assert.ok(thought.query_bundle?.literal);
+  assert.ok(thought.query_bundle?.conceptual);
+  assert.ok(thought.query_bundle?.technical);
+  assert.ok(thought.query_bundle?.surface);
+  assert.ok(thought.query_bundle?.outcome);
   assert.ok(thought.semantic_queries.every((item) => !/\byesterday\b|\blast week\b|\bwhat(?:'s| is)\b/i.test(item)));
 }
 
-async function testRetrievalThoughtRoutesMemoryWebAndHybrid() {
-  const memory = await buildRetrievalThought({
-    query: 'What did I work on with Alex last week?'
-  });
-  const web = await buildRetrievalThought({
-    query: 'What is the latest news on OpenAI today?'
-  });
-  const hybrid = await buildRetrievalThought({
-    query: 'Use my notes and the latest study techniques to help me study algebra.'
-  });
-  const bio = await buildRetrievalThought({
-    query: 'write a bio about me'
-  });
-
-  assert.strictEqual(memory.source_mode, 'memory_only');
-  assert.strictEqual(web.source_mode, 'web_only');
-  assert.strictEqual(hybrid.source_mode, 'memory_then_web');
-  assert.strictEqual(bio.source_mode, 'memory_only');
-  assert.ok(typeof hybrid.router_reason === 'string' && hybrid.router_reason.length > 0);
-  assert.ok(Array.isArray(hybrid.query_sets?.memory_queries));
-  assert.ok(Array.isArray(hybrid.query_sets?.web_queries));
-}
-
-async function testRetrievalThoughtBuildsCodingAndCommunicationAngles() {
-  const codingThought = await buildRetrievalThought({
+function testRetrievalThoughtBuildsCodingAndCommunicationAngles() {
+  const codingThought = buildRetrievalThought({
     query: 'How is the browser extension bug in manifest.json going?'
   });
+  assert.ok(codingThought.query_bundle?.technical);
+  assert.ok(/manifest\.json|background\.js|permissions|error/i.test(codingThought.query_bundle.technical));
   assert.ok(Array.isArray(codingThought.query_debug?.inferred_technical_hints));
   assert.ok(codingThought.query_debug.inferred_technical_hints.length >= 1);
 
-  const messageThought = await buildRetrievalThought({
+  const messageThought = buildRetrievalThought({
     query: 'Can you find the follow-up email from Sarah about the browser extension?'
   });
-  assert.ok(messageThought.semantic_queries.length >= 1);
-}
-
-async function testHybridRetrievalPrefersDownwardExpansion() {
-  const originalAllQuery = db.allQuery;
-  const originalGetQuery = db.getQuery;
-  const originalRunQuery = db.runQuery;
-
-  const nodes = {
-    core_1: {
-      id: 'core_1',
-      layer: 'core',
-      subtype: 'goal',
-      title: 'Study strategy',
-      summary: 'Long-term study goal',
-      canonical_text: 'Study strategy long-term study goal',
-      confidence: 0.95,
-      status: 'active',
-      source_refs: '[]',
-      metadata: JSON.stringify({ anchor_at: '2026-04-10T09:00:00.000Z' }),
-      created_at: '2026-04-10T09:00:00.000Z',
-      updated_at: '2026-04-10T09:00:00.000Z',
-      embedding: '[]',
-      anchor_date: '2026-04-10'
-    },
-    semantic_1: {
-      id: 'semantic_1',
-      layer: 'semantic',
-      subtype: 'task',
-      title: 'Review algebra',
-      summary: 'Weak algebra concepts',
-      canonical_text: 'Review algebra weak concepts',
-      confidence: 0.9,
-      status: 'active',
-      source_refs: '[]',
-      metadata: JSON.stringify({ anchor_at: '2026-04-11T09:00:00.000Z' }),
-      created_at: '2026-04-11T09:00:00.000Z',
-      updated_at: '2026-04-11T09:00:00.000Z',
-      embedding: '[]',
-      anchor_date: '2026-04-11'
-    },
-    episode_1: {
-      id: 'episode_1',
-      layer: 'episode',
-      subtype: 'study',
-      title: 'Algebra practice session',
-      summary: 'Recent quiz misses',
-      canonical_text: 'Algebra practice session recent quiz misses',
-      confidence: 0.86,
-      status: 'active',
-      source_refs: JSON.stringify(['evt_1']),
-      metadata: JSON.stringify({ anchor_at: '2026-04-12T09:00:00.000Z' }),
-      created_at: '2026-04-12T09:00:00.000Z',
-      updated_at: '2026-04-12T09:00:00.000Z',
-      embedding: '[]',
-      anchor_date: '2026-04-12'
-    },
-    insight_1: {
-      id: 'insight_1',
-      layer: 'insight',
-      subtype: 'pattern',
-      title: 'Higher-layer pattern',
-      summary: 'Should not be traversed upward from lower nodes',
-      canonical_text: 'pattern',
-      confidence: 0.8,
-      status: 'active',
-      source_refs: '[]',
-      metadata: JSON.stringify({ anchor_at: '2026-04-13T09:00:00.000Z' }),
-      created_at: '2026-04-13T09:00:00.000Z',
-      updated_at: '2026-04-13T09:00:00.000Z',
-      embedding: '[]',
-      anchor_date: '2026-04-13'
-    }
-  };
-
-  db.allQuery = async (sql) => {
-    if (/FROM memory_nodes/i.test(sql)) return Object.values(nodes);
-    if (/FROM memory_edges/i.test(sql)) {
-      return [
-        { from_node_id: 'core_1', to_node_id: 'semantic_1', edge_type: 'ABSTRACTED_TO', weight: 1, evidence_count: 2, trace_label: 'core->semantic' },
-        { from_node_id: 'semantic_1', to_node_id: 'episode_1', edge_type: 'PART_OF_EPISODE', weight: 1, evidence_count: 2, trace_label: 'semantic->episode' },
-        { from_node_id: 'episode_1', to_node_id: 'insight_1', edge_type: 'RELATED_TO', weight: 1, evidence_count: 1, trace_label: 'episode->insight' }
-      ];
-    }
-    if (/FROM events/i.test(sql)) {
-      return [{
-        id: 'evt_1',
-        source_type: 'EmailThread',
-        occurred_at: '2026-04-12T10:00:00.000Z',
-        title: 'Algebra practice follow-up',
-        redacted_text: 'You missed quadratic factoring on questions 3 and 4.',
-        raw_text: 'You missed quadratic factoring on questions 3 and 4.',
-        app: 'Gmail',
-        source_account: 'study@example.com'
-      }];
-    }
-    return [];
-  };
-  db.getQuery = async (sql, params = []) => {
-    if (/SELECT occurred_at FROM events/i.test(sql)) return null;
-    if (/WHERE id = 'global_core'/i.test(sql)) return null;
-    if (/FROM memory_nodes WHERE id = \?/i.test(sql)) return nodes[params[0]] || null;
-    return null;
-  };
-  db.runQuery = async () => true;
-
-  try {
-    const retrieval = await buildHybridGraphRetrieval({
-      query: 'study algebra',
-      options: {
-        retrieval_thought: {
-          mode: 'semantic',
-          strategy_mode: 'memory_only',
-          source_mode: 'memory_only',
-          router_reason: 'Personal study history.',
-          summary_vs_raw: 'summary',
-          semantic_queries: [],
-          message_queries: [],
-          web_queries: [],
-          query_sets: { memory_queries: [], message_queries: [], web_queries: [] },
-          filters: {},
-          hop_limit: 2,
-          seed_limit: 3
-        }
-      },
-      seedLimit: 3,
-      hopLimit: 2
-    });
-
-    assert.ok(Array.isArray(retrieval.primary_nodes) && retrieval.primary_nodes.length >= 1);
-    assert.ok(retrieval.evidence_nodes.some((item) => item.id === 'episode_1'));
-    assert.ok(retrieval.evidence_nodes.some((item) => item.id === 'evt_1'));
-    assert.ok(retrieval.drilldown_refs.includes('evt_1'));
-    assert.ok(retrieval.edge_paths.some((edge) => edge.relation === 'SOURCE_REF' && edge.to === 'evt_1'));
-    assert.ok(!retrieval.evidence_nodes.some((item) => item.id === 'insight_1'));
-    assert.ok(retrieval.edge_paths.every((edge) => Number(edge.depth || 0) <= 4));
-  } finally {
-    db.allQuery = originalAllQuery;
-    db.getQuery = originalGetQuery;
-    db.runQuery = originalRunQuery;
-  }
-}
-
-async function testAnswerChatQueryEmitsStructuredPipelineStages() {
-  const originalAllQuery = db.allQuery;
-  const ingestion = require('../services/ingestion');
-  const retrievalThoughtSystem = require('../services/agent/retrieval-thought-system');
-  const hybrid = require('../services/agent/hybrid-graph-retrieval');
-  const originalIngest = ingestion.ingestRawEvent;
-  const originalThought = retrievalThoughtSystem.buildRetrievalThought;
-  const originalHybrid = hybrid.buildHybridGraphRetrieval;
-
-  ingestion.ingestRawEvent = async () => true;
-  retrievalThoughtSystem.buildRetrievalThought = async () => ({
-    mode: 'semantic',
-    source_mode: 'memory_only',
-    strategy_mode: 'memory_only',
-    router_reason: 'Personal memory request.',
-    summary_vs_raw: 'summary',
-    time_scope: { label: 'all_time' },
-    query_sets: {
-      memory_queries: ['alex project'],
-      message_queries: [],
-      web_queries: ['alex project']
-    },
-    semantic_queries: ['alex project'],
-    message_queries: [],
-    web_queries: ['alex project'],
-    lexical_terms: ['alex']
-  });
-  hybrid.buildHybridGraphRetrieval = async () => ({
-    retrieval_plan: {
-      mode: 'semantic',
-      source_mode: 'memory_only',
-      strategy_mode: 'memory_only',
-      summary_vs_raw: 'summary',
-      time_scope: { label: 'all_time' },
-      query_sets: {
-        memory_queries: ['alex project'],
-        message_queries: [],
-        web_queries: ['alex project']
-      },
-      semantic_queries: ['alex project'],
-      message_queries: [],
-      web_queries: ['alex project']
-    },
-    router: {
-      source_mode: 'memory_only',
-      router_reason: 'Personal memory request.',
-      time_scope: { label: 'all_time' },
-      summary_vs_raw: 'summary'
-    },
-    query_sets: {
-      memory_queries: ['alex project'],
-      message_queries: [],
-      web_queries: ['alex project']
-    },
-    generated_queries: {
-      semantic: ['alex project'],
-      messages: [],
-      web: ['alex project'],
-      lexical_terms: ['alex']
-    },
-    seed_results: [{ id: 'node_1', title: 'Alex project', reason: 'semantic:alex project' }],
-    seed_nodes: [{ id: 'node_1', title: 'Alex project', reason: 'semantic:alex project' }],
-    primary_nodes: [{ id: 'node_1', title: 'Alex project', reason: 'semantic:alex project' }],
-    support_nodes: [{ id: 'node_2', title: 'Project notes' }],
-    evidence_nodes: [{ id: 'node_3', title: 'Recent work log' }],
-    expanded_nodes: [{ id: 'node_2', title: 'Project notes' }, { id: 'node_3', title: 'Recent work log' }],
-    graph_expansion_results: [{ id: 'node_2', title: 'Project notes' }, { id: 'node_3', title: 'Recent work log' }],
-    edge_paths: [{ from: 'node_1', to: 'node_2', relation: 'RELATED_TO', depth: 1 }],
-    packed_context_stats: {
-      primary_nodes: 1,
-      support_nodes: 1,
-      evidence_nodes: 1,
-      packed_evidence: 3
-    },
-    evidence_count: 3,
-    evidence: [
-      { id: 'node_1', layer: 'semantic', text: 'Alex project status', score: 0.9, source_type: 'EmailThread' },
-      { id: 'node_2', layer: 'episode', text: 'Project notes', score: 0.8, source_type: 'EmailThread' },
-      { id: 'node_3', layer: 'raw', text: 'Recent work log', score: 0.7, source_type: 'EmailThread' }
-    ],
-    contextText: 'Alex project status\nProject notes\nRecent work log',
-    drilldown_refs: [],
-    lazy_source_refs: [],
-    temporal_reasoning: []
-  });
-  db.allQuery = async () => [];
-
-  try {
-    delete require.cache[require.resolve('../services/agent/chat-engine')];
-    const { answerChatQuery } = require('../services/agent/chat-engine');
-    const steps = [];
-    const result = await answerChatQuery({
-      apiKey: null,
-      query: 'What did I do with Alex?',
-      onStep: (event) => steps.push(event)
-    });
-
-    const orderedSteps = steps.map((item) => item.step);
-    assert.deepStrictEqual(orderedSteps, [
-      'routing',
-      'query_generation',
-      'memory_search',
-      'memory_search',
-      'seed_selection',
-      'edge_expansion',
-      'ranking',
-      'web_search',
-      'web_search',
-      'synthesis',
-      'synthesis',
-      'memory_writeback'
-    ]);
-    assert.ok(steps.every((item) => typeof item.status === 'string'));
-    assert.ok(steps.find((item) => item.step === 'web_search' && item.status === 'completed'));
-    assert.ok(Array.isArray(result.retrieval.stage_trace) && result.retrieval.stage_trace.length >= steps.length);
-  } finally {
-    ingestion.ingestRawEvent = originalIngest;
-    retrievalThoughtSystem.buildRetrievalThought = originalThought;
-    hybrid.buildHybridGraphRetrieval = originalHybrid;
-    delete require.cache[require.resolve('../services/agent/chat-engine')];
-    db.allQuery = originalAllQuery;
-  }
-}
-
-async function testAnswerChatQueryUsesWebFallbackForSparseWorldKnowledge() {
-  const originalAllQuery = db.allQuery;
-  const ingestion = require('../services/ingestion');
-  const retrievalThoughtSystem = require('../services/agent/retrieval-thought-system');
-  const hybrid = require('../services/agent/hybrid-graph-retrieval');
-  const originalIngest = ingestion.ingestRawEvent;
-  const originalThought = retrievalThoughtSystem.buildRetrievalThought;
-  const originalHybrid = hybrid.buildHybridGraphRetrieval;
-  const originalFetch = global.fetch;
-
-  ingestion.ingestRawEvent = async () => true;
-  retrievalThoughtSystem.buildRetrievalThought = async () => ({
-    mode: 'semantic',
-    source_mode: 'memory_then_web',
-    strategy_mode: 'memory_then_web',
-    router_reason: 'Needs memory context plus external corroboration.',
-    summary_vs_raw: 'summary',
-    time_scope: { label: 'all_time' },
-    query_sets: {
-      memory_queries: ['AI Day event details'],
-      message_queries: [],
-      web_queries: ['AI Day event details']
-    },
-    semantic_queries: ['AI Day event details'],
-    message_queries: [],
-    web_queries: ['AI Day event details'],
-    lexical_terms: ['ai day']
-  });
-  hybrid.buildHybridGraphRetrieval = async () => ({
-    retrieval_plan: {
-      mode: 'semantic',
-      source_mode: 'memory_then_web',
-      strategy_mode: 'memory_then_web',
-      summary_vs_raw: 'summary',
-      time_scope: { label: 'all_time' },
-      query_sets: {
-        memory_queries: ['AI Day event details'],
-        message_queries: [],
-        web_queries: ['AI Day event details']
-      },
-      semantic_queries: ['AI Day event details'],
-      message_queries: [],
-      web_queries: ['AI Day event details']
-    },
-    router: {
-      source_mode: 'memory_then_web',
-      router_reason: 'Needs memory context plus external corroboration.',
-      time_scope: { label: 'all_time' },
-      summary_vs_raw: 'summary'
-    },
-    query_sets: {
-      memory_queries: ['AI Day event details'],
-      message_queries: [],
-      web_queries: ['AI Day event details']
-    },
-    generated_queries: {
-      semantic: ['AI Day event details'],
-      messages: [],
-      web: ['AI Day event details'],
-      lexical_terms: ['ai day']
-    },
-    seed_results: [],
-    seed_nodes: [],
-    primary_nodes: [],
-    support_nodes: [],
-    evidence_nodes: [],
-    expanded_nodes: [],
-    graph_expansion_results: [],
-    edge_paths: [],
-    packed_context_stats: {
-      primary_nodes: 0,
-      support_nodes: 0,
-      evidence_nodes: 0,
-      packed_evidence: 0
-    },
-    evidence_count: 0,
-    evidence: [],
-    contextText: '',
-    drilldown_refs: [],
-    lazy_source_refs: [],
-    temporal_reasoning: []
-  });
-  global.fetch = async (url) => {
-    if (String(url).includes('api.duckduckgo.com')) {
-      return {
-        ok: true,
-        json: async () => ({
-          Heading: 'AI Day',
-          AbstractURL: 'https://example.com/ai-day',
-          AbstractText: 'AI Day is an event about artificial intelligence.',
-          RelatedTopics: []
-        })
-      };
-    }
-    return {
-      ok: true,
-      text: async () => ''
-    };
-  };
-  db.allQuery = async () => [];
-
-  try {
-    delete require.cache[require.resolve('../services/agent/chat-engine')];
-    const { answerChatQuery } = require('../services/agent/chat-engine');
-    const steps = [];
-    const result = await answerChatQuery({
-      apiKey: null,
-      query: 'what is ai day',
-      onStep: (event) => steps.push(event)
-    });
-
-    assert.strictEqual(result.needs_clarification, undefined);
-    assert.strictEqual(result.retrieval.web_search_used, true);
-    assert.ok(Array.isArray(result.retrieval.web_results) && result.retrieval.web_results.length >= 1);
-    assert.ok(steps.some((item) => item.step === 'web_search' && item.status === 'started'));
-    assert.ok(steps.some((item) => item.step === 'web_search' && item.status === 'completed'));
-  } finally {
-    ingestion.ingestRawEvent = originalIngest;
-    retrievalThoughtSystem.buildRetrievalThought = originalThought;
-    hybrid.buildHybridGraphRetrieval = originalHybrid;
-    global.fetch = originalFetch;
-    delete require.cache[require.resolve('../services/agent/chat-engine')];
-    db.allQuery = originalAllQuery;
-  }
-}
-
-async function testAnswerChatQueryUsesDrilldownEvidenceBeforeClarifying() {
-  const originalAllQuery = db.allQuery;
-  const ingestion = require('../services/ingestion');
-  const retrievalThoughtSystem = require('../services/agent/retrieval-thought-system');
-  const hybrid = require('../services/agent/hybrid-graph-retrieval');
-  const originalIngest = ingestion.ingestRawEvent;
-  const originalThought = retrievalThoughtSystem.buildRetrievalThought;
-  const originalHybrid = hybrid.buildHybridGraphRetrieval;
-
-  ingestion.ingestRawEvent = async () => true;
-  retrievalThoughtSystem.buildRetrievalThought = async () => ({
-    mode: 'semantic',
-    source_mode: 'memory_only',
-    strategy_mode: 'memory_only',
-    router_reason: 'Personal memory request.',
-    summary_vs_raw: 'summary',
-    time_scope: { label: 'all_time' },
-    query_sets: {
-      memory_queries: ['algebra practice'],
-      message_queries: [],
-      web_queries: []
-    },
-    semantic_queries: ['algebra practice'],
-    message_queries: [],
-    web_queries: [],
-    lexical_terms: ['algebra']
-  });
-  hybrid.buildHybridGraphRetrieval = async () => ({
-    retrieval_plan: {
-      mode: 'semantic',
-      source_mode: 'memory_only',
-      strategy_mode: 'memory_only',
-      summary_vs_raw: 'summary',
-      time_scope: { label: 'all_time' }
-    },
-    router: {
-      source_mode: 'memory_only',
-      router_reason: 'Personal memory request.',
-      time_scope: { label: 'all_time' },
-      summary_vs_raw: 'summary'
-    },
-    query_sets: {
-      memory_queries: ['algebra practice'],
-      message_queries: [],
-      web_queries: []
-    },
-    generated_queries: {
-      semantic: ['algebra practice'],
-      messages: [],
-      web: [],
-      lexical_terms: ['algebra']
-    },
-    seed_results: [{ id: 'episode_1', title: 'Algebra practice session', reason: 'semantic:algebra practice' }],
-    seed_nodes: [{ id: 'episode_1', title: 'Algebra practice session', layer: 'episode', source_refs: ['evt_1'] }],
-    primary_nodes: [{ id: 'episode_1', title: 'Algebra practice session', layer: 'episode', source_refs: ['evt_1'] }],
-    support_nodes: [],
-    evidence_nodes: [{ id: 'episode_1', title: 'Algebra practice session', layer: 'episode', source_refs: ['evt_1'] }],
-    expanded_nodes: [],
-    graph_expansion_results: [],
-    edge_paths: [],
-    packed_context_stats: {
-      primary_nodes: 1,
-      support_nodes: 0,
-      evidence_nodes: 1,
-      packed_evidence: 1
-    },
-    evidence_count: 1,
-    evidence: [
-      { id: 'episode_1', layer: 'episode', text: 'Algebra practice session', score: 0.7, source_refs: ['evt_1'], source_type: 'EmailThread' }
-    ],
-    contextText: 'Algebra practice session',
-    drilldown_refs: ['evt_1'],
-    lazy_source_refs: [{ ref: 'evt_1' }],
-    temporal_reasoning: []
-  });
-  db.allQuery = async (sql) => {
-    if (/FROM events/i.test(sql)) {
-      return [{
-        id: 'evt_1',
-        source_type: 'EmailThread',
-        occurred_at: '2026-04-12T10:00:00.000Z',
-        title: 'Algebra practice follow-up',
-        redacted_text: 'You missed quadratic factoring on questions 3 and 4.',
-        raw_text: 'You missed quadratic factoring on questions 3 and 4.',
-        app: 'Gmail',
-        source_account: 'study@example.com'
-      }];
-    }
-    return [];
-  };
-
-  try {
-    delete require.cache[require.resolve('../services/agent/chat-engine')];
-    const { answerChatQuery } = require('../services/agent/chat-engine');
-    const result = await answerChatQuery({
-      apiKey: null,
-      query: 'what happened in my algebra practice session?'
-    });
-
-    assert.strictEqual(result.needs_clarification, undefined);
-    assert.ok(/quadratic factoring/i.test(result.content));
-  } finally {
-    ingestion.ingestRawEvent = originalIngest;
-    retrievalThoughtSystem.buildRetrievalThought = originalThought;
-    hybrid.buildHybridGraphRetrieval = originalHybrid;
-    delete require.cache[require.resolve('../services/agent/chat-engine')];
-    db.allQuery = originalAllQuery;
-  }
+  assert.ok(messageThought.message_queries.length >= 1);
+  assert.ok(messageThought.message_queries.some((item) => /^(Subject:|From:|Thread:)/.test(item)));
 }
 
 function testDesktopPlannerReadsUiAfterOpen() {
@@ -1040,14 +525,9 @@ async function main() {
   await testThinkingTraceShape();
   testSourceAwareTimestampNormalization();
   testEpisodeAnchorStaysOnFirstDay();
-  await testRetrievalThoughtExtractsExactTerms();
-  await testRetrievalThoughtDefaultsToSevenDaySummaryWindow();
-  await testRetrievalThoughtRoutesMemoryWebAndHybrid();
-  await testRetrievalThoughtBuildsCodingAndCommunicationAngles();
-  await testHybridRetrievalPrefersDownwardExpansion();
-  await testAnswerChatQueryEmitsStructuredPipelineStages();
-  await testAnswerChatQueryUsesWebFallbackForSparseWorldKnowledge();
-  await testAnswerChatQueryUsesDrilldownEvidenceBeforeClarifying();
+  testRetrievalThoughtExtractsExactTerms();
+  testRetrievalThoughtDefaultsToSevenDaySummaryWindow();
+  testRetrievalThoughtBuildsCodingAndCommunicationAngles();
   await testSuggestionEnginePersistsExecutionMetadata();
   testNormalizeDesktopGoalForGoogleSearch();
   testDesktopPlannerReadsUiAfterOpen();

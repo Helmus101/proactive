@@ -6,8 +6,7 @@ function graphDerivation() {
   // eslint-disable-next-line global-require
   return require('./graph-derivation');
 }
-const { upsertMemoryNode, updateMemoryNode, upsertMemoryEdge, upsertRetrievalDoc } = require('./graph-store');
-const { generateEmbedding } = require('../embedding-engine');
+const { upsertMemoryNode, upsertMemoryEdge, upsertRetrievalDoc } = require('./graph-store');
 
 const DEEPSEEK_ENDPOINT = 'https://api.deepseek.com/v1/chat/completions';
 const llmCache = new Map();
@@ -112,7 +111,7 @@ async function callDeepSeek(prompt, apiKey, temperature = 0.3) {
         model: 'deepseek-chat',
         messages: [{ role: 'user', content: prompt }],
         temperature,
-        max_tokens: 1024
+        max_tokens: 520
       })
     });
     const responseText = await response.text();
@@ -228,70 +227,52 @@ async function callLLM(prompt, configOrApiKey = null, temperature = 0.3) {
   return callDeepSeek(prompt, config.apiKey, temperature);
 }
 
-async function generateNodeTLDR(node, apiKey) {
-  if (!node || !apiKey) return null;
-  const isEpisode = node.layer === 'episode';
-  const bulletCount = isEpisode ? '10-20' : '3';
-  const prompt = `
-You are a detailed memory assistant. Given a memory node (layer: ${node.layer}), produce exactly ${bulletCount} key bullet points that provide a highly detailed reconstruction of the activity.
-Return strict JSON: {"tldr": ["bullet 1", "bullet 2", ...]}
-
-Title: ${String(node.title || '').slice(0, 240)}
-Summary: ${String(node.summary || '').slice(0, 500)}
-Content: ${String(node.canonical_text || '').slice(0, 5000)}
-`;
-  const payload = await callLLM(prompt, normalizeLLMConfig(apiKey), 0.2);
-  if (payload && Array.isArray(payload.tldr)) {
-    const limit = isEpisode ? 20 : 3;
-    return payload.tldr.slice(0, limit).map(b => `• ${b.replace(/^•\s*/, '')}`).join('\n');
-  }
-  return null;
-}
-
-async function runEnrichmentJob(apiKey) {
+async function runEpisodeJob() {
   const result = await graphDerivation().deriveGraphFromEvents({
     versionSeed: 'current'
   });
-  
-  const layersToEnrich = ['raw', 'episode', 'semantic', 'cloud', 'insight', 'core'];
-  const placeholders = layersToEnrich.map(() => '?').join(',');
-  
-  const nodesToEnrich = await db.allQuery(
-    `SELECT id, layer, title, summary, canonical_text FROM memory_nodes 
-     WHERE layer IN (${placeholders}) AND (summary NOT LIKE '• %' OR summary IS NULL)
-     ORDER BY confidence DESC LIMIT 50`,
-    layersToEnrich
-  ).catch(() => []);
+  const episodeIds = result.episodeIds || [];
 
-  for (const node of nodesToEnrich) {
-    try {
-      const tldr = await generateNodeTLDR(node, apiKey);
-      if (tldr) {
-        await updateMemoryNode(node.id, { summary: tldr });
-        
-        await upsertRetrievalDoc({
-          docId: `node:${node.id}`,
-          sourceType: 'node',
-          nodeId: node.id,
-          timestamp: new Date().toISOString(),
-          text: `${node.title}\n${tldr}`,
-          metadata: {
-            layer: node.layer,
-            title: node.title
-          }
-        });
-      }
-    } catch (e) {
-      console.warn(`[runEnrichmentJob] Failed to enrich node ${node.id}:`, e.message);
+  // Enrich episode summaries with LLM-generated narratives (limited batch to control cost)
+  try {
+    const limit = Math.min(12, episodeIds.length);
+    const idsToEnrich = episodeIds.slice(0, limit);
+    for (const id of idsToEnrich) {
+      try {
+        const row = await db.getQuery(`SELECT id, summary, title, canonical_text FROM memory_nodes WHERE id = ?`, [id]).catch(() => null);
+        if (!row) continue;
+        const prompt = `
+You are a concise summarizer. Given an episode title and its raw canonical text, produce a short narrative summary (1-3 sentences) that captures the key events and any next-step actions. Return strict JSON: {"narrative":"..."}
+
+Title: ${String(row.title || '').slice(0, 240)}
+Text: ${String(row.canonical_text || row.summary || '').slice(0, 4000)}
+`;
+        const payload = await callLLM(prompt, normalizeLLMConfig(process.env.DEEPSEEK_API_KEY || null), 0.25);
+        const parsed = Array.isArray(payload) ? payload[0] : (payload || null);
+        const narrative = parsed && (parsed.narrative || parsed.summary) ? String(parsed.narrative || parsed.summary).trim() : null;
+        if (narrative) {
+          await upsertMemoryNode({
+            id: row.id,
+            layer: 'episode',
+            subtype: null,
+            title: row.title,
+            summary: narrative,
+            canonicalText: row.canonical_text,
+            confidence: 0.88,
+            status: 'active',
+            sourceRefs: [],
+            metadata: {},
+            graphVersion: result.version,
+            embedding: await generateEmbedding(narrative, process.env.OPENAI_API_KEY)
+          });
+        }
+      } catch (e) { /* per-episode failure should not stop the job */ }
     }
+  } catch (e) {
+    console.warn('[runEpisodeJob] episode enrichment failed:', e?.message || e);
   }
-  
-  return result;
-}
 
-async function runEpisodeJob() {
-  const result = await runEnrichmentJob(process.env.DEEPSEEK_API_KEY);
-  return result.episodeIds || [];
+  return episodeIds;
 }
 
 async function runWeeklyInsightJob(apiKey) {
@@ -626,96 +607,6 @@ async function runDailyInsights(apiKey) {
   }
 }
 
-async function runLivingCoreJob(apiKey) {
-  try {
-    const insightRows = await db.allQuery(
-      `SELECT id, subtype, title, summary, canonical_text, confidence, source_refs, metadata
-       FROM memory_nodes
-       WHERE layer = 'insight' AND confidence > 0.9
-       ORDER BY confidence DESC
-       LIMIT 50`
-    ).catch(() => []);
-
-    if (!insightRows.length) return [];
-
-    const highConfidenceInsights = insightRows.map(row => ({
-      ...row,
-      metadata: (() => { try { return JSON.parse(row.metadata || '{}'); } catch (_) { return {}; } })(),
-      source_refs: (() => { try { return JSON.parse(row.source_refs || '[]'); } catch (_) { return []; } })()
-    }));
-
-    const prompt = `
-You are synthesizing the "Living Core" of a user's memory. These represent durable, long-term knowledge, core beliefs, and fundamental context.
-Given a list of high-confidence insights, group related ones and synthesize them into 1-3 core nodes.
-Return strict JSON array:
-[
-  {
-    "title": "...",
-    "summary": "...",
-    "supporting_insight_ids": ["id1", "id2"]
-  }
-]
-
-Insights:
-${JSON.stringify(highConfidenceInsights.map(i => ({ id: i.id, title: i.title, summary: i.summary })))}
-`;
-
-    const payload = await callLLM(prompt, normalizeLLMConfig(apiKey || process.env.DEEPSEEK_API_KEY || null), 0.2);
-    const coreSyntheses = Array.isArray(payload) ? payload : [];
-    const created = [];
-
-    for (const synthesis of coreSyntheses) {
-      const coreId = `core_${crypto.createHash('sha1').update(synthesis.title).digest('hex').slice(0, 16)}`;
-      const title = String(synthesis.title).trim().slice(0, 180);
-      const summary = String(synthesis.summary).trim().slice(0, 500);
-      
-      await upsertMemoryNode({
-        id: coreId,
-        layer: 'core',
-        title,
-        summary,
-        canonicalText: `${title}\n${summary}`,
-        confidence: 0.98,
-        status: 'active',
-        sourceRefs: synthesis.supporting_insight_ids || [],
-        metadata: {
-          supporting_insight_ids: synthesis.supporting_insight_ids || []
-        },
-        graphVersion: 'living_core_v1'
-      });
-
-      if (Array.isArray(synthesis.supporting_insight_ids)) {
-        for (const insId of synthesis.supporting_insight_ids) {
-          await upsertMemoryEdge({
-            fromNodeId: insId,
-            toNodeId: coreId,
-            edgeType: 'ABSTRACTED_TO',
-            weight: 0.95,
-            traceLabel: 'Insight abstracted to Living Core',
-            evidenceCount: 1,
-            metadata: {}
-          });
-        }
-      }
-
-      await upsertRetrievalDoc({
-        docId: `node:${coreId}`,
-        sourceType: 'node',
-        nodeId: coreId,
-        timestamp: new Date().toISOString(),
-        text: `${title}\n${summary}`,
-        metadata: { layer: 'core' }
-      });
-      
-      created.push(coreId);
-    }
-    return created;
-  } catch (e) {
-    console.warn('[runLivingCoreJob] failed:', e?.message || e);
-    return [];
-  }
-}
-
 async function buildGlobalGraph() {
   const result = await graphDerivation().deriveGraphFromEvents({
     versionSeed: 'current'
@@ -739,10 +630,8 @@ module.exports = {
   callDeepSeek,
   callLLM,
   runEpisodeJob,
-  runEnrichmentJob,
   runSemanticSummaryWindow,
   runWeeklyInsightJob,
   runDailyInsights,
-  runLivingCoreJob,
   buildGlobalGraph
 };

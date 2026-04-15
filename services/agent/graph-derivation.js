@@ -187,7 +187,7 @@ function assignEpisode(groups, envelope) {
   const envelopeApp = normalizeContextValue(envelope.app);
   const envelopeDomain = normalizeContextValue(envelope.domain);
 
-  const candidates = [];
+  let bestCandidate = null;
   for (const group of groups) {
     const gapMs = Math.abs(group.latestTs - ts);
     const participantHits = overlapScore(group.participants, envelope.participants);
@@ -233,35 +233,23 @@ function assignEpisode(groups, envelope) {
     if (group.typeGroup === envelope.type_group) score += 0.75;
     if (gapMs > 45 * 60 * 1000) score -= 1.5;
 
-    candidates.push({ group, score });
+    if (!bestCandidate || score > bestCandidate.score) {
+      bestCandidate = { group, score };
+    }
   }
-
-  candidates.sort((a, b) => b.score - a.score);
-  const bestCandidate = candidates[0];
 
   if (bestCandidate && bestCandidate.score >= 2.5) {
-  const targets = [bestCandidate];
-  // Also assign to other high-scoring groups to increase density/overlap
-  for (let i = 1; i < candidates.length; i++) {
-    const c = candidates[i];
-    // Many-to-many mapping: link if score is above threshold
-    if (c.score >= 4.0 || c.score >= bestCandidate.score * 0.75) {
-      targets.push(c);
-    }
-  }
-
-    for (const { group } of targets) {
-      group.events.push(envelope);
-      group.latestTs = Math.max(group.latestTs, ts);
-      group.startTs = Math.min(group.startTs, ts);
-      group.anchorTs = Math.min(group.anchorTs, ts);
-      group.participants = uniq(group.participants.concat(envelope.participants || []), 24);
-      group.tokens = uniq(group.tokens.concat(semanticTokens), 72);
-      group.topics = uniq(group.topics.concat(envelope.topics || []), 24);
-      if (envelopeApp) group.apps.add(envelopeApp);
-      if (!group.domain && envelopeDomain) group.domain = envelopeDomain;
-      if (envelope.source_ref) group.sourceRefs.add(envelope.source_ref);
-    }
+    const { group } = bestCandidate;
+    group.events.push(envelope);
+    group.latestTs = Math.max(group.latestTs, ts);
+    group.startTs = Math.min(group.startTs, ts);
+    group.anchorTs = Math.min(group.anchorTs, ts);
+    group.participants = uniq(group.participants.concat(envelope.participants || []), 24);
+    group.tokens = uniq(group.tokens.concat(semanticTokens), 72);
+    group.topics = uniq(group.topics.concat(envelope.topics || []), 24);
+    if (envelopeApp) group.apps.add(envelopeApp);
+    if (!group.domain && envelopeDomain) group.domain = envelopeDomain;
+    if (envelope.source_ref) group.sourceRefs.add(envelope.source_ref);
     return;
   }
 
@@ -490,34 +478,27 @@ function buildCloudCandidates(episodes) {
 
   for (const episode of episodes) {
     const people = uniq(episode.participants || [], 10);
-    const semanticNodes = episode.semanticNodes || [];
-    const tasks = uniq(semanticNodes.filter((node) => node.subtype === 'task').map((node) => node.title), 10);
+    const tasks = uniq((episode.semanticNodes || []).filter((node) => node.subtype === 'task').map((node) => node.title), 10);
     const topics = uniq([...(episode.topics || []), ...(episode.domains || [])], 10);
 
     for (const person of people) {
       const key = `person:${person.toLowerCase()}`;
-      const prev = personMentions.get(key) || { label: person, episodes: [], semanticNodeIds: [] };
+      const prev = personMentions.get(key) || { label: person, episodes: [] };
       prev.episodes.push(episode);
-      const semNode = semanticNodes.find(n => n.subtype === 'person' && n.title === person);
-      if (semNode) prev.semanticNodeIds.push(semNode.id);
       personMentions.set(key, prev);
     }
 
     for (const task of tasks) {
       const key = `task:${task.toLowerCase()}`;
-      const prev = taskMentions.get(key) || { label: task, episodes: [], semanticNodeIds: [] };
+      const prev = taskMentions.get(key) || { label: task, episodes: [] };
       prev.episodes.push(episode);
-      const semNode = semanticNodes.find(n => n.subtype === 'task' && n.title === task);
-      if (semNode) prev.semanticNodeIds.push(semNode.id);
       taskMentions.set(key, prev);
     }
 
     for (const topic of topics) {
       const key = `topic:${topic.toLowerCase()}`;
-      const prev = topicMentions.get(key) || { label: topic, episodes: [], semanticNodeIds: [] };
+      const prev = topicMentions.get(key) || { label: topic, episodes: [] };
       prev.episodes.push(episode);
-      const semNode = semanticNodes.find(n => (n.subtype === 'fact' || n.subtype === 'link') && n.title === topic);
-      if (semNode) prev.semanticNodeIds.push(semNode.id);
       topicMentions.set(key, prev);
     }
   }
@@ -554,7 +535,6 @@ function deriveClouds(episodes) {
         anchor_date: isoFromTs(anchor)?.slice(0, 10) || null,
         latest_activity_at: isoFromTs(latest),
         supporting_episode_ids: item.episodes.map((ep) => ep.id),
-        supporting_semantic_ids: uniq(item.semanticNodeIds),
         repeated_count: item.episodes.length
       }
     });
@@ -586,7 +566,6 @@ function deriveClouds(episodes) {
         anchor_date: isoFromTs(anchor)?.slice(0, 10) || null,
         latest_activity_at: isoFromTs(latest),
         supporting_episode_ids: item.episodes.map((ep) => ep.id),
-        supporting_semantic_ids: uniq(item.semanticNodeIds),
         repeated_count: item.episodes.length
       }
     });
@@ -613,7 +592,6 @@ function deriveClouds(episodes) {
         anchor_date: isoFromTs(anchor)?.slice(0, 10) || null,
         latest_activity_at: isoFromTs(latest),
         supporting_episode_ids: item.episodes.map((ep) => ep.id),
-        supporting_semantic_ids: uniq(item.semanticNodeIds),
         repeated_count: item.episodes.length
       }
     });
@@ -717,76 +695,6 @@ function inferCaptureEpisodeSubtype(group) {
   return group.typeGroup || 'desktop';
 }
 
-async function resolveCrossAppEntities(semanticNodes) {
-  const resolvedNodes = [];
-  const idMap = new Map(); // originalId -> resolvedNode
-
-  for (const node of semanticNodes) {
-    const meta = node.metadata || {};
-    let resolved = null;
-
-    // Multi-signal resolution:
-    // 1. Identifiers (email, url)
-    const identifiers = [];
-    if (node.subtype === 'person' && meta.name && meta.name.includes('@')) identifiers.push(meta.name.toLowerCase());
-    if (node.subtype === 'link' && meta.url) identifiers.push(meta.url.toLowerCase());
-    
-    // 2. Stable Hash on identifier
-    const identifierHash = identifiers.length ? stableHash(identifiers[0]) : null;
-
-    for (const existing of resolvedNodes) {
-      if (node.subtype !== existing.subtype) continue;
-
-      const existingMeta = existing.metadata || {};
-      let match = false;
-
-      // Check identifier match
-      if (identifierHash) {
-        const existingIdentifiers = [];
-        if (existing.subtype === 'person' && existingMeta.name && existingMeta.name.includes('@')) existingIdentifiers.push(existingMeta.name.toLowerCase());
-        if (existing.subtype === 'link' && existingMeta.url) existingIdentifiers.push(existingMeta.url.toLowerCase());
-        
-        if (existingIdentifiers.some(id => identifiers.includes(id))) {
-          match = true;
-        }
-      }
-
-      // Check vector similarity (already done in writeEpisodeGroup, but we can be more aggressive here)
-      if (!match && node.embedding && existing.embedding) {
-        const sim = cosineSimilarity(node.embedding, existing.embedding);
-        if (sim > 0.92) match = true;
-      }
-
-      // Check participant overlap for facts/tasks
-      if (!match && (node.subtype === 'fact' || node.subtype === 'task')) {
-        const pOverlap = overlapScore(meta.participants || [], existingMeta.participants || []);
-        if (pOverlap >= 2 && node.title.toLowerCase() === existing.title.toLowerCase()) match = true;
-      }
-
-      if (match) {
-        resolved = existing;
-        break;
-      }
-    }
-
-    if (resolved) {
-      // Merge
-      resolved.source_refs = uniq([...(resolved.source_refs || []), ...(node.source_refs || [])], 64);
-      resolved.confidence = Math.max(resolved.confidence, node.confidence);
-      // Combine metadata if needed
-      if (node.subtype === 'person' && !resolved.metadata.name && node.metadata.name) {
-        resolved.metadata.name = node.metadata.name;
-      }
-      idMap.set(node.id, resolved);
-    } else {
-      resolvedNodes.push(node);
-      idMap.set(node.id, node);
-    }
-  }
-
-  return { resolvedNodes, idMap };
-}
-
 async function writeEpisodeGroup(group, version) {
   const baseSubtype = group.typeGroup === 'desktop'
     ? inferCaptureEpisodeSubtype(group)
@@ -882,7 +790,7 @@ async function writeEpisodeGroup(group, version) {
 
     await upsertMemoryNode({
       id: rawNodeId,
-      layer: 'raw',
+      layer: 'raw_event',
       subtype: event.type_group || 'event',
       title: rawTitle,
       summary: rawSummary || 'Raw captured event',
@@ -930,7 +838,7 @@ async function writeEpisodeGroup(group, version) {
       timestamp: rawTs,
       text: rawCanonical,
       metadata: {
-        layer: 'raw',
+        layer: 'raw_event',
         subtype: event.type_group || 'event',
         source_refs: uniq([event.id, event.source_ref].filter(Boolean), 8),
         graph_version: version,
@@ -943,11 +851,27 @@ async function writeEpisodeGroup(group, version) {
   }
 
   const _semanticNodes = deriveSemanticNodes(group, episodeData);
-  for (const node of _semanticNodes) {
-    node.embedding = await embedText(node.canonical_text || node.summary || node.title);
-  }
+  const semanticNodes = [];
 
-  const { resolvedNodes: semanticNodes } = await resolveCrossAppEntities(_semanticNodes);
+  // Entity Vector Resolution: Merge nodes using semantic similarity rather than exact string matching
+  for (const node of _semanticNodes) {
+    const nodeEmbedding = await embedText(node.canonical_text || node.summary || node.title);
+    node.embedding = nodeEmbedding; // Cache it to avoid re-embed
+    
+    let merged = false;
+    for (const existing of semanticNodes) {
+      if (node.subtype === existing.subtype) {
+        const sim = cosineSimilarity(node.embedding, existing.embedding);
+        if (sim > 0.88) {
+          // Merge source refs into the existing vector-resolved entity
+          existing.source_refs = uniq([...(existing.source_refs || []), ...(node.source_refs || [])], 48);
+          merged = true;
+          break;
+        }
+      }
+    }
+    if (!merged) semanticNodes.push(node);
+  }
 
   for (const node of semanticNodes) {
     const nodeEmbedding = node.embedding;
@@ -969,14 +893,13 @@ async function writeEpisodeGroup(group, version) {
     await upsertMemoryEdge({
       fromNodeId: group.id,
       toNodeId: node.id,
-      edgeType: 'ABSTRACTED_TO',
+      edgeType: node.edge_type,
       weight: node.confidence,
       traceLabel: node.trace_label,
       evidenceCount: episodeData.event_count,
       metadata: {
         episode_id: group.id,
-        subtype: node.subtype,
-        original_relation: node.edge_type
+        subtype: node.subtype
       }
     });
     await upsertRetrievalDoc({
@@ -1024,8 +947,6 @@ async function writeEpisodeGroup(group, version) {
 
   return {
     id: group.id,
-    layer: 'episode',
-    embedding,
     ...episodeData,
     semanticNodes
   };
@@ -1071,60 +992,6 @@ async function writeHigherLayerNode(node, version) {
       latest_activity_at: node.metadata?.latest_activity_at || null
     }
   });
-  return { ...node, embedding };
-}
-
-async function semanticSimilarityLinking(newNode, allNodes, limit = 3, threshold = 0.82) {
-  if (!newNode.embedding || !Array.isArray(allNodes) || allNodes.length < 1) return;
-  
-  const scores = allNodes
-    .filter(n => n.id !== newNode.id && n.embedding)
-    .map(n => ({
-      node: n,
-      sim: cosineSimilarity(newNode.embedding, n.embedding)
-    }))
-    .filter(item => item.sim > threshold)
-    .sort((a, b) => b.sim - a.sim)
-    .slice(0, limit);
-
-  for (const item of scores) {
-    await upsertMemoryEdge({
-      fromNodeId: newNode.id,
-      toNodeId: item.node.id,
-      edgeType: 'RELATED_TO',
-      weight: Number(item.sim.toFixed(4)),
-      traceLabel: `Semantic similarity link (${item.sim.toFixed(3)})`,
-      evidenceCount: 1,
-      metadata: { auto_derived: true, similarity: item.sim }
-    });
-  }
-}
-
-async function addSimilarityEdges(nodes, threshold = 0.88) {
-  if (!Array.isArray(nodes) || nodes.length < 2) return;
-  
-  // limit comparisons to prevent performance issues
-  const pool = nodes.slice(0, 1000);
-  for (let i = 0; i < pool.length; i++) {
-    for (let j = i + 1; j < pool.length; j++) {
-      const a = pool[i];
-      const b = pool[j];
-      if (!a.embedding || !b.embedding) continue;
-      
-      const sim = cosineSimilarity(a.embedding, b.embedding);
-      if (sim > threshold) {
-        await upsertMemoryEdge({
-          fromNodeId: a.id,
-          toNodeId: b.id,
-          edgeType: 'RELATED_TO',
-          weight: Number(sim.toFixed(4)),
-          traceLabel: `High cosine similarity (${sim.toFixed(3)})`,
-          evidenceCount: 1,
-          metadata: { similarity: sim, auto_derived: true }
-        });
-      }
-    }
-  }
 }
 
 async function deriveGraphFromEvents({ eventIds = null, since = null, limit = 800, versionSeed = 'current' } = {}) {
@@ -1142,23 +1009,16 @@ async function deriveGraphFromEvents({ eventIds = null, since = null, limit = 80
   await removeMemoryArtifactsByVersion(version);
   const groups = clusterEnvelopes(envelopes);
   const episodes = [];
-  const allCreatedNodes = [];
-
   for (const group of groups) {
     const episode = await writeEpisodeGroup(group, version);
     episodes.push(episode);
-    allCreatedNodes.push(episode);
-    if (Array.isArray(episode.semanticNodes)) {
-      allCreatedNodes.push(...episode.semanticNodes);
-    }
   }
 
   const clouds = deriveClouds(episodes);
   const semanticGroups = deriveSemanticGroups(episodes);
 
   for (const semanticGroup of semanticGroups) {
-    const node = await writeHigherLayerNode(semanticGroup, version);
-    allCreatedNodes.push(node);
+    await writeHigherLayerNode(semanticGroup, version);
     for (const episodeId of semanticGroup.metadata?.supporting_episode_ids || []) {
       await upsertMemoryEdge({
         fromNodeId: episodeId,
@@ -1175,8 +1035,7 @@ async function deriveGraphFromEvents({ eventIds = null, since = null, limit = 80
   }
 
   for (const cloud of clouds) {
-    const node = await writeHigherLayerNode(cloud, version);
-    allCreatedNodes.push(node);
+    await writeHigherLayerNode(cloud, version);
     for (const episodeId of cloud.metadata?.supporting_episode_ids || []) {
       await upsertMemoryEdge({
         fromNodeId: episodeId,
@@ -1190,25 +1049,11 @@ async function deriveGraphFromEvents({ eventIds = null, since = null, limit = 80
         }
       });
     }
-    for (const semId of cloud.metadata?.supporting_semantic_ids || []) {
-      await upsertMemoryEdge({
-        fromNodeId: semId,
-        toNodeId: cloud.id,
-        edgeType: 'ABSTRACTED_TO',
-        weight: cloud.confidence,
-        traceLabel: 'Semantic node abstracted to recurring cloud pattern',
-        evidenceCount: 1,
-        metadata: {
-          layer: 'cloud'
-        }
-      });
-    }
   }
 
   const insights = deriveInsights(clouds);
   for (const insight of insights) {
-    const node = await writeHigherLayerNode(insight, version);
-    allCreatedNodes.push(node);
+    await writeHigherLayerNode(insight, version);
     await upsertMemoryEdge({
       fromNodeId: insight.metadata?.promoted_from_cloud_id,
       toNodeId: insight.id,
@@ -1222,9 +1067,6 @@ async function deriveGraphFromEvents({ eventIds = null, since = null, limit = 80
     });
   }
 
-  // Dense connection pass
-  await addSimilarityEdges(allCreatedNodes, 0.88);
-
   await logGraphVersion(version, 'completed', {
     envelope_count: envelopes.length,
     episode_count: episodes.length,
@@ -1232,51 +1074,49 @@ async function deriveGraphFromEvents({ eventIds = null, since = null, limit = 80
     insight_count: insights.length
   });
 
-  // Ensure all nodes are connected to multiple edges (Minimum 2-3)
+  // Ensure most nodes are connected: find orphan memory_nodes (no edges) and link to nearest episode
   try {
-    const candidates = await db.allQuery(`
-      SELECT id, layer, subtype, title, summary, canonical_text, metadata, embedding
+    const orphans = await db.allQuery(`
+      SELECT id, layer, subtype, title, summary, canonical_text, metadata
       FROM memory_nodes m
-      WHERE (SELECT COUNT(*) FROM memory_edges e WHERE e.from_node_id = m.id OR e.to_node_id = m.id) < 3
+      WHERE NOT EXISTS (SELECT 1 FROM memory_edges e WHERE e.from_node_id = m.id OR e.to_node_id = m.id)
       AND m.graph_version = ?
-      LIMIT 300
+      LIMIT 200
     `, [version]).catch(() => []);
-
-    if (candidates && candidates.length) {
-      const episodeRows = await db.allQuery(`SELECT id, anchor_date, created_at, updated_at, embedding FROM memory_nodes WHERE layer = 'episode'`).catch(() => []);
-      for (const node of candidates) {
+    if (orphans && orphans.length) {
+      const episodeRows = await db.allQuery(`SELECT id, anchor_date, created_at, updated_at FROM memory_nodes WHERE layer = 'episode'`).catch(() => []);
+      for (const orphan of orphans) {
         try {
-          const nodeEmbedding = (() => {
-            try { return JSON.parse(node.embedding || '[]'); } catch (_) { return []; }
-          })();
-          if (!nodeEmbedding.length) continue;
-
-          const episodeScores = episodeRows.map(ep => {
-            const epEmbedding = (() => {
-              try { return JSON.parse(ep.embedding || '[]'); } catch (_) { return []; }
-            })();
-            if (!epEmbedding.length) return { ep, sim: 0 };
-            return { ep, sim: cosineSimilarity(nodeEmbedding, epEmbedding) };
-          }).sort((a, b) => b.sim - a.sim);
-
-          // Link to top 2-3 similar episodes
-          const topEpisodes = episodeScores.slice(0, 3).filter(item => item.sim > 0.4);
-          for (const item of topEpisodes) {
+          // Choose an episode by closest anchor_date or fallback to most recent
+          let candidate = null;
+          if (episodeRows.length) {
+            const orphanDate = (JSON.parse(orphan.metadata || '{}').anchor_at) || orphan.anchor_date || orphan.created_at || orphan.updated_at || new Date().toISOString();
+            const orphanTs = Date.parse(String(orphanDate)) || Date.now();
+            let best = null;
+            for (const ep of episodeRows) {
+              const epDate = ep.anchor_date || ep.created_at || ep.updated_at || null;
+              const epTs = epDate ? (Date.parse(String(epDate)) || 0) : 0;
+              const diff = Math.abs(epTs - orphanTs);
+              if (best == null || diff < best.diff) best = { ep, diff };
+            }
+            candidate = best?.ep?.id || episodeRows[0]?.id;
+          }
+          if (candidate) {
             await upsertMemoryEdge({
-              fromNodeId: node.id,
-              toNodeId: item.ep.id,
+              fromNodeId: orphan.id,
+              toNodeId: candidate,
               edgeType: 'RELATED_TO',
-              weight: Number((item.sim * 0.5).toFixed(4)),
-              traceLabel: 'Density-pass: linked to similar episode',
+              weight: 0.28,
+              traceLabel: 'Auto-linked orphan node to nearest episode',
               evidenceCount: 1,
-              metadata: { density_link: true, similarity: item.sim }
+              metadata: { auto_linked: true }
             });
           }
         } catch (e) { /* ignore per-node errors */ }
       }
     }
   } catch (e) {
-    console.warn('[graph-derivation] connection density pass failed:', e?.message || e);
+    console.warn('[graph-derivation] orphan linking pass failed:', e?.message || e);
   }
 
   return {

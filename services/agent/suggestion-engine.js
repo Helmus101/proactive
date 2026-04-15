@@ -164,7 +164,7 @@ module.exports = {
 };
 
 function isConcreteActionLabel(text = '') {
-  return /\b(open|draft|reply|send|prepare|review|confirm|research|finish|complete|schedule|summarize|update|submit|resolve|fix|call|book|share|wish|check\s*in|reconnect)\b/i.test(String(text || ''));
+  return /\b(open|draft|reply|send|prepare|review|confirm|research|finish|complete|schedule|summarize|update|submit|resolve|fix|call|book|share|close|ship)\b/i.test(String(text || ''));
 }
 
 function firstEvidenceLine(evidence = []) {
@@ -247,15 +247,11 @@ function actionLabelForTitle(title = '') {
 
 function normalizeSuggestionType(value = '', fallbackText = '') {
   const raw = String(value || '').toLowerCase().trim();
-  const valid = ['study', 'relationship', 'work', 'personal', 'creative', 'followup'];
-  if (valid.includes(raw)) return raw;
+  if (raw === 'study' || raw === 'relationship') return raw;
   const hay = `${raw} ${String(fallbackText || '').toLowerCase()}`;
   if (/\bstudy|quiz|exam|class|assignment|homework|lecture|review|flashcard|vocab\b/.test(hay)) return 'study';
-  if (/\brelationship|follow ?up|reply|check-?in|reconnect|birthday|anniversary|friend|mentor|alex|maya|sam|leo\b/.test(hay)) return 'followup';
-  if (/\bwork|project|client|meeting|presentation|proposal|deadline|task|job\b/.test(hay)) return 'work';
-  if (/\bpersonal|home|health|fitness|hobby|family|bill|shopping\b/.test(hay)) return 'personal';
-  if (/\bcreative|design|writing|art|music|video|ideation|brainstorm\b/.test(hay)) return 'creative';
-  return 'work';
+  if (/\brelationship|follow ?up|reply|check-?in|reconnect|birthday|anniversary|friend|mentor|alex|maya|sam|leo\b/.test(hay)) return 'relationship';
+  return 'study';
 }
 
 function normalizeTimeAnchor(value = '') {
@@ -341,6 +337,22 @@ async function buildSuggestionEvidenceBundle(anchorEvidence = null, query = '') 
     }
   }
 
+  if (lines.length < 2 && query) {
+    const q = `%${String(query).slice(0, 80)}%`;
+    const extra = await db.allQuery(
+      `SELECT id, layer, subtype, title, summary
+       FROM memory_nodes
+       WHERE title LIKE ? OR summary LIKE ? OR canonical_text LIKE ?
+       ORDER BY datetime(updated_at) DESC
+       LIMIT 4`,
+      [q, q, q]
+    ).catch(() => []);
+    for (const row of extra || []) {
+      addLine(`Memory ${row.layer}${row.subtype ? `/${row.subtype}` : ''}: ${String(row.title || row.summary || '').slice(0, 150)}`);
+      baseIds.add(String(row.id));
+    }
+  }
+
   return {
     evidence_ids: Array.from(baseIds).slice(0, 8),
     evidence_lines: lines.slice(0, 5)
@@ -392,7 +404,7 @@ async function ensureMemoryLayersReady(apiKey) {
   return counts;
 }
 
-async function retrieveCoreToFactsContext(query = '', maxNodes = 100) {
+async function retrieveCoreToFactsContext(query = '', maxNodes = 42) {
   const terms = tokenizeTerms(query);
   const coreNodes = await db.allQuery(
     `SELECT id, layer, subtype, title, summary, canonical_text, confidence, metadata, updated_at
@@ -549,19 +561,16 @@ async function generateTopTodosFromMemoryQuery(llmConfig, options = {}) {
     'Look through my memory and generate the top 5 todos or actions I need to do right now.'
   ).trim();
   const layerCounts = await ensureMemoryLayersReady((llmConfig && llmConfig.provider === 'deepseek') ? llmConfig.apiKey : null).catch(() => ({}));
-  
-  const [coreRetrieval, branchRetrieval] = await Promise.all([
-    retrieveCoreToFactsContext(query, 100).catch(() => null),
-    buildHybridGraphRetrieval({
-      query,
-      options: {
-        mode: 'suggestion',
-        strategy: 'spiral'
-      },
-      seedLimit: 20,
-      hopLimit: 8
-    }).catch(() => null)
-  ]);
+  const coreRetrieval = await retrieveCoreToFactsContext(query, 42).catch(() => null);
+  const branchRetrieval = await buildHybridGraphRetrieval({
+    query,
+    options: {
+      mode: 'suggestion',
+      strategy: 'spiral'
+    },
+    seedLimit: 8,
+    hopLimit: 2
+  }).catch(() => null);
 
   const mergedEvidence = [];
   const seenEvidence = new Set();
@@ -613,23 +622,25 @@ async function generateTopTodosFromMemoryQuery(llmConfig, options = {}) {
 
   const standingNotes = String(options?.standing_notes || '').trim();
   const phase1Prompt = `
-  You are deciding next actions from memory.
-  First ask memory this question: "What are the top five things to do now?"
-  Then return exactly 5 AI-generated considerations as a strict JSON array of plain strings.
+You are deciding next actions from memory.
+First ask memory this question: "What are the top five things to do now?"
+Then return exactly 5 AI-generated considerations as a strict JSON array of plain strings.
 
-  Return strict JSON array of strings only:
-  [
+Return strict JSON array of strings only:
+[
   "Action 1 description based on context",
   "Action 2 description based on context",
   "Action 3 description based on context",
   "Action 4 description based on context",
   "Action 5 description based on context"
-  ]
+]
 
-  RULES:
-  - Use only STANDING NOTES + MEMORY EVIDENCE + GRAPH EDGES.
-  - Look for any relevant actionable tasks, follow-ups, or open loops in the retrieved memory evidence.
-  - Prefer semantic tasks and insight-backed actions over raw-event cleanup.
+RULES:
+- Use only STANDING NOTES + MEMORY EVIDENCE + GRAPH EDGES.
+- Suggestion domains are ONLY:
+  - study (review due, weak concept, unfinished session, deadline risk)
+  - relationship (follow-up, check-in, reply needed, reconnect, milestone)
+- Prefer semantic tasks and insight-backed actions over raw-event cleanup.
 
 STANDING NOTES:
 ${standingNotes || 'None'}
@@ -653,18 +664,17 @@ ${edgeDigest || 'No edge traces available.'}
 I asked the memory what the top 5 things to do now were, and it gave me the following 5 things:
 ${JSON.stringify(topFiveItems, null, 2)}
 
-Now generate final proactive suggestions in this exact internal template.
-Provide up to 8 candidates so the system can select the best ones.
+Now generate final proactive suggestions in this exact internal template:
 Format them exactly into the following strict JSON array:
 [
   {
-    "type": "work|followup|study|personal|creative|relationship",
+    "type": "study|relationship",
     "title": "single concrete action",
     "reason": "why now in one sentence",
     "description": "optional short context",
     "outcome": "one clear expected outcome",
     "evidence": ["memory_id_or_event_id"],
-    "time_anchor": "today|this week|now",
+    "time_anchor": "today|this week|before tomorrow's class|now",
     "priority": "low|medium|high",
     "confidence": 0.0,
     "primary_action": "button label",
@@ -675,7 +685,7 @@ Format them exactly into the following strict JSON array:
 ]
 
 Rules:
-- Allowed suggestion types include work, followup, study, personal, creative, relationship.
+- Allowed suggestion types are only: study, relationship.
 - Keep titles imperative and specific.
 - Every title must name a concrete target (person/topic/task/artifact/deadline).
 - One suggestion = one job only.
@@ -684,7 +694,7 @@ Rules:
 `;
 
   const aiRows = await callLLM(phase2Prompt, llmConfig, 0.22).catch(() => null);
-  const rows = Array.isArray(aiRows) ? aiRows.slice(0, 10) : [];
+  const rows = Array.isArray(aiRows) ? aiRows.slice(0, 5) : [];
   const selected = rows.filter((row) => !isWeakTitle(row?.title || ''));
   if (!selected.length) return [];
 
@@ -696,7 +706,7 @@ Rules:
       title: cleanSingleActionTitle(raw?.title || ''),
       description: raw?.description || '',
       reason: raw?.reason || '',
-      category: normalizeSuggestionType(raw?.type || raw?.category || '', `${raw?.title || ''} ${raw?.reason || ''}`),
+      category: normalizeSuggestionType(raw?.type || raw?.category || '', `${raw?.title || ''} ${raw?.reason || ''}`) === 'relationship' ? 'followup' : 'study',
       priority: raw?.priority || 'medium',
       confidence: Number(raw?.confidence || 0.58),
       created_at: new Date(now).toISOString()
@@ -726,7 +736,7 @@ Rules:
       description: normalized.description || normalized.intent || '',
       reason: normalized.reason || 'Because current memory signals show this specific action is due now.',
       outcome,
-      category: (suggestionType === 'relationship' || suggestionType === 'followup') ? 'followup' : suggestionType,
+      category: suggestionType === 'relationship' ? 'followup' : 'study',
       priority: normalized.priority || 'medium',
       confidence: Number(normalized.confidence || 0.58),
       time_anchor: timeAnchor,
@@ -767,7 +777,7 @@ Rules:
       secondary_action: String(raw?.secondary_action || '').trim() || null,
       ai_generated: true,
       ai_doable: false,
-      action_type: (suggestionType === 'relationship' || suggestionType === 'followup') ? 'followup_review' : `${suggestionType}_review`,
+      action_type: suggestionType === 'relationship' ? 'relationship_followup' : 'study_review',
       execution_mode: 'manual',
       assignee: 'human',
       source: 'memory-query-top5',
@@ -784,6 +794,7 @@ Rules:
 
   const filteredBuilt = built
     .filter((item) => item?.title && item?.reason)
+    .filter((item) => ['study', 'relationship'].includes(String(item.type || '').toLowerCase()))
     .filter((item) => !isWeakTitle(item.title))
     .filter((item) => Array.isArray(item.evidence) && item.evidence.length > 0)
     .slice(0, 5);
@@ -831,7 +842,7 @@ Rules:
   description (optional),
   reason (one sentence grounded in memory),
   time_anchor (optional, e.g. "now" or "today 10:00"),
-  category (optional: work|followup|study|personal|creative|relationship),
+  category (optional: work|followup|study|personal),
   priority (optional: low|medium|high).
 - Return strict JSON only.
 

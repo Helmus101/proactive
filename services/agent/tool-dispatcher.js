@@ -1,19 +1,6 @@
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
-const db = require('../db');
-const { 
-  upsertMemoryNode, 
-  updateMemoryNode, 
-  upsertMemoryEdge, 
-  stableHash,
-  asObj 
-} = require('./graph-store');
-
-// Lazy require to avoid circular dependency if any
-function hybridRetrieval() {
-  return require('./hybrid-graph-retrieval');
-}
 
 const DANGEROUS_SHELL_PATTERNS = [
   /\brm\s+-rf\s+\/\b/i,
@@ -39,11 +26,7 @@ const TOOL_SCHEMAS = {
   key_press: ['key'],
   scroll: [],
   screenshot: [],
-  applescript: ['script'],
-  memory_search: ['query'],
-  memory_drilldown: ['node_id'],
-  memory_update: ['node_id', 'updates'],
-  memory_link: ['from_id', 'to_id', 'relationship']
+  applescript: ['script']
 };
 
 function validateToolRequest(request = {}) {
@@ -89,14 +72,6 @@ function evaluateToolPolicy(request = {}, policyContext = {}) {
 
   if (tool.startsWith('browser_') && ['browser_click', 'browser_type'].includes(tool)) {
     return { decision: 'require_approval', risk_level: 'medium', reason: 'state_changing_browser_action' };
-  }
-
-  if (tool === 'memory_update' || tool === 'memory_link') {
-    return { decision: 'require_approval', risk_level: 'medium', reason: 'memory_modification' };
-  }
-
-  if (tool === 'memory_search' || tool === 'memory_drilldown') {
-    return { decision: 'auto_allow', risk_level: 'low', reason: 'read_only_memory_action' };
   }
 
   return { decision: 'auto_allow', risk_level: 'low', reason: 'safe_by_default' };
@@ -189,110 +164,6 @@ async function dispatchTool(request = {}, runtime = {}) {
   } else if (tool === 'applescript') {
     result = await runtime.runOsascript(input.script);
     result = { status: 'success', output: result };
-  } else if (tool === 'memory_search') {
-    const retrieval = await hybridRetrieval().buildHybridGraphRetrieval({
-      query: input.query,
-      options: { mode: 'chat' }
-    });
-    result = { status: 'success', output: retrieval };
-  } else if (tool === 'memory_drilldown') {
-    const node = await db.getQuery(
-      `SELECT * FROM memory_nodes WHERE id = ?`,
-      [input.node_id]
-    ).catch(() => null);
-    if (node) {
-      const edges = await db.allQuery(
-        `SELECT * FROM memory_edges WHERE from_node_id = ? OR to_node_id = ? LIMIT 50`,
-        [input.node_id, input.node_id]
-      ).catch(() => []);
-      
-      // Reconstruction logic:
-      // 1) direct source_refs on target node
-      // 2) source_refs from directly linked nodes (episodes/raw_event/semantic)
-      const directSourceRefs = (() => {
-        try { return JSON.parse(node.source_refs || '[]'); } catch (_) { return []; }
-      })();
-
-      const neighborIds = Array.from(new Set(
-        edges.flatMap((edge) => [edge.from_node_id, edge.to_node_id]).filter((id) => id && id !== input.node_id)
-      )).slice(0, 60);
-
-      let neighborRows = [];
-      if (neighborIds.length) {
-        const placeholders = neighborIds.map(() => '?').join(',');
-        neighborRows = await db.allQuery(
-          `SELECT id, layer, subtype, source_refs, metadata
-           FROM memory_nodes
-           WHERE id IN (${placeholders})`,
-          neighborIds
-        ).catch(() => []);
-      }
-
-      const neighborSourceRefs = neighborRows.flatMap((row) => {
-        try { return JSON.parse(row.source_refs || '[]'); } catch (_) { return []; }
-      });
-
-      const allSourceRefs = Array.from(new Set([...directSourceRefs, ...neighborSourceRefs])).filter(Boolean).slice(0, 260);
-
-      let rawEvents = [];
-      if (allSourceRefs.length) {
-        const placeholders = allSourceRefs.map(() => '?').join(',');
-        rawEvents = await db.allQuery(
-          `SELECT id, type, source_type, timestamp, occurred_at, source, app, title, redacted_text, raw_text, metadata,
-                  (CASE
-                    WHEN LOWER(COALESCE(source_type, type, '')) LIKE '%screen%' THEN 1
-                    WHEN LOWER(COALESCE(source_type, type, '')) LIKE '%capture%' THEN 1
-                    ELSE 0
-                  END) as is_capture
-           FROM events
-           WHERE id IN (${placeholders})
-           ORDER BY is_capture DESC, COALESCE(occurred_at, timestamp) DESC
-           LIMIT 140`,
-          allSourceRefs
-        ).catch(() => []);
-      }
-
-      const captures = rawEvents.filter((e) => Number(e.is_capture || 0) === 1);
-      const bestEvents = (captures.length ? captures : rawEvents).slice(0, 28);
-      const reconstruction = bestEvents.length > 0
-        ? bestEvents.map((e) => {
-            const when = e.occurred_at || e.timestamp || 'unknown time';
-            const header = [e.title, e.app || e.source].filter(Boolean).join(' • ');
-            const body = String(e.redacted_text || e.raw_text || '').replace(/\s+/g, ' ').trim();
-            return `[${when}] ${header || e.id}: ${body}`.slice(0, 900);
-          }).join('\n---\n')
-        : null;
-
-      result = {
-        status: 'success',
-        output: {
-          node,
-          edges,
-          rawEvents,
-          reconstruction,
-          source_ref_count: allSourceRefs.length,
-          capture_count: captures.length
-        }
-      };
-    } else {
-      result = { status: 'error', error: `Node not found: ${input.node_id}` };
-    }
-  } else if (tool === 'memory_update') {
-    const updated = await updateMemoryNode(input.node_id, input.updates);
-    if (updated) {
-      result = { status: 'success', output: updated };
-    } else {
-      result = { status: 'error', error: `Failed to update node: ${input.node_id}` };
-    }
-  } else if (tool === 'memory_link') {
-    await upsertMemoryEdge({
-      fromNodeId: input.from_id,
-      toNodeId: input.to_id,
-      edgeType: input.relationship,
-      weight: input.weight || 1.0,
-      traceLabel: input.trace_label || 'Manual LLM link'
-    });
-    result = { status: 'success', output: { linked: true } };
   } else {
     result = { status: 'error', error: `Tool not implemented: ${tool}` };
   }
@@ -338,3 +209,4 @@ module.exports = {
   dispatchTool,
   adaptActionToToolRequest
 };
+

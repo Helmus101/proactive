@@ -99,6 +99,14 @@ function initDB() {
           metadata TEXT
         )`);
 
+        // Try to create an FTS5 virtual table; fall back gracefully if unavailable
+        try {
+          db.run(`CREATE VIRTUAL TABLE IF NOT EXISTS retrieval_docs_fts USING fts5(doc_id, text)`);
+        } catch (e) {
+          // Some builds may not support FTS5; try FTS4 as a fallback
+          try { db.run(`CREATE VIRTUAL TABLE IF NOT EXISTS retrieval_docs_fts USING fts4(doc_id, text)`); } catch (e2) { /* ignore */ }
+        }
+
         // Memory & graph-related tables
         db.run(`CREATE TABLE IF NOT EXISTS memory_nodes (
           id TEXT PRIMARY KEY,

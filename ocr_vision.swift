@@ -37,28 +37,6 @@ func runOCR(imagePath: String, languageHint: String?) throws -> OCRResult {
     func isLikelyNoise(_ line: String) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.count < 2 { return true }
-
-        let nonEssentialUI: Set<String> = [
-            "File", "Edit", "View", "History", "Bookmarks", "Window", "Help",
-            "Apple", "Finder", "Chrome", "Safari", "Firefox", "Terminal",
-            "System Preferences", "About This Mac", "Force Quit", "Sleep", "Restart", "Shut Down", "Log Out",
-            "Back", "Forward", "Reload", "Stop", "Home", "Search", "Print", "Save", "Open", "New Tab", "New Window"
-        ]
-        if nonEssentialUI.contains(trimmed) { return true }
-
-        let patterns = [
-            #"^\d{1,2}:\d{2}(?::\d{2})?\s*(?:[APM]{2})?$"#, // Time (e.g. 12:30 PM, 12:30:15)
-            #"^\d{1,3}%$"#,                        // Battery percentage
-            #"^[A-Z][a-z]{2}\s\d{1,2}$"#,         // Date like "Oct 25"
-            #"^[A-Z][a-z]{2}\s\d{1,2}\s[A-Z][a-z]{2}$"#, // Date like "Mon Oct 25"
-            #"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s[A-Z][a-z]{2}\s\d{1,2}$"#, // Day, Month Date
-        ]
-        for pattern in patterns {
-            if trimmed.range(of: pattern, options: .regularExpression) != nil {
-                return true
-            }
-        }
-
         let letters = trimmed.unicodeScalars.filter { CharacterSet.letters.contains($0) }.count
         let digits = trimmed.unicodeScalars.filter { CharacterSet.decimalDigits.contains($0) }.count
         let symbols = trimmed.count - letters - digits
