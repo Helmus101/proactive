@@ -137,6 +137,11 @@ function rerankFusedResults(rows, retrievalPlan) {
       const coreWalkBonus = String(row.match_reason || '').startsWith('core_walk') ? 0.11 : 0;
       const episodeBonus = row.layer === 'episode' ? (summaryVsRaw === 'summary' ? 0.09 : 0.03) : 0;
       const rawEvidenceBonus = summaryVsRaw === 'raw' && (row.source_type === 'event' || row.layer === 'event') ? 0.08 : 0;
+      
+      // Passive-First Heuristic: Boost direct observations
+      const isPassive = row.layer === 'raw' || row.source_type === 'screen' || row.source_type === 'capture' || row.source_type_group === 'desktop';
+      const passiveBoost = isPassive ? 0.15 : 0;
+
       const sourceBonus = sourceAgreementBonus(row, preferred);
       const dateBonus = dateFreshnessBonus(row, retrievalPlan?.applied_date_range);
       const exactTermHits = countExactTermHits(row.text, lexicalTerms);
@@ -146,7 +151,7 @@ function rerankFusedResults(rows, retrievalPlan) {
         : (entryMode === 'query_first'
           ? (lexicalBonus + (semanticBonus * 0.9) + (coreWalkBonus * 0.25))
           : ((coreWalkBonus * 0.7) + (lexicalBonus * 0.7) + (semanticBonus * 0.7)));
-      const rerankScore = Number(((row.fused_score || row.base_score || 0) + lexicalBonus + semanticBonus + coreWalkBonus + entryModeBonus + episodeBonus + rawEvidenceBonus + sourceBonus + dateBonus + exactnessBonus).toFixed(6));
+      const rerankScore = Number(((row.fused_score || row.base_score || 0) + lexicalBonus + semanticBonus + coreWalkBonus + entryModeBonus + episodeBonus + rawEvidenceBonus + sourceBonus + dateBonus + exactnessBonus + passiveBoost).toFixed(6));
       return { ...row, rerank_score: rerankScore, exact_term_hits: exactTermHits };
     })
     .sort((a, b) => {
@@ -591,7 +596,7 @@ async function buildHybridGraphRetrieval({
     ? await querylessRecentDocs(retrievalPlan.filters, 24)
     : [];
 
-  const alpha = options.alpha !== undefined ? options.alpha : 0.45;
+  const alpha = options.alpha !== undefined ? options.alpha : (retrievalPlan.alpha !== undefined ? retrievalPlan.alpha : 0.7);
   let fused = alphaBlendedSearch(lexicalRanking, [...semanticRankings, coreRanking, recencyRanking], alpha);
 
   // Recursive Retrieval Pass

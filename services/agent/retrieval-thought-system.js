@@ -800,6 +800,7 @@ function buildRetrievalThought({
   const messageQueries = sanitizeQueryList(Array.isArray(structuredQueries?.message_queries) ? structuredQueries.message_queries : [], 5);
   const intent = inferIntent(query || mergedText, mode, candidateType);
   const entryMode = inferEntryMode(query || mergedText, intent, mode);
+  const alpha = (summaryVsRaw === 'raw' || entryMode === 'query_first') ? 0.45 : 0.7;
   const reasoning = [];
   const lexicalTerms = ((structuredQueries && structuredQueries.lexical_terms) ? structuredQueries.lexical_terms : []).filter((term) => isUsefulLexicalTerm(term));
   if (!lexicalTerms.length) {
@@ -843,6 +844,7 @@ function buildRetrievalThought({
     mode: 'semantic',
     strategy_mode: strategyMode,
     entry_mode: entryMode,
+    alpha,
     summary_vs_raw: summaryVsRaw,
     time_scope: {
       label: normalizedDateRange?.label || inferredTemporalWindow?.label || defaultRecentWindow?.label || 'all_time',

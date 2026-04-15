@@ -6,7 +6,7 @@ function graphDerivation() {
   // eslint-disable-next-line global-require
   return require('./graph-derivation');
 }
-const { upsertMemoryNode, upsertMemoryEdge, upsertRetrievalDoc } = require('./graph-store');
+const { upsertMemoryNode, updateMemoryNode, upsertMemoryEdge, upsertRetrievalDoc } = require('./graph-store');
 const { generateEmbedding } = require('../embedding-engine');
 
 const DEEPSEEK_ENDPOINT = 'https://api.deepseek.com/v1/chat/completions';
@@ -228,64 +228,67 @@ async function callLLM(prompt, configOrApiKey = null, temperature = 0.3) {
   return callDeepSeek(prompt, config.apiKey, temperature);
 }
 
-async function runEpisodeJob() {
+async function generateNodeTLDR(node, apiKey) {
+  if (!node || !apiKey) return null;
+  const prompt = `
+You are a concise memory assistant. Given a memory node (layer: ${node.layer}), produce exactly 3 key bullet points that summarize the most important information. 
+Return strict JSON: {"tldr": ["bullet 1", "bullet 2", "bullet 3"]}
+
+Title: ${String(node.title || '').slice(0, 240)}
+Summary: ${String(node.summary || '').slice(0, 500)}
+Content: ${String(node.canonical_text || '').slice(0, 2000)}
+`;
+  const payload = await callLLM(prompt, normalizeLLMConfig(apiKey), 0.2);
+  if (payload && Array.isArray(payload.tldr)) {
+    return payload.tldr.slice(0, 3).map(b => `• ${b.replace(/^•\s*/, '')}`).join('\n');
+  }
+  return null;
+}
+
+async function runEnrichmentJob(apiKey) {
   const result = await graphDerivation().deriveGraphFromEvents({
     versionSeed: 'current'
   });
-  const episodeIds = result.episodeIds || [];
+  
+  const layersToEnrich = ['episode', 'semantic', 'cloud', 'insight', 'core'];
+  const placeholders = layersToEnrich.map(() => '?').join(',');
+  
+  const nodesToEnrich = await db.allQuery(
+    `SELECT id, layer, title, summary, canonical_text FROM memory_nodes 
+     WHERE layer IN (${placeholders}) AND (summary NOT LIKE '• %' OR summary IS NULL)
+     ORDER BY confidence DESC LIMIT 50`,
+    layersToEnrich
+  ).catch(() => []);
 
-  // Enrich episode summaries with LLM-generated narratives (limited batch to control cost)
-  try {
-    const limit = Math.min(12, episodeIds.length);
-    const idsToEnrich = episodeIds.slice(0, limit);
-    for (const id of idsToEnrich) {
-      try {
-        const row = await db.getQuery(`SELECT id, summary, title, canonical_text FROM memory_nodes WHERE id = ?`, [id]).catch(() => null);
-        if (!row) continue;
-        const prompt = `
-You are a concise summarizer. Given an episode title and its raw canonical text, produce 3-5 key takeaway points as bullet points. Return strict JSON: {"takeaways":"..."}
-
-Title: ${String(row.title || '').slice(0, 240)}
-Text: ${String(row.canonical_text || row.summary || '').slice(0, 4000)}
-`;
-        const payload = await callLLM(prompt, normalizeLLMConfig(process.env.DEEPSEEK_API_KEY || null), 0.25);
-        const parsed = Array.isArray(payload) ? payload[0] : (payload || null);
-        const takeaways = parsed && (parsed.takeaways || parsed.summary || parsed.narrative) ? String(parsed.takeaways || parsed.summary || parsed.narrative).trim() : null;
-        if (takeaways) {
-          await upsertMemoryNode({
-            id: row.id,
-            layer: 'episode',
-            subtype: null,
-            title: row.title,
-            summary: takeaways,
-            canonicalText: row.canonical_text,
-            confidence: 0.88,
-            status: 'active',
-            sourceRefs: [],
-            metadata: {},
-            graphVersion: result.version,
-            embedding: await generateEmbedding(takeaways, process.env.OPENAI_API_KEY)
-          });
-
-          await upsertRetrievalDoc({
-            docId: `node:${row.id}`,
-            sourceType: 'node',
-            nodeId: row.id,
-            timestamp: new Date().toISOString(),
-            text: `${row.title}\n${takeaways}`,
-            metadata: {
-              layer: 'episode',
-              title: row.title
-            }
-          });
-        }
-      } catch (e) { /* per-episode failure should not stop the job */ }
+  for (const node of nodesToEnrich) {
+    try {
+      const tldr = await generateNodeTLDR(node, apiKey);
+      if (tldr) {
+        await updateMemoryNode(node.id, { summary: tldr });
+        
+        await upsertRetrievalDoc({
+          docId: `node:${node.id}`,
+          sourceType: 'node',
+          nodeId: node.id,
+          timestamp: new Date().toISOString(),
+          text: `${node.title}\n${tldr}`,
+          metadata: {
+            layer: node.layer,
+            title: node.title
+          }
+        });
+      }
+    } catch (e) {
+      console.warn(`[runEnrichmentJob] Failed to enrich node ${node.id}:`, e.message);
     }
-  } catch (e) {
-    console.warn('[runEpisodeJob] episode enrichment failed:', e?.message || e);
   }
+  
+  return result;
+}
 
-  return episodeIds;
+async function runEpisodeJob() {
+  const result = await runEnrichmentJob(process.env.DEEPSEEK_API_KEY);
+  return result.episodeIds || [];
 }
 
 async function runWeeklyInsightJob(apiKey) {
@@ -733,6 +736,7 @@ module.exports = {
   callDeepSeek,
   callLLM,
   runEpisodeJob,
+  runEnrichmentJob,
   runSemanticSummaryWindow,
   runWeeklyInsightJob,
   runDailyInsights,
