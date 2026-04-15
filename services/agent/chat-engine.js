@@ -661,7 +661,8 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     intent: baseThought.mode || 'semantic',
     strategy_mode: baseThought.strategy_mode || 'memory_only',
     time_scope: baseThought.time_scope?.label || 'all_time',
-    query_count: (baseThought.semantic_queries || []).length
+    query_count: (baseThought.semantic_queries || []).length,
+    queries: baseThought.semantic_queries || []
   });
 
   // Passive-First Heuristic: attempt retrieval from Core, Insight, Cloud layers first
