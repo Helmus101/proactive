@@ -205,7 +205,23 @@ async function dispatchTool(request = {}, runtime = {}) {
         `SELECT * FROM memory_edges WHERE from_node_id = ? OR to_node_id = ? LIMIT 50`,
         [input.node_id, input.node_id]
       ).catch(() => []);
-      result = { status: 'success', output: { node, edges } };
+      
+      // Reconstruction logic: fetch raw events if it's an episode or linked to one
+      let rawEvents = [];
+      const sourceRefs = (() => {
+        try { return JSON.parse(node.source_refs || '[]'); } catch (_) { return []; }
+      })();
+      
+      if (sourceRefs.length) {
+        const placeholders = sourceRefs.map(() => '?').join(',');
+        rawEvents = await db.allQuery(
+          `SELECT id, type, timestamp, source, title, redacted_text, raw_text, metadata 
+           FROM events WHERE id IN (${placeholders}) LIMIT 20`,
+          sourceRefs
+        ).catch(() => []);
+      }
+
+      result = { status: 'success', output: { node, edges, rawEvents } };
     } else {
       result = { status: 'error', error: `Node not found: ${input.node_id}` };
     }

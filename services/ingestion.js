@@ -290,6 +290,13 @@ function stripLikelyUiChromeLines(lines = []) {
     // App specific UI noise
     if (/^(unread|starred|important|muted|snoozed|promotions|social|updates|forums)$/i.test(value)) return false;
     if (/^(all mail|spam|bin|drafts|sent|inbox|scheduled)$/i.test(value)) return false;
+    
+    // Aggressive OCR filtering additions
+    if (/^(loading|please wait|sign in|log in|sign up|password|username|email address|forgot password)$/i.test(value)) return false;
+    if (/^(\d+ messages?|\d+ notifications?|\d+ unread)$/i.test(value)) return false;
+    if (/^(cookies|privacy policy|terms of service|accept|decline|manage cookies)$/i.test(value)) return false;
+    if (/^https?:\/\/[^\s]+$/i.test(value)) return false; 
+
     return true;
   });
 }
@@ -324,12 +331,31 @@ function inferDesktopActivity(contentType, text, metadata = {}) {
     return /\b(reply|draft|send|submit|review|fix|debug|meeting|agenda|assignment|deadline|due|report|proposal|ticket|issue|task|document|notes|research|plan|code)\b/i.test(v) || v.split(/\s+/).length >= 4;
   }) || '').slice(0, 150);
 
-  // Detection for "Creating" vs "Viewing"
-  const isCreating = (
-    /\b(writing|drafting|composing|coding|editing|designing|creating|building|developing)\b/i.test(lowered) ||
-    /\b(save|commit|push|publish|submit|send|post|create|new)\b/i.test(lowered) ||
-    (app && /\b(cursor|vscode|intellij|sublime|textedit|notes|notion|google docs|pages|word|figma|canva)\b/i.test(app.toLowerCase()) && !/\b(view|preview|read-only)\b/i.test(windowTitle.toLowerCase()))
-  );
+  // Enhanced Detection for "Creating" vs "Viewing"
+  const creatingSignals = [
+    /\b(writing|drafting|composing|coding|editing|designing|creating|building|developing|typing)\b/i,
+    /\b(save|commit|push|publish|submit|send|post|create|new|add|insert|update)\b/i,
+    /\b(untitled|new folder|new document|new file)\b/i
+  ];
+  
+  const viewingSignals = [
+    /\b(viewing|reading|browsing|searching|looking|watching|previewing|read-only)\b/i,
+    /\b(details|overview|summary|info|about|help|faq)\b/i
+  ];
+
+  const hasCreatingSignal = creatingSignals.some(sig => sig.test(lowered));
+  const hasViewingSignal = viewingSignals.some(sig => sig.test(lowered));
+  
+  const isKnownEditor = (app && /\b(cursor|vscode|intellij|sublime|textedit|notes|notion|google docs|pages|word|figma|canva|linear|github|slack|discord|teams)\b/i.test(app.toLowerCase()));
+  const isReadOnlyWindow = /\b(view|preview|read-only|readonly|history|log|output)\b/i.test(windowTitle.toLowerCase());
+
+  let isCreating = false;
+  if (isKnownEditor && !isReadOnlyWindow) {
+    isCreating = true; // Default to creating for editors unless explicitly read-only
+  }
+  if (hasCreatingSignal) isCreating = true;
+  if (hasViewingSignal && !hasCreatingSignal) isCreating = false;
+
   const activityLabel = isCreating ? 'creating' : 'viewing';
 
   // Prefer explicit study signal emitted during capture over guessed text labels.

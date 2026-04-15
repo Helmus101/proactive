@@ -250,7 +250,7 @@ async function runEnrichmentJob(apiKey) {
     versionSeed: 'current'
   });
   
-  const layersToEnrich = ['episode', 'semantic', 'cloud', 'insight', 'core'];
+  const layersToEnrich = ['raw', 'episode', 'semantic', 'cloud', 'insight', 'core'];
   const placeholders = layersToEnrich.map(() => '?').join(',');
   
   const nodesToEnrich = await db.allQuery(
