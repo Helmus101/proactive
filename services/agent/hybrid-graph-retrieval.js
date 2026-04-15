@@ -13,6 +13,16 @@ const DEFAULT_SEED_LIMIT = 5;
 const DEFAULT_HOP_LIMIT = 2;
 const MAX_EXPANDED = 10;
 
+const LAYER_RANKS = {
+  'core': 4,
+  'insight': 3,
+  'cloud': 3,
+  'semantic': 2,
+  'episode': 1,
+  'event': 0,
+  'raw_event': 0
+};
+
 const EDGE_WEIGHTS = {
   'PROMOTED_FROM': 1.2,
   'ABSTRACTED_TO': 1.2,
@@ -184,6 +194,12 @@ async function coreDownRanking(nodeRows = [], retrievalPlan = {}, limit = 80) {
       const toKnown = visited.has(right);
       const neighborId = fromKnown && !toKnown ? right : (toKnown && !fromKnown ? left : null);
       if (!neighborId || !mapById.has(neighborId)) continue;
+
+      const currentId = fromKnown ? left : right;
+      const current = mapById.get(currentId) || { layer: 'core' };
+      const neighbor = mapById.get(neighborId);
+      if ((LAYER_RANKS[neighbor.layer] || 0) > (LAYER_RANKS[current.layer] || 0)) continue;
+
       const row = mapById.get(neighborId);
       const text = `${row.title || ''} ${row.summary || ''} ${row.canonical_text || ''} ${edge.edge_type || ''} ${edge.trace_label || ''}`;
       const termBoost = Math.min(0.24, countExactTermHits(text, terms) * 0.04);
@@ -391,20 +407,23 @@ async function querylessRecentDocs(filters = {}, limit = 24) {
 }
 
 function expansionScore(layer, subtype) {
-  if (layer === 'episode') return 5;
-  if (layer === 'semantic' && subtype === 'task') return 4;
-  if (layer === 'semantic' && subtype === 'person') return 4;
-  if (layer === 'semantic' && subtype === 'decision') return 4;
-  if (layer === 'semantic' && subtype === 'fact') return 3;
-  if (layer === 'semantic' && subtype === 'link') return 2;
+  if (layer === 'insight') return 7;
+  if (layer === 'semantic' && subtype === 'task') return 6;
+  if (layer === 'semantic' && subtype === 'person') return 6;
+  if (layer === 'semantic' && subtype === 'decision') return 6;
+  if (layer === 'semantic' && subtype === 'fact') return 5;
+  if (layer === 'semantic' && subtype === 'link') return 4;
+  if (layer === 'episode') return 3;
   if (layer === 'cloud') return 3;
-  if (layer === 'insight') return 2;
   return 1;
 }
 
-async function expandGraph(seedNodeIds = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpanded = MAX_EXPANDED) {
-  const seen = new Set(seedNodeIds.filter(Boolean));
-  const queue = seedNodeIds.filter(Boolean).map((id) => ({ id, depth: 0 }));
+async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpanded = MAX_EXPANDED) {
+  const seedIds = seedNodes.map(s => s.node_id || s.id).filter(Boolean);
+  const seen = new Set(seedIds);
+  const queue = seedNodes
+    .filter(s => s.node_id || s.id)
+    .map((s) => ({ id: s.node_id || s.id, layer: s.layer, depth: 0 }));
   const expanded = [];
   const edgePaths = [];
 
@@ -430,6 +449,10 @@ async function expandGraph(seedNodeIds = [], hopLimit = DEFAULT_HOP_LIMIT, maxEx
         [neighborId]
       ).catch(() => null);
       if (!node) continue;
+
+      // Restrict traversal: only higher or equal rank to lower/equal rank
+      if ((LAYER_RANKS[node.layer] || 0) > (LAYER_RANKS[current.layer] || 0)) continue;
+
       const metadata = asObj(node.metadata);
       neighbors.push({
         id: node.id,
@@ -471,7 +494,7 @@ async function expandGraph(seedNodeIds = [], hopLimit = DEFAULT_HOP_LIMIT, maxEx
           depth: item.depth
         });
         edgePaths.push(item.edge);
-        queue.push({ id: item.id, depth: item.depth });
+        queue.push({ id: item.id, layer: item.layer, depth: item.depth });
       });
   }
 
@@ -554,21 +577,20 @@ async function buildHybridGraphRetrieval({
 
   const reranked = rerankFusedResults(fused, retrievalPlan);
   const seeds = reranked.slice(0, retrievalPlan.seed_limit);
-  const seedNodeIds = Array.from(new Set(seeds.map((seed) => seed.node_id).filter(Boolean)));
-  const graph = await expandGraph(seedNodeIds, retrievalPlan.hop_limit, MAX_EXPANDED);
+  const graph = await expandGraph(seeds, retrievalPlan.hop_limit, MAX_EXPANDED);
 
-  // Spiral retrieval ordering: semantics -> episodes -> raw -> insights -> core
+  // Spiral retrieval ordering: Insights -> Semantics -> Episodes
   let evidenceRows = reranked.slice(0, 18);
   if ((retrievalPlan.strategy_mode || retrievalPlan.strategy || options.strategy) === 'spiral') {
-    // prefer semantic seeds first
+    // insights from expanded graph
+    const insightNodes = graph.expandedNodes.filter((n) => n.layer === 'insight');
+    // semantics from reranked evidence
     const semanticRows = evidenceRows.filter((r) => r.layer === 'semantic' || (r.source_type === 'node' && r.layer === 'semantic'));
     // episodes from expanded graph
     const episodeNodes = graph.expandedNodes.filter((n) => n.layer === 'episode');
-    // raw docs: use lexical ranking (already available as lexicalRanking)
-    const rawDocs = lexicalRanking.slice(0, 18).map((r) => ({ ...r, layer: r.layer || 'event' }));
-    // insights/core from expanded graph
-    const insightNodes = graph.expandedNodes.filter((n) => n.layer === 'insight');
+
     const coreNodes = await loadMemoryNodeCandidates({ layer: 'core' }).catch(() => []);
+    const rawDocs = lexicalRanking.slice(0, 18).map((r) => ({ ...r, layer: r.layer || 'event' }));
 
     // build evidence ordering with dedupe by key/node id
     const ordered = [];
@@ -580,11 +602,12 @@ async function buildHybridGraphRetrieval({
       ordered.push(r);
     }
 
+    insightNodes.forEach((n) => pushRow({ key: `node:${n.id}`, node_id: n.id, layer: 'insight', title: n.title, text: n.summary || n.title }, `node:${n.id}`));
     semanticRows.forEach((r) => pushRow(r, r.node_id || r.key));
     episodeNodes.forEach((n) => pushRow({ key: `node:${n.id}`, node_id: n.id, layer: 'episode', title: n.title, text: n.summary || n.title, base_score: n.sort_score || 0 }, `node:${n.id}`));
-    rawDocs.forEach((r) => pushRow(r, r.key));
-    insightNodes.forEach((n) => pushRow({ key: `node:${n.id}`, node_id: n.id, layer: 'insight', title: n.title, text: n.summary || n.title }, `node:${n.id}`));
+
     coreNodes.forEach((n) => pushRow({ key: `node:${n.id}`, node_id: n.id, layer: 'core', title: n.title, text: n.summary || n.title }, `node:${n.id}`));
+    rawDocs.forEach((r) => pushRow(r, r.key));
 
     // fallback: append remaining reranked rows preserving their order
     for (const r of evidenceRows) pushRow(r, r.key || r.node_id || r.id);
