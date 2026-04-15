@@ -6962,7 +6962,7 @@ ipcMain.handle('generate-proactive-todos', async (event) => {
     const hasConcreteAction = (label = '') => /\b(open|draft|reply|send|prepare|review|confirm|research|finish|complete|schedule|summarize|update|submit|resolve|fix|call|book|share|wish|check\s*in|reconnect)\b/i.test(String(label || ''));
     const looksValidAISuggestion = (item) => Boolean(
       item &&
-      ['study', 'relationship'].includes(String(item.type || '').toLowerCase()) &&
+      ['study', 'relationship', 'work', 'personal', 'creative', 'followup'].includes(String(item.type || '').toLowerCase()) &&
       item.title &&
       item.reason &&
       Array.isArray(item.evidence) &&
