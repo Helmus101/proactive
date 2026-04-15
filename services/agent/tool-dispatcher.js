@@ -215,13 +215,23 @@ async function dispatchTool(request = {}, runtime = {}) {
       if (sourceRefs.length) {
         const placeholders = sourceRefs.map(() => '?').join(',');
         rawEvents = await db.allQuery(
-          `SELECT id, type, timestamp, source, title, redacted_text, raw_text, metadata 
-           FROM events WHERE id IN (${placeholders}) LIMIT 20`,
+          `SELECT id, type, timestamp, source, title, redacted_text, raw_text, metadata, 
+                  (CASE WHEN type = 'ScreenCapture' THEN 1 ELSE 0 END) as is_capture
+           FROM events 
+           WHERE id IN (${placeholders}) 
+           ORDER BY is_capture DESC, timestamp DESC 
+           LIMIT 40`,
           sourceRefs
         ).catch(() => []);
       }
 
-      result = { status: 'success', output: { node, edges, rawEvents } };
+      // Enhanced reconstruction: if multiple captures exist, try to build a timeline snippet
+      const captures = rawEvents.filter(e => e.type === 'ScreenCapture' || e.is_capture);
+      const reconstruction = captures.length > 0 
+        ? captures.map(c => `[${c.timestamp}] ${c.title}: ${c.redacted_text || c.raw_text || ''}`).join('\n---\n')
+        : null;
+
+      result = { status: 'success', output: { node, edges, rawEvents, reconstruction } };
     } else {
       result = { status: 'error', error: `Node not found: ${input.node_id}` };
     }

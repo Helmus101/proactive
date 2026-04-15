@@ -478,7 +478,8 @@ async function buildThinkingTrace({ query, retrieval, drilldownEvidence = [] }) 
     initial_date_range: retrieval?.initial_date_range || null,
     applied_date_range: retrieval?.applied_date_range || null,
     widened_date_range: retrieval?.widened_date_range || null,
-    date_filter_status: retrieval?.date_filter_status || 'not_used'
+    date_filter_status: retrieval?.date_filter_status || 'not_used',
+    layers: Array.from(new Set((retrieval?.evidence || []).map(e => e.layer))).filter(Boolean)
   };
 }
 
@@ -666,6 +667,12 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     queries: baseThought.semantic_queries || []
   });
 
+  emit({
+    step: 'query_reconstruction',
+    transformed_queries: baseThought.semantic_queries || [],
+    lexical_terms: baseThought.lexical_terms || []
+  });
+
   // Passive-First Heuristic: attempt retrieval from Core, Insight, Cloud layers first
   let retrieval = await executeParallelRetrieval(retrievalQuery, baseThought, {
     mode: 'chat',
@@ -726,6 +733,40 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       };
     }
   }
+
+  // Deep Scan Heuristic: if results are still sparse, force recursive expansion
+  if (retrievalLooksSparse(retrieval) && !options.passiveOnly) {
+    emit({ step: 'deep_scan_triggered', reason: 'sparse_results' });
+    const deepRetrieval = await executeParallelRetrieval(retrievalQuery, baseThought, {
+      ...options,
+      mode: 'chat',
+      recursionDepth: 1,
+      passiveOnly: false
+    });
+    // Merge results or replace if significantly better
+    if ((deepRetrieval.evidence_count || 0) > (retrieval.evidence_count || 0)) {
+       retrieval = {
+         ...deepRetrieval,
+         initial_date_range: retrieval.initial_date_range,
+         widened_date_range: retrieval.widened_date_range,
+         date_filter_status: retrieval.date_filter_status
+       };
+    }
+  }
+
+  const layers = Array.from(new Set((retrieval.evidence || []).map(e => e.layer))).filter(Boolean);
+  emit({
+    step: 'layer_penetration',
+    layers,
+    max_depth: layers.includes('raw') || layers.includes('event') ? 3 : (layers.includes('episode') ? 2 : 1)
+  });
+
+  emit({
+    step: 'discovery_status',
+    seed_count: retrieval?.seed_nodes?.length || 0,
+    evidence_count: retrieval?.evidence_count || 0,
+    confidence: retrieval.evidence?.length ? Math.max(...retrieval.evidence.map(e => e.score || 0)) : 0
+  });
 
   const maxScore = retrieval.evidence?.length ? Math.max(...retrieval.evidence.map((e) => e.score || 0)) : 0;
   if (retrieval.evidence_count === 0 || (retrieval.evidence_count < 3 && maxScore < 0.45)) {

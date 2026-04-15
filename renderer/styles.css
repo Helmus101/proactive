@@ -3616,3 +3616,37 @@ body.compact-mode .suggestion-card {
 .sync-text {
     opacity: 0.85;
 }
+
+/* Thinking Trace Penetration Breadcrumbs */
+.thinking-trace-penetration {
+    padding: 12px 16px;
+    background: rgba(255, 255, 255, 0.03);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    margin-bottom: 8px;
+}
+
+.penetration-breadcrumb {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.penetration-node {
+    padding: 2px 6px;
+    border-radius: 4px;
+    transition: all 0.2s ease;
+}
+
+.penetration-node.active {
+    color: var(--accent-blue-strong);
+    background: rgba(123, 182, 255, 0.15);
+}
+
+.penetration-sep {
+    opacity: 0.3;
+}
