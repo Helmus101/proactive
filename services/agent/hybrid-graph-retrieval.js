@@ -247,6 +247,69 @@ async function coreDownRanking(nodeRows = [], retrievalPlan = {}, limit = 80) {
     .slice(0, limit);
 }
 
+async function recursiveDownTraversal(nodeRows = [], retrievalPlan = {}, limit = 60) {
+  if (!Array.isArray(nodeRows) || !nodeRows.length) return [];
+  const mapById = new Map(nodeRows.map((row) => [row.id, row]));
+  
+  let frontier = nodeRows
+    .filter((row) => row.layer === 'core' || row.layer === 'insight')
+    .sort((a, b) => (Number(b.confidence || 0) - Number(a.confidence || 0)))
+    .map((row) => row.id)
+    .slice(0, 12);
+
+  if (!frontier.length) return [];
+
+  const visited = new Set(frontier);
+  const results = [];
+
+  for (let depth = 1; depth <= 3 && frontier.length && results.length < limit; depth++) {
+    const placeholders = frontier.map(() => '?').join(',');
+    const edges = await db.allQuery(
+      `SELECT from_node_id, to_node_id, edge_type, weight FROM memory_edges 
+       WHERE from_node_id IN (${placeholders}) OR to_node_id IN (${placeholders})
+       ORDER BY weight DESC LIMIT 200`,
+      [...frontier, ...frontier]
+    ).catch(() => []);
+
+    const nextFrontier = [];
+    for (const edge of edges) {
+      const left = edge.from_node_id;
+      const right = edge.to_node_id;
+      const neighborId = visited.has(left) ? right : left;
+      
+      if (!neighborId || visited.has(neighborId)) continue;
+      
+      const neighbor = mapById.get(neighborId);
+      if (!neighbor) continue; 
+      
+      visited.add(neighborId);
+      
+      const isTarget = neighbor.layer === 'episode' || neighbor.layer === 'raw' || neighbor.layer === 'event';
+      if (isTarget) {
+        results.push({
+          key: `node:${neighbor.id}`,
+          source_type: 'node',
+          node_id: neighbor.id,
+          layer: neighbor.layer,
+          subtype: neighbor.subtype,
+          text: [neighbor.title, neighbor.summary, neighbor.canonical_text].filter(Boolean).join('\n'),
+          base_score: Number((0.9 - (depth * 0.12)).toFixed(6)),
+          match_reason: 'core_to_raw',
+          timestamp: neighbor.timestamp || neighbor.anchor_at,
+          app: neighbor.app,
+          source_refs: neighbor.source_refs || []
+        });
+      }
+      
+      if (neighbor.layer !== 'raw' && neighbor.layer !== 'event') {
+        nextFrontier.push(neighborId);
+      }
+    }
+    frontier = nextFrontier.slice(0, 60);
+  }
+  return results;
+}
+
 async function loadMemoryNodeCandidates(filters = {}) {
   const dateRange = normalizeDateRange(filters.date_range);
   let sql = `SELECT id, layer, subtype, title, summary, canonical_text, confidence, status, source_refs, metadata, graph_version, created_at, updated_at, embedding, anchor_date
@@ -366,7 +429,7 @@ async function lexicalSearchDocs(terms = [], filters = {}) {
         content_type: metadata.content_type || metadata.envelope?.metadata?.content_type || null,
         uncertainty: metadata.capture_uncertainty || metadata.envelope?.metadata?.capture_uncertainty || null,
         source_refs: metadata.source_refs || [],
-        base_score: 1 / (1 + Math.exp(Number(row.bm25_score || 0))),
+        base_score: 1 / (1 + Math.exp(Number(row.bm25_score || 0) / 4.0)),
         match_reason: `lexical:${terms.join(',')}`
       };
     })
@@ -592,12 +655,15 @@ async function buildHybridGraphRetrieval({
     ? []
     : await vectorSearchNodes(finalNodeRows, retrievalPlan.semantic_queries || retrievalPlan.search_queries || []);
   const coreRanking = await coreDownRanking(finalNodeRows, retrievalPlan, 80);
+  const coreToRawRanking = (options.strategy === 'core_to_raw' || retrievalPlan.strategy === 'core_to_raw')
+    ? await recursiveDownTraversal(finalNodeRows, retrievalPlan, 60)
+    : [];
   const recencyRanking = (retrievalPlan.mode === 'queryless' && !passiveOnly)
     ? await querylessRecentDocs(retrievalPlan.filters, 24)
     : [];
 
   const alpha = options.alpha !== undefined ? options.alpha : (retrievalPlan.alpha !== undefined ? retrievalPlan.alpha : 0.7);
-  let fused = alphaBlendedSearch(lexicalRanking, [...semanticRankings, coreRanking, recencyRanking], alpha);
+  let fused = alphaBlendedSearch(lexicalRanking, [...semanticRankings, coreRanking, coreToRawRanking, recencyRanking], alpha);
 
   // Recursive Retrieval Pass
   if (recursionDepth > 0 && !passiveOnly) {
