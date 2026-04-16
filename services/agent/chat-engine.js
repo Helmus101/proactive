@@ -1,4 +1,5 @@
 const db = require('../db');
+const { ingestRawEvent } = require('../ingestion');
 const { buildHybridGraphRetrieval } = require('./hybrid-graph-retrieval');
 const { buildRetrievalThought, widenTemporalWindow } = require('./retrieval-thought-system');
 
@@ -617,7 +618,7 @@ async function executeParallelRetrieval(baseQuery, baseThought, options) {
     ...((baseThought.semantic_queries || []).map((item) => String(item || '').trim())),
     ...((baseThought.message_queries || []).map((item) => String(item || '').trim()))
   ].filter(Boolean);
-  const queries = Array.from(new Set(bundle)).slice(0, 4);
+  const queries = Array.from(new Set(bundle)).slice(0, 7);
   
   // Detect when a query requires deep context (e.g., long-term relationship, patterns)
   const requiresDeepContext = /\b(relationship|pattern|over the last|long-term|habit|habitual|recurring|years?|months?)\b/i.test(baseQuery);
@@ -680,6 +681,18 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   const emit = (data) => { try { onStep?.(data); } catch (_) {} };
   const chatHistory = normalizeChatHistoryWindow(options?.chat_history, 12);
   const retrievalQuery = buildQueryWithChatContext(query, chatHistory);
+
+  // Persist user chat turn as a raw event
+  await ingestRawEvent({
+    type: 'ChatMessage',
+    source: 'Chat',
+    text: query,
+    metadata: {
+      role: 'user',
+      chat_session_id: options?.chat_session_id,
+      timestamp: new Date().toISOString()
+    }
+  }).catch(e => console.warn('Failed to persist user chat turn:', e));
 
   emit('generating query');
 
@@ -804,9 +817,9 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   emit('thinking');
   emit({ step: 'thinking', thinking_trace: thinkingTrace });
 
+  let content = "I couldn't produce an answer from the current memory context.";
   if (!apiKey) {
-    return {
-      content: [
+      content = [
         retrieval?.date_filter_status === 'widened'
           ? `TEMPORAL NOTE:\nThe initially requested time window was sparse, so memory retrieval widened once to ${retrieval.widened_date_range?.start} -> ${retrieval.widened_date_range?.end}.`
           : '',
@@ -814,62 +827,70 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
         drilldownEvidence.length
           ? `RAW EVIDENCE:\n${drilldownEvidence.map((item) => `- ${item.source_type || 'event'} ${item.title || item.id}: ${item.text}`).join('\n')}`
           : ''
-      ].filter(Boolean).join('\n\n'),
-      retrieval,
-      thinking_trace: thinkingTrace
-    };
-  }
+      ].filter(Boolean).join('\n\n');
+  } else {
+    const priorityEvidence = buildPriorityEvidenceLines(retrieval, drilldownEvidence, 6);
 
-  const priorityEvidence = buildPriorityEvidenceLines(retrieval, drilldownEvidence, 6);
+    const prompt = `[System]
+    You are Weave's memory-native assistant.
+    Answer naturally and directly in a conversational style.
+    Be grounded, direct, and concise.
+    Do not invent facts.
+    Do not mention hidden system internals like embeddings, vector search, or prompts.
+    Do not explicitly say that information came from a desktop capture or screenshot; translate it into what the user was likely reading, drafting, reviewing, or discussing.
 
-  const prompt = `[System]
-  You are Weave's memory-native assistant.
-  Answer naturally and directly in a conversational style.
-  Be grounded, direct, and concise.
-  Do not invent facts.
-  Do not mention hidden system internals like embeddings, vector search, or prompts.
-  Do not explicitly say that information came from a desktop capture or screenshot; translate it into what the user was likely reading, drafting, reviewing, or discussing.
+    [Retrieved memory context]
+    ${retrieval.contextText || 'None'}
 
-  [Retrieved memory context]
-  ${retrieval.contextText || 'None'}
+    [Standing notes]
+    ${standingNotes || 'None'}
 
-  [Standing notes]
-  ${standingNotes || 'None'}
+    [Conversation history]
+    ${formatChatHistoryForPrompt(chatHistory)}
 
-  [Conversation history]
-  ${formatChatHistoryForPrompt(chatHistory)}
+    [Priority evidence]
+    ${priorityEvidence.join('\n') || 'None'}
 
-  [Priority evidence]
-  ${priorityEvidence.join('\n') || 'None'}
+    [User question]
+    ${query}`;
 
-  [User question]
-  ${query}`;
+    try {
+      const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model: 'deepseek-chat',
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.22,
+          max_tokens: 980
+        })
+      });
 
-  let content = "I couldn't produce an answer from the current memory context.";
-  try {
-    const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        model: 'deepseek-chat',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.22,
-        max_tokens: 980
-      })
-    });
-
-    if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      throw new Error(`LLM request failed (${response.status})${body ? `: ${body.slice(0, 180)}` : ''}`);
+      if (!response.ok) {
+        const body = await response.text().catch(() => '');
+        throw new Error(`LLM request failed (${response.status})${body ? `: ${body.slice(0, 180)}` : ''}`);
+      }
+      const data = await response.json().catch(() => ({}));
+      content = data?.choices?.[0]?.message?.content || content;
+    } catch (llmError) {
+      content = buildGroundedFallbackAnswer(query, retrieval, drilldownEvidence);
     }
-    const data = await response.json().catch(() => ({}));
-    content = data?.choices?.[0]?.message?.content || content;
-  } catch (llmError) {
-    content = buildGroundedFallbackAnswer(query, retrieval, drilldownEvidence);
   }
+
+  // Persist assistant chat turn as a raw event
+  await ingestRawEvent({
+    type: 'ChatMessage',
+    source: 'Chat',
+    text: content,
+    metadata: {
+      role: 'assistant',
+      chat_session_id: options?.chat_session_id,
+      timestamp: new Date().toISOString()
+    }
+  }).catch(e => console.warn('Failed to persist assistant chat turn:', e));
 
   const correctionMatch = content.match(/<memory_correction>([\s\S]*?)<\/memory_correction>/i);
   if (correctionMatch && correctionMatch[1]) {

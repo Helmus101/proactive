@@ -113,9 +113,11 @@ async function ensureEventEnvelopeColumns() {
     ['title', 'TEXT'],
     ['raw_text', 'TEXT'],
     ['redacted_text', 'TEXT'],
-    ['source_ref', 'TEXT']
-  ];
-  for (const [name, sqlType] of required) {
+    ['source_ref', 'TEXT'],
+    ['observation_time', 'TEXT'],
+    ['event_time', 'TEXT']
+    ];
+
     if (!existing.has(name)) {
       await db.runQuery(`ALTER TABLE events ADD COLUMN ${name} ${sqlType}`).catch(() => {});
     }
@@ -688,6 +690,8 @@ function normalizeEventEnvelope({ id, type, timestamp, source, text, metadata = 
     occurred_at: occurredAt,
     occurred_date: occurredAtInfo.date,
     ingested_at: ingestedAt,
+    observation_time: ingestedAt,
+    event_time: occurredAt,
     passive_observation: isPassive,
     type_group: lowerType.includes('calendar') ? 'calendar'
       : (lowerType.includes('email') || lowerType.includes('message') ? 'communication'
@@ -833,8 +837,8 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
   try {
     await db.runQuery(
       `INSERT OR REPLACE INTO events
-       (id, type, timestamp, date, source, source_type, source_account, occurred_at, ingested_at, app, window_title, url, domain, participants, title, raw_text, redacted_text, source_ref, text, metadata)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, type, timestamp, date, source, source_type, source_account, occurred_at, ingested_at, observation_time, event_time, app, window_title, url, domain, participants, title, raw_text, redacted_text, source_ref, text, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         envelope.source_type,
@@ -845,6 +849,8 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
         envelope.source_account,
         envelope.occurred_at,
         envelope.ingested_at,
+        envelope.observation_time,
+        envelope.event_time,
         envelope.app,
         envelope.window_title,
         envelope.url,
