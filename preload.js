@@ -53,6 +53,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getSensorEvents: () => ipcRenderer.invoke('get-sensor-events'),
   saveSensorSettings: (settings) => ipcRenderer.invoke('save-sensor-settings', settings),
   captureSensorSnapshot: () => ipcRenderer.invoke('capture-sensor-snapshot'),
+  getAccessibilityStatus: () => ipcRenderer.invoke('get-accessibility-status'),
+  openAccessibilitySettings: () => ipcRenderer.invoke('open-accessibility-settings'),
+  getVoiceControlStatus: () => ipcRenderer.invoke('get-voice-control-status'),
+  setVoiceControlEnabled: (enabled) => ipcRenderer.invoke('set-voice-control-enabled', enabled),
+  voiceCaptureFailed: (payload = {}) => ipcRenderer.invoke('voice-capture-failed', payload),
+  updateVoiceSessionTranscript: (payload = {}) => ipcRenderer.invoke('update-voice-session-transcript', payload),
+  submitVoiceTranscript: (payload = {}) => ipcRenderer.invoke('submit-voice-transcript', payload),
+  submitVoiceAudio: (payload = {}) => ipcRenderer.invoke('submit-voice-audio', payload),
 
   // ── Daily Summary & Historical Sync ──────────────────────────────────────
 
@@ -128,5 +136,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onMemoryGraphUpdate:  (cb) => ipcRenderer.on('memory-graph-update',  (_e, data) => cb(data)),
   onProactiveSuggestions: (cb) => ipcRenderer.on('proactive-suggestions', (_e, suggestions) => cb(suggestions)),
   onMorningBriefUpdated: (cb) => ipcRenderer.on('morning-brief-updated', (_e, brief) => cb(brief)),
+  onVoiceCommandToggle: (cb) => ipcRenderer.on('voice-command-toggle', (_e, payload) => cb(payload)),
+  onVoiceSessionUpdate: (cb) => ipcRenderer.on('voice-session-update', (_e, payload) => cb(payload)),
   removeAllListeners:   (channel) => ipcRenderer.removeAllListeners(channel)
 });
