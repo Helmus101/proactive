@@ -113,18 +113,6 @@ function sourceAgreementBonus(row, preferred = []) {
   return preferred.some((item) => hay.includes(String(item || '').toLowerCase())) ? 0.08 : 0;
 }
 
-function countExactTermHits(text, terms = []) {
-  const hay = String(text || '').toLowerCase();
-  if (!hay || !Array.isArray(terms) || !terms.length) return 0;
-  let count = 0;
-  for (const term of terms) {
-    const needle = String(term || '').trim().toLowerCase();
-    if (!needle || needle.length < 3) continue;
-    if (hay.includes(needle)) count += 1;
-  }
-  return count;
-}
-
 function dateFreshnessBonus(row, appliedDateRange) {
   if (!appliedDateRange?.start || !appliedDateRange?.end) return 0;
   const ts = sortKeyForRow(row);
@@ -137,12 +125,10 @@ function dateFreshnessBonus(row, appliedDateRange) {
 
 function rerankFusedResults(rows, retrievalPlan) {
   const preferred = Array.isArray(retrievalPlan?.preferred_source_types) ? retrievalPlan.preferred_source_types : [];
-  const lexicalTerms = Array.isArray(retrievalPlan?.lexical_terms) ? retrievalPlan.lexical_terms : [];
   const summaryVsRaw = retrievalPlan?.summary_vs_raw || 'summary';
   const entryMode = String(retrievalPlan?.entry_mode || 'hybrid');
   return (rows || [])
     .map((row) => {
-      const lexicalBonus = String(row.match_reason || '').startsWith('lexical:') ? 0.14 : 0;
       const semanticBonus = String(row.match_reason || '').startsWith('semantic:') ? 0.08 : 0;
       const coreWalkBonus = String(row.match_reason || '').startsWith('core_walk') ? 0.11 : 0;
       const episodeBonus = row.layer === 'episode' ? (summaryVsRaw === 'summary' ? 0.09 : 0.03) : 0;
@@ -162,15 +148,14 @@ function rerankFusedResults(rows, retrievalPlan) {
 
       const sourceBonus = sourceAgreementBonus(row, preferred);
       const dateBonus = dateFreshnessBonus(row, retrievalPlan?.applied_date_range);
-    const exactTermHits = countExactTermHits(row.text, lexicalTerms);
-    const exactnessBoost = exactTermHits > 0 ? 0.9 : 0;
+    
     const entryModeBonus = entryMode === 'core_first'
-      ? (coreWalkBonus + (semanticBonus * 0.6) + (lexicalBonus * 0.25))
+      ? (coreWalkBonus + (semanticBonus * 0.6))
       : (entryMode === 'query_first'
-        ? (lexicalBonus + (semanticBonus * 0.9) + (coreWalkBonus * 0.25))
-        : ((coreWalkBonus * 0.7) + (lexicalBonus * 0.7) + (semanticBonus * 0.7)));
-    const rerankScore = Number(((row.fused_score || row.base_score || 0) + lexicalBonus + semanticBonus + coreWalkBonus + entryModeBonus + episodeBonus + rawEvidenceBonus + sourceBonus + dateBonus + exactnessBoost + passiveBoost).toFixed(6));
-    return { ...row, rerank_score: rerankScore, exact_term_hits: exactTermHits };
+        ? (semanticBonus * 0.9 + (coreWalkBonus * 0.25))
+        : ((coreWalkBonus * 0.7) + (semanticBonus * 0.7)));
+    const rerankScore = Number(((row.fused_score || row.base_score || 0) + semanticBonus + coreWalkBonus + entryModeBonus + episodeBonus + rawEvidenceBonus + sourceBonus + dateBonus + passiveBoost).toFixed(6));
+    return { ...row, rerank_score: rerankScore };
   })
     .sort((a, b) => {
       if ((b.rerank_score || 0) !== (a.rerank_score || 0)) return (b.rerank_score || 0) - (a.rerank_score || 0);
@@ -198,7 +183,6 @@ async function coreDownRanking(nodeRows = [], retrievalPlan = {}, limit = 80) {
   let frontier = Array.from(new Set([...coreFrontier, ...seedFrontier]));
   if (!frontier.length) return [];
 
-  const terms = Array.isArray(retrievalPlan?.lexical_terms) ? retrievalPlan.lexical_terms : [];
   const visited = new Set(frontier);
   const scoreById = new Map(frontier.map((id) => {
     const row = mapById.get(id);
@@ -234,11 +218,8 @@ async function coreDownRanking(nodeRows = [], retrievalPlan = {}, limit = 80) {
       const neighbor = mapById.get(neighborId);
       if ((LAYER_RANKS[neighbor.layer] || 0) > (LAYER_RANKS[current.layer] || 0)) continue;
 
-      const row = mapById.get(neighborId);
-      const text = `${row.title || ''} ${row.summary || ''} ${row.canonical_text || ''} ${edge.edge_type || ''} ${edge.trace_label || ''}`;
-      const termBoost = Math.min(0.24, countExactTermHits(text, terms) * 0.04);
       const edgeWeightMultiplier = EDGE_WEIGHTS[edge.edge_type] || 1.0;
-      const base = (Math.max(0.2, 0.95 - (depth * 0.18)) + (Number(edge.weight || 0) * 0.06) + (Number(edge.evidence_count || 0) * 0.02)) * edgeWeightMultiplier + termBoost;
+      const base = (Math.max(0.2, 0.95 - (depth * 0.18)) + (Number(edge.weight || 0) * 0.06) + (Number(edge.evidence_count || 0) * 0.02)) * edgeWeightMultiplier;
       const prev = Number(scoreById.get(neighborId) || 0);
       scoreById.set(neighborId, Math.max(prev, Number(base.toFixed(6))));
       if (!visited.has(neighborId)) {
@@ -469,13 +450,14 @@ async function querylessRecentDocs(filters = {}, limit = 24) {
 }
 
 function expansionScore(layer, subtype) {
-  if (layer === 'insight') return 7;
-  if (layer === 'semantic' && subtype === 'task') return 6;
-  if (layer === 'semantic' && subtype === 'person') return 6;
-  if (layer === 'semantic' && subtype === 'decision') return 6;
-  if (layer === 'semantic' && subtype === 'fact') return 5;
+  if (layer === 'insight') return 10;
+  if (layer === 'semantic' && subtype === 'task') return 9;
+  if (layer === 'semantic' && subtype === 'person') return 9;
+  if (layer === 'semantic' && subtype === 'decision') return 8;
+  if (layer === 'semantic' && subtype === 'fact') return 7;
+  if (layer === 'episode') return 6;
+  if (layer === 'raw' || layer === 'event') return 5;
   if (layer === 'semantic' && subtype === 'link') return 4;
-  if (layer === 'episode') return 3;
   if (layer === 'cloud') return 3;
   return 1;
 }
@@ -489,9 +471,12 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
   const expanded = [];
   const edgePaths = [];
 
+  // Strictly enforce 1-2 hop limit (hopLimit passed from retrieval plan)
+  const effectiveHopLimit = Math.min(2, Math.max(1, hopLimit || DEFAULT_HOP_LIMIT));
+
   while (queue.length && expanded.length < maxExpanded) {
     const current = queue.shift();
-    if (current.depth >= hopLimit) continue;
+    if (current.depth >= effectiveHopLimit) continue;
     const edges = await db.allQuery(
       `SELECT id, from_node_id, to_node_id, edge_type, weight, trace_label, evidence_count, metadata
        FROM memory_edges
@@ -567,7 +552,7 @@ function alphaBlendedSearch(lexicalRanking, semanticRankings, alpha = 0.45) {
   const scores = new Map();
   const allSemantic = [].concat(...semanticRankings);
   
-  // Since lexicalRanking is now always empty, this simplifies to semantic-only max merge
+  // Entirely relying on vector search (semantic) logic. Lexical ranking is ignored.
   for (const sem of allSemantic) {
     const key = sem.key;
     const prev = scores.get(key);
@@ -797,7 +782,7 @@ async function buildHybridGraphRetrieval({
       query_bundle: retrievalPlan.query_bundle || null,
       semantic: retrievalPlan.semantic_queries || [],
       messages: retrievalPlan.message_queries || [],
-      lexical_terms: retrievalPlan.lexical_terms || [],
+      lexical_terms: [], // Lexical terms removed
       debug: retrievalPlan.query_debug || null
     },
     thought_summary: summarizeRetrievalThought(retrievalPlan),
