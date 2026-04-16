@@ -492,29 +492,35 @@ async function buildMultiAngleQueryBundle(baseText, {
   const apiKey = process.env.DEEPSEEK_API_KEY;
   const cleaned = stripEmbeddingWeakTerms(stripQuestionFormatting(baseText));
   let finalQueries = [];
+  let llmSourceMode = null;
 
   if (apiKey) {
     const prompt = `
-You are a retrieval query generator for an AI memory system. 
-Your goal is to take a user query and generate exactly 7 distinct search queries that will be used for vector search across the user's memory (screen captures, browser history, emails, etc.).
-
-Use Intent Decomposition and Semantic Expansion to cover different angles:
-1. Literal: The cleaned user query.
-2. Decomposed (Sub-intent 1): A specific sub-task or entity mentioned.
-3. Decomposed (Sub-intent 2): Another specific sub-task or entity.
-4. Expanded (Semantic 1): Using synonyms or related concepts.
-5. Expanded (Semantic 2): Broader context or thematic expansion.
-6. Contextual: Search for the likely environment (app, site, or situation).
-7. Thematic: Search for the overarching project or topic.
-
-Return strict JSON: {"queries": ["query 1", "query 2", "query 3", "query 4", "query 5", "query 6", "query 7"]}
-
-User Query: "${baseText.replace(/"/g, '\\"')}"
-`;
+	You are a retrieval query generator and router for an AI memory system. 
+	Your goal is to:
+    1. Decide the best source for the information: "memory" (personal history/context), "web" (public knowledge), or "hybrid" (both).
+    2. Generate exactly 7 distinct search queries for vector search across the user's memory.
+	
+	Use Intent Decomposition and Semantic Expansion for queries:
+	1. Literal: The cleaned user query.
+	2. Decomposed (Sub-intent 1): A specific sub-task or entity mentioned.
+	3. Decomposed (Sub-intent 2): Another specific sub-task or entity.
+	4. Expanded (Semantic 1): Using synonyms or related concepts.
+	5. Expanded (Semantic 2): Broader context or thematic expansion.
+	6. Contextual: Search for the likely environment (app, site, or situation).
+	7. Thematic: Search for the overarching project or topic.
+	
+	Return strict JSON: {"source_mode": "memory"|"web"|"hybrid", "queries": ["query 1", "query 2", "query 3", "query 4", "query 5", "query 6", "query 7"]}
+	
+	User Query: "${baseText.replace(/"/g, '\\"')}"
+	`;
     try {
       const result = await callLLM(prompt, apiKey, 0.3);
       if (result && Array.isArray(result.queries)) {
         finalQueries = result.queries.slice(0, 7);
+      }
+      if (result && result.source_mode) {
+        llmSourceMode = result.source_mode;
       }
     } catch (e) {
       console.warn('[retrieval-thought] LLM query generation failed:', e.message);
@@ -549,22 +555,17 @@ User Query: "${baseText.replace(/"/g, '\\"')}"
     finalQueries = semanticQueries.slice(0, 7);
   }
 
-  const lexicalTerms = safeUnique([
-    ...normalizeTerms(cleaned).slice(0, 10),
-    ...extractExactTokens(baseText),
-    ...extractNamedEntities(baseText).map((item) => item.toLowerCase())
-  ], 18).filter((term) => isUsefulLexicalTerm(term)).slice(0, 18);
-
   return {
     query_bundle: {
       intent: inferIntent(baseText, mode, candidateType),
       entity: extractNamedEntities(baseText)[0] || normalizeTerms(cleaned)[0] || '',
       clusters: getThematicClusters(baseText),
-      semantic_queries: finalQueries
+      semantic_queries: finalQueries,
+      source_mode: llmSourceMode || 'memory'
     },
     semantic_queries: finalQueries,
     message_queries: [],
-    lexical_terms: lexicalTerms,
+    lexical_terms: [], // Removed lexical terms
     debug: {
       intent: inferIntent(baseText, mode, candidateType),
       clusters: getThematicClusters(baseText),
@@ -868,19 +869,18 @@ async function buildRetrievalThought({
   const entryMode = inferEntryMode(query || mergedText, intent, mode);
   const alpha = (summaryVsRaw === 'raw' || entryMode === 'query_first') ? 0.45 : 0.7;
   const reasoning = [];
-  const lexicalTerms = ((structuredQueries && structuredQueries.lexical_terms) ? structuredQueries.lexical_terms : []).filter((term) => isUsefulLexicalTerm(term));
-  if (!lexicalTerms.length) {
-    lexicalTerms.push(
-      ...Array.from(new Set([
-        ...normalizeTerms(stripEmbeddingWeakTerms(mergedText || query)).slice(0, 10),
-        ...extractExactTokens(mergedText || query),
-        ...extractQuotedPhrases(mergedText || query).map((item) => item.toLowerCase()),
-        ...extractNamedEntities(mergedText || query).map((item) => item.toLowerCase())
-      ])).filter((term) => isUsefulLexicalTerm(term)).slice(0, 16)
-    );
-  }
+  const lexicalTerms = []; // Entirely removed lexical terms for search logic.
+  
   const temporalReasoning = [];
-  const strategyMode = webGate.strategyMode;
+  let strategyMode = webGate.strategyMode;
+  // Use LLM router decision for source selection if available
+  if (structuredQueries?.query_bundle?.source_mode) {
+    const llmSource = structuredQueries.query_bundle.source_mode;
+    if (llmSource === 'web') strategyMode = 'web_only';
+    else if (llmSource === 'hybrid') strategyMode = 'memory_then_web';
+    else strategyMode = 'memory_only';
+  }
+
   const filters = {
     app: apps.length ? apps : null,
     date_range: normalizedDateRange,
@@ -889,7 +889,7 @@ async function buildRetrievalThought({
 
   reasoning.push(`Intent: ${intent}.`);
   reasoning.push(`Entry mode: ${entryMode}.`);
-  reasoning.push('Mode: 6-step Deep Intent Query Generation (Decomposition, Synonyms, Clusters, Cross-Layer).');
+  reasoning.push('Mode: Agentic Retrieval Router (LLM-based source selection + 7-Query Batch).');
   reasoning.push('Batching: Enforced strict 7-query limit.');
   reasoning.push(`Summary mode: ${summaryVsRaw === 'raw' ? 'raw evidence retrieval' : 'bounded summary retrieval'}.`);
   if (apps.length) reasoning.push(`App hints: ${apps.join(', ')}.`);
@@ -1006,7 +1006,7 @@ function buildSpeculativePrefetchPlan() {
     intent: 'Speculative prefetch of recent context to prime cache',
     semantic_queries: ['recent open loops', 'ongoing task status', 'unanswered communications'],
     message_queries: [],
-    lexical_terms: ['todo', 'draft', 'review'],
+    lexical_terms: [],
     query_bundle: null,
     query_debug: null,
     preferred_source_types: [],

@@ -63,7 +63,8 @@ function normalizeDDGResultUrl(url) {
 }
 
 function shouldUseExternalWebSearch(query, retrievalThought, retrieval) {
-  if (retrievalThought?.strategy_mode !== 'memory_then_web') return false;
+  const mode = retrievalThought?.strategy_mode;
+  if (mode === 'web_only' || mode === 'memory_then_web') return true;
   if (retrievalThought?.mode === 'queryless') return false;
   const evidenceCount = Number(retrieval?.evidence_count || 0);
   const seedCount = Number(retrieval?.seed_nodes?.length || 0);
