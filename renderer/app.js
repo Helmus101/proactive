@@ -833,20 +833,10 @@ class WeaveApp {
             const label = thinkingPanel.querySelector(".thinking-step-label");
             if (!label) return;
             const step = data?.step || "";
-            let text = "";
-            if (step === "generating query") {
-                text = "generating query";
-            } else if (step === "searching") {
-                text = "searching";
-            } else if (step === "results") {
-                text = "results";
-            } else if (step === "thinking") {
-                text = "thinking";
-                if (data.thinking_trace) {
-                    this.finalizeThinkingPanel(thinkingPanel, data);
-                }
+            label.textContent = step;
+            if (step === "thinking" && data.thinking_trace) {
+                this.finalizeThinkingPanel(thinkingPanel, data);
             }
-            if (text) label.textContent = text;
             this.scrollChatToBottom();
         };
 
@@ -931,8 +921,7 @@ class WeaveApp {
         wrapper.innerHTML = `
             <div class="thinking-panel expanded">
                 <div class="thinking-content-labels">
-                    <div class="thinking-live-label">Thinking...</div>
-                    <div class="thinking-step-label"></div>
+                    <div class="thinking-step-label">Thinking...</div>
                 </div>
             </div>
         `;
@@ -951,18 +940,6 @@ class WeaveApp {
         this.scrollChatToBottom();
     }
 
-    startThinkingTicker(panel, phases) {
-        const word = panel.querySelector('#thinking-word-live');
-        let idx = 0;
-        return window.setInterval(() => {
-            if (!word) return;
-            idx = (idx + 1) % phases.length;
-            word.textContent = phases[idx];
-            word.classList.remove('thinking-word');
-            void word.offsetWidth;
-            word.classList.add('thinking-word');
-        }, 460);
-    }
 
     formatAssistantOutput(rawContent) {
         const text = String(rawContent || '')

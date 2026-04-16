@@ -489,107 +489,93 @@ function buildMultiAngleQueryBundle(baseText, {
   mode = 'chat',
   deepScan = false
 } = {}) {
-  const strippedNoiseTerms = extractNoiseTerms(baseText);
+  const intent = inferIntent(baseText, mode, candidateType);
   const cleaned = stripEmbeddingWeakTerms(stripQuestionFormatting(baseText));
-  const cleanedExact = safeText(cleaned).replace(/\s+/g, ' ').trim();
   const terms = normalizeTerms(cleaned);
   const namedEntities = extractNamedEntities(baseText);
-  const exactTokens = extractExactTokens(baseText);
-  const apps = inferApps(baseText);
-  const technicalHints = safeUnique([
-    ...inferTechnicalHints(baseText),
-    ...inferCoOccurringTerms(baseText, candidateType).filter((item) => /\.[a-z]{2,4}\b|handler|schema|database|library|stack trace|error|exception|function|manifest/i.test(item))
-  ], 5);
-  const surfaceFamilies = inferSurfaceFamilies(baseText, candidateType, appScope, sourceScope);
-  const actionStateTerms = inferActionStateTerms(baseText, candidateType);
-  const conceptualTerms = inferConceptualTerms(baseText, candidateType);
-  const outcomeTerms = inferOutcomeTerms(baseText, candidateType);
-  const inverse = inferInverseFrame(baseText);
   const entity = namedEntities[0] || terms[0] || '';
-  const coreState = actionStateTerms[0] || terms[1] || '';
-  const contextTerm = exactTokens[0] || technicalHints[0] || apps[0] || candidateType || terms[2] || '';
+  const clusters = getThematicClusters(baseText);
+  const synonyms = expandSynonyms(terms.slice(0, 3));
 
-  const bundle = {
-    literal: '',
-    conceptual: '',
-    technical: '',
-    surface: '',
-    structural: '',
-    outcome: '',
-    deep: '',
-    entity: entity || '',
-    extra: []
+  // Decomposition for Cross-Layer
+  const decomposition = {
+    intent,
+    entity,
+    terms,
+    clusters
   };
 
-  bundle.literal = [entity, coreState, contextTerm].filter(Boolean).join(' ').trim() || cleanedExact;
-  bundle.conceptual = safeUnique([entity, ...conceptualTerms, coreState], 4).join(' ').trim() || bundle.literal;
-  bundle.technical = safeUnique([entity, coreState, ...technicalHints], 5).join(' ').trim() || '';
-  const surfaceCandidates = buildSurfaceSyntaxQueries({
-    entity,
-    stateTerms: actionStateTerms,
-    technicalHints,
-    exactTokens,
-    surfaceFamilies,
-    candidateType
-  });
-  bundle.surface = surfaceCandidates[0] || [entity, contextTerm || 'dashboard', coreState || 'status'].filter(Boolean).join(' ').trim();
-  const structuralCandidates = buildStructuralQueries({
-    entity,
-    exactTokens,
-    technicalHints,
-    candidateType
-  });
-  bundle.structural = structuralCandidates[0] || [exactTokens[0] || '', candidateType || '', 'structure'].filter(Boolean).join(' ').trim();
-  bundle.outcome = safeUnique([entity, ...outcomeTerms], 4).join(' ').trim() || '';
-  
-  if (deepScan) {
-    bundle.deep = safeUnique([entity, 'relationship', 'patterns', 'habits', coreState], 4).join(' ').trim();
+  const semanticQueries = [];
+
+  // Step 1: Add the literal cleaned query
+  uniquePush(semanticQueries, cleaned, 7);
+
+  // Step 2: Add intent-based query
+  if (intent === 'fact') {
+    uniquePush(semanticQueries, `${entity} exact details`.trim(), 7);
+  } else if (intent === 'proactive') {
+    uniquePush(semanticQueries, `${entity} next steps and actions`.trim(), 7);
+  } else {
+    uniquePush(semanticQueries, `${entity} current status and progress`.trim(), 7);
   }
 
-  const extras = [];
-  if (entity && coreState) uniquePush(extras, `${entity} ${coreState}`, 3);
-  if (exactTokens[0] && bundle.literal) uniquePush(extras, `${exactTokens[0]} ${bundle.literal}`, 3);
-  if (mode === 'suggestion' && candidateType) uniquePush(extras, `${candidateType} ${bundle.outcome || bundle.literal}`.trim(), 3);
-  bundle.extra = extras.slice(0, 2);
+  // Step 3: Add Cross-Layer queries (3 queries)
+  const crossLayer = buildCrossLayerQueries(decomposition);
+  crossLayer.forEach(q => uniquePush(semanticQueries, q, 7));
 
-  const semanticQueries = [];
-  const lensQueries = [bundle.literal, bundle.technical, bundle.conceptual, bundle.surface, bundle.structural];
-  if (bundle.deep) lensQueries.push(bundle.deep);
-  
-  // 5-lens default, then fill with precise extras up to max.
-  lensQueries.forEach((query) => uniquePush(semanticQueries, query, max));
-  if (cleanedExact.length >= 4) uniquePush(semanticQueries, cleanedExact, max);
-  for (const phrase of extractQuotedPhrases(baseText)) uniquePush(semanticQueries, phrase, max);
-  [bundle.outcome, ...bundle.extra].forEach((query) => uniquePush(semanticQueries, query, max));
-  if (inverse) uniquePush(semanticQueries, inverse, max);
-  if (apps[0] && bundle.surface) uniquePush(semanticQueries, `${apps[0]} ${bundle.surface}`, max);
-  if (entity && bundle.structural) uniquePush(semanticQueries, `${entity} ${bundle.structural}`, max);
+  // Step 4: Add synonym-expanded query
+  if (synonyms.length > terms.length) {
+    const extraSynonym = synonyms.find(s => !terms.includes(s.toLowerCase()));
+    if (extraSynonym) {
+      uniquePush(semanticQueries, `${entity} ${extraSynonym}`.trim(), 7);
+    }
+  }
+
+  // Step 5: Add cluster-based query
+  uniquePush(semanticQueries, `${entity} ${clusters[0].replace(/_/g, ' ')}`.trim(), 7);
+
+  // Ensure exactly 7 queries
+  if (semanticQueries.length < 7) {
+    const filler = [
+      `${entity} recent context`,
+      `${entity} implementation details`,
+      `${entity} related activity`,
+      `${entity} overview`,
+      `${entity} background`
+    ];
+    for (const f of filler) {
+      uniquePush(semanticQueries, f, 7);
+      if (semanticQueries.length >= 7) break;
+    }
+  }
+
+  // Final clamp to exactly 7
+  const finalQueries = semanticQueries.slice(0, 7);
 
   const lexicalTerms = safeUnique([
-    ...normalizeTerms(cleanedExact).slice(0, 10),
-    ...extractQuotedPhrases(baseText).map((item) => item.toLowerCase()),
-    ...exactTokens,
-    ...namedEntities.map((item) => item.toLowerCase()),
-    ...surfaceFamilies.flatMap((family) => {
-      if (family === 'communication') return ['subject:', 'from:', 'thread:'];
-      if (family === 'coding') return ['commit:', 'pr:'];
-      return [];
-    })
+    ...normalizeTerms(cleaned).slice(0, 10),
+    ...extractExactTokens(baseText),
+    ...namedEntities.map((item) => item.toLowerCase())
   ], 18).filter((term) => isUsefulLexicalTerm(term)).slice(0, 18);
 
   return {
-    query_bundle: bundle,
-    semantic_queries: semanticQueries.slice(0, max),
-    message_queries: buildMessageQueriesFromBundle(bundle, { max: 5 }),
+    query_bundle: {
+      intent,
+      entity,
+      clusters,
+      semantic_queries: finalQueries
+    },
+    semantic_queries: finalQueries,
+    message_queries: [], // Simplified for now as per ticket focus
     lexical_terms: lexicalTerms,
     debug: {
-      inferred_entities: namedEntities,
-      inferred_surfaces: surfaceFamilies,
-      inferred_technical_hints: technicalHints,
-      stripped_noise_terms: strippedNoiseTerms
+      intent,
+      clusters,
+      entities: namedEntities
     }
   };
 }
+
 
 function inferTechnicalHints(text) {
   const lower = safeText(text).toLowerCase();
@@ -631,16 +617,81 @@ function inferInverseFrame(text) {
   return '';
 }
 
+function expandSynonyms(terms = []) {
+  const synonyms = {
+    'bug': ['error', 'issue', 'failure', 'crash', 'exception'],
+    'email': ['message', 'gmail', 'thread', 'correspondence'],
+    'meeting': ['calendar', 'event', 'agenda', 'call', 'sync'],
+    'doc': ['document', 'proposal', 'brief', 'spec', 'deck'],
+    'code': ['implementation', 'script', 'function', 'handler', 'fix'],
+    'status': ['progress', 'update', 'current state', 'where things stand'],
+    'contact': ['person', 'relationship', 'interaction', 'meeting'],
+    'signup': ['conversion', 'waitlist', 'registration', 'user acquisition']
+  };
+  const expanded = [...terms];
+  terms.forEach(t => {
+    const lower = t.toLowerCase();
+    if (synonyms[lower]) {
+      expanded.push(...synonyms[lower]);
+    }
+  });
+  return safeUnique(expanded, 12);
+}
+
+function getThematicClusters(text) {
+  const lower = safeText(text).toLowerCase();
+  const clusters = [];
+  if (/\b(bug|error|issue|crash|fix|implementation|code|tsx|js|ts)\b/.test(lower)) {
+    clusters.push('technical_debt_and_execution');
+  }
+  if (/\b(email|message|slack|thread|reply|contact|person|interaction)\b/.test(lower)) {
+    clusters.push('communication_and_relationships');
+  }
+  if (/\b(meeting|calendar|event|agenda|sync|call)\b/.test(lower)) {
+    clusters.push('planning_and_coordination');
+  }
+  if (/\b(doc|document|proposal|brief|spec|deck|report)\b/.test(lower)) {
+    clusters.push('documentation_and_strategy');
+  }
+  if (/\b(signup|waitlist|conversion|user|marketing|landing)\b/.test(lower)) {
+    clusters.push('growth_and_product_metrics');
+  }
+  return clusters.length ? clusters : ['general_activity'];
+}
+
+function buildCrossLayerQueries(decomposition) {
+  const { intent, entity, terms, clusters } = decomposition;
+  const queries = [];
+  const base = entity || terms[0] || 'activity';
+  const cluster = clusters[0] || '';
+
+  // Episodic: Specific events and actions
+  queries.push(`${base} ${terms[1] || 'recent action'}`.trim());
+  
+  // Semantic: Conceptual knowledge and facts
+  queries.push(`${base} ${cluster.replace(/_/g, ' ')} context`.trim());
+  
+  // Core: Long-term patterns and importance
+  queries.push(`${base} significance and patterns`.trim());
+
+  return queries;
+}
+
 function inferIntent(text, mode, candidateType = '') {
   const lower = `${safeText(text)} ${safeText(candidateType)}`.toLowerCase();
-  if (/\bwhat was i doing|what happened|20 minutes ago|30 minutes ago|an hour ago\b/.test(lower)) {
-    return 'recall recent activity from time-anchored context';
+  
+  // Fact: point-in-time recovery
+  if (/\b(what was|what did|where is|exact|verbatim|quote|when|at what time|on [A-Z][a-z]+)\b/.test(lower)) {
+    return 'fact';
   }
-  if (/\bemail|reply|thread|message|inbox\b/.test(lower)) return 'recover communication context and next action';
-  if (/\bmeeting|calendar|agenda\b/.test(lower)) return 'recover meeting context and preparation needs';
-  if (/\bbug|error|extension|manifest|background\.js\b/.test(lower)) return 'recover implementation context and technical evidence';
-  if (mode === 'suggestion') return 'infer the next concrete action from recent evidence';
-  return 'recover the most relevant context across recent work';
+  
+  // Proactive: future-looking/actionable
+  if (/\b(should|next|action|todo|plan|prepare|prep|upcoming|future|suggest)\b/.test(lower) || mode === 'suggestion') {
+    return 'proactive';
+  }
+  
+  // State: current/ongoing status
+  return 'state';
 }
 
 function inferEntryMode(text, intent = '', mode = 'chat') {
@@ -801,15 +852,19 @@ function buildRetrievalThought({
     mode,
     deepScan: requiresDeepContext
   });
-  let semanticQueries = Array.isArray(structuredQueries?.semantic_queries) && structuredQueries.semantic_queries.length
+  let semanticQueries = Array.isArray(structuredQueries?.semantic_queries) && structuredQueries.semantic_queries.length === 7
     ? structuredQueries.semantic_queries
-    : fallbackSemanticQueries(mergedText || query, candidateType, 7);
-  semanticQueries = sanitizeQueryList(semanticQueries, 7);
-  if (semanticQueries.length < 5) {
+    : sanitizeQueryList(structuredQueries?.semantic_queries || [], 7);
+  
+  if (semanticQueries.length < 7) {
     const filler = sanitizeQueryList(fallbackSemanticQueries(mergedText || query, candidateType, 7), 7);
-    for (const q of filler) uniquePush(semanticQueries, q, 7);
+    for (const q of filler) {
+      uniquePush(semanticQueries, q, 7);
+      if (semanticQueries.length >= 7) break;
+    }
   }
-  const messageQueries = sanitizeQueryList(Array.isArray(structuredQueries?.message_queries) ? structuredQueries.message_queries : [], 5);
+  
+  const messageQueries = [];
   const intent = inferIntent(query || mergedText, mode, candidateType);
   const entryMode = inferEntryMode(query || mergedText, intent, mode);
   const alpha = (summaryVsRaw === 'raw' || entryMode === 'query_first') ? 0.45 : 0.7;
@@ -835,7 +890,8 @@ function buildRetrievalThought({
 
   reasoning.push(`Intent: ${intent}.`);
   reasoning.push(`Entry mode: ${entryMode}.`);
-  reasoning.push('Mode: semantic multi-query retrieval with literal, conceptual, technical, surface, and outcome angles.');
+  reasoning.push('Mode: 6-step Deep Intent Query Generation (Decomposition, Synonyms, Clusters, Cross-Layer).');
+  reasoning.push('Batching: Enforced strict 7-query limit.');
   reasoning.push(`Summary mode: ${summaryVsRaw === 'raw' ? 'raw evidence retrieval' : 'bounded summary retrieval'}.`);
   if (apps.length) reasoning.push(`App hints: ${apps.join(', ')}.`);
   if (hardSourceTypes?.length) reasoning.push(`Hard source scope: ${hardSourceTypes.join(', ')}.`);
