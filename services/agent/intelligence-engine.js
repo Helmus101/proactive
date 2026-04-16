@@ -112,7 +112,7 @@ async function callDeepSeek(prompt, apiKey, temperature = 0.3) {
         model: 'deepseek-chat',
         messages: [{ role: 'user', content: prompt }],
         temperature,
-        max_tokens: 520
+        max_tokens: 1024
       })
     });
     const responseText = await response.text();
@@ -230,17 +230,20 @@ async function callLLM(prompt, configOrApiKey = null, temperature = 0.3) {
 
 async function generateNodeTLDR(node, apiKey) {
   if (!node || !apiKey) return null;
+  const isEpisode = node.layer === 'episode';
+  const bulletCount = isEpisode ? '10-20' : '3';
   const prompt = `
-You are a concise memory assistant. Given a memory node (layer: ${node.layer}), produce exactly 3 key bullet points that summarize the most important information. 
-Return strict JSON: {"tldr": ["bullet 1", "bullet 2", "bullet 3"]}
+You are a detailed memory assistant. Given a memory node (layer: ${node.layer}), produce exactly ${bulletCount} key bullet points that provide a highly detailed reconstruction of the activity.
+Return strict JSON: {"tldr": ["bullet 1", "bullet 2", ...]}
 
 Title: ${String(node.title || '').slice(0, 240)}
 Summary: ${String(node.summary || '').slice(0, 500)}
-Content: ${String(node.canonical_text || '').slice(0, 2000)}
+Content: ${String(node.canonical_text || '').slice(0, 5000)}
 `;
   const payload = await callLLM(prompt, normalizeLLMConfig(apiKey), 0.2);
   if (payload && Array.isArray(payload.tldr)) {
-    return payload.tldr.slice(0, 3).map(b => `• ${b.replace(/^•\s*/, '')}`).join('\n');
+    const limit = isEpisode ? 20 : 3;
+    return payload.tldr.slice(0, limit).map(b => `• ${b.replace(/^•\s*/, '')}`).join('\n');
   }
   return null;
 }

@@ -341,22 +341,6 @@ async function buildSuggestionEvidenceBundle(anchorEvidence = null, query = '') 
     }
   }
 
-  if (lines.length < 2 && query) {
-    const q = `%${String(query).slice(0, 80)}%`;
-    const extra = await db.allQuery(
-      `SELECT id, layer, subtype, title, summary
-       FROM memory_nodes
-       WHERE title LIKE ? OR summary LIKE ? OR canonical_text LIKE ?
-       ORDER BY datetime(updated_at) DESC
-       LIMIT 4`,
-      [q, q, q]
-    ).catch(() => []);
-    for (const row of extra || []) {
-      addLine(`Memory ${row.layer}${row.subtype ? `/${row.subtype}` : ''}: ${String(row.title || row.summary || '').slice(0, 150)}`);
-      baseIds.add(String(row.id));
-    }
-  }
-
   return {
     evidence_ids: Array.from(baseIds).slice(0, 8),
     evidence_lines: lines.slice(0, 5)
