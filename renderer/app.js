@@ -183,6 +183,21 @@ class WeaveApp {
             await this.generateSuggestions({ replace: true, silent: false });
         });
 
+        // Defensive delegation fallback: if cached references are missing or listeners fail,
+        // handle clicks at document level for the common control IDs.
+        document.addEventListener('click', async (ev) => {
+            try {
+                const target = ev.target.closest && ev.target.closest('#manual-generate-suggestions-btn, #refresh-tasks-btn');
+                if (!target) return;
+                ev.preventDefault();
+                // Use the app-scoped method (arrow captures `this`)
+                await this.generateSuggestions({ replace: true, silent: false });
+            } catch (err) {
+                console.error('[Renderer] fallback generateSuggestions handler failed:', err);
+                try { this.showToast('Suggestion generation failed'); } catch (_) {}
+            }
+        });
+
         this.remindersList?.addEventListener('click', async (event) => {
             const card = event.target.closest('.suggestion-card');
             if (!card) return;
@@ -830,13 +845,7 @@ class WeaveApp {
         const thinkingPanel = this.appendThinkingPanel();
 
         const handleChatStep = (data) => {
-            const label = thinkingPanel.querySelector(".thinking-step-label");
-            if (!label) return;
-            const step = typeof data === "string" ? data : (data?.step || "");
-            label.textContent = step;
-            if (step === "thinking" && data?.thinking_trace) {
-                this.finalizeThinkingPanel(thinkingPanel, data);
-            }
+            this.updateThinkingPanel(thinkingPanel, data);
             this.scrollChatToBottom();
         };
 
@@ -918,25 +927,112 @@ class WeaveApp {
     }
     appendThinkingPanel() {
         const wrapper = document.createElement("div");
+        const bootstrapStages = [
+            {
+                step: 'routing',
+                status: 'started',
+                label: 'Routing',
+                detail: 'Preparing the retrieval pipeline.'
+            }
+        ];
         wrapper.innerHTML = `
             <div class="thinking-panel expanded">
-                <div class="thinking-content-labels">
-                    <div class="thinking-step-label">Thinking...</div>
-                </div>
+                <div class="thinking-live-label">Live retrieval pipeline</div>
+                <div class="thinking-step-label">Preparing retrieval...</div>
+                <div class="thinking-timeline">${this.renderThinkingTimeline(bootstrapStages)}</div>
+                <div class="thinking-final-card"></div>
             </div>
         `;
         const panel = wrapper.firstElementChild;
+        panel.__thinkingStages = bootstrapStages;
         this.chatMessages.appendChild(panel);
         this.scrollChatToBottom();
         return panel;
+    }
+
+    normalizeThinkingStage(raw) {
+        if (typeof raw === 'string') {
+            return {
+                step: raw,
+                status: 'completed',
+                label: raw.replace(/_/g, ' '),
+                detail: ''
+            };
+        }
+        if (!raw || typeof raw !== 'object') return null;
+        return {
+            step: raw.step || 'thinking',
+            status: raw.status || 'completed',
+            label: raw.label || String(raw.step || 'thinking').replace(/_/g, ' '),
+            detail: raw.detail || '',
+            counts: raw.counts || {},
+            preview_items: Array.isArray(raw.preview_items) ? raw.preview_items : []
+        };
+    }
+
+    renderThinkingTimeline(stages = []) {
+        if (!Array.isArray(stages) || !stages.length) return '';
+        return stages.map((stage) => {
+            const counts = stage?.counts && typeof stage.counts === 'object'
+                ? Object.entries(stage.counts)
+                    .filter(([, value]) => value !== null && value !== undefined && value !== 0)
+                    .slice(0, 3)
+                    .map(([key, value]) => `${this.escapeHtml(String(key).replace(/_/g, ' '))}: ${this.escapeHtml(String(value))}`)
+                    .join(' • ')
+                : '';
+            const previews = Array.isArray(stage?.preview_items)
+                ? stage.preview_items.filter(Boolean).slice(0, 3)
+                : [];
+            return `
+                <div class="thinking-timeline-row status-${this.escapeHtml(stage.status || 'completed')}">
+                    <div class="thinking-timeline-marker"></div>
+                    <div class="thinking-timeline-body">
+                        <div class="thinking-timeline-head">
+                            <span class="thinking-timeline-title">${this.escapeHtml(stage.label || stage.step || 'stage')}</span>
+                            <span class="thinking-timeline-status">${this.escapeHtml(stage.status || 'completed')}</span>
+                        </div>
+                        ${stage.detail ? `<div class="thinking-timeline-detail">${this.escapeHtml(stage.detail)}</div>` : ''}
+                        ${counts ? `<div class="thinking-timeline-meta">${counts}</div>` : ''}
+                        ${previews.length ? `<div class="thinking-timeline-preview">${previews.map((item) => `<span class="thinking-trace-chip">${this.escapeHtml(String(item))}</span>`).join('')}</div>` : ''}
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    updateThinkingPanel(panel, payload) {
+        if (!panel) return;
+        const label = panel.querySelector('.thinking-step-label');
+        const timeline = panel.querySelector('.thinking-timeline');
+        const nextStage = this.normalizeThinkingStage(payload);
+        if (!nextStage || !timeline) return;
+
+        const stages = Array.isArray(panel.__thinkingStages) ? panel.__thinkingStages.slice() : [];
+        const existingIndex = stages.findIndex((item) => item.step === nextStage.step);
+        if (existingIndex >= 0) stages[existingIndex] = { ...stages[existingIndex], ...nextStage };
+        else stages.push(nextStage);
+        panel.__thinkingStages = stages;
+
+        if (label) {
+            label.textContent = nextStage.detail || `${nextStage.label} (${nextStage.status})`;
+        }
+        timeline.innerHTML = this.renderThinkingTimeline(stages);
     }
 
     finalizeThinkingPanel(panel, payload) {
         if (!panel) return;
         const retrieval = payload?.retrieval || null;
         const thinkingTrace = payload?.thinking_trace || retrieval?.thinking_trace || null;
+        const finalCard = panel.querySelector('.thinking-final-card');
+        const stages = Array.isArray(retrieval?.stage_trace) && retrieval.stage_trace.length
+            ? retrieval.stage_trace
+            : (Array.isArray(panel.__thinkingStages) ? panel.__thinkingStages : []);
         panel.classList.add('ready');
-        panel.innerHTML = this.renderThinkingTraceCard(thinkingTrace, retrieval);
+        const label = panel.querySelector('.thinking-step-label');
+        const timeline = panel.querySelector('.thinking-timeline');
+        if (label) label.textContent = 'Retrieval complete.';
+        if (timeline) timeline.innerHTML = this.renderThinkingTimeline(stages);
+        if (finalCard) finalCard.innerHTML = this.renderThinkingTraceCard(thinkingTrace, { ...(retrieval || {}), stage_trace: stages });
         this.scrollChatToBottom();
     }
 
@@ -1027,14 +1123,20 @@ class WeaveApp {
         const contextQueries = Array.isArray(trace?.search_queries?.context) ? trace.search_queries.context : [];
         const messageQueries = Array.isArray(trace?.search_queries?.messages) ? trace.search_queries.messages : [];
         const lexicalTerms = Array.isArray(trace?.search_queries?.lexical) ? trace.search_queries.lexical : [];
+        const webQueries = Array.isArray(trace?.search_queries?.web) ? trace.search_queries.web : [];
         const resultHeadline = trace?.results_summary?.headline || 'No retrieval results were available.';
         const resultDetails = Array.isArray(trace?.results_summary?.details) ? trace.results_summary.details : [];
         const dataSources = Array.isArray(trace?.memory_sources) ? trace.memory_sources : (Array.isArray(trace?.data_sources) ? trace.data_sources : []);
         const webSources = Array.isArray(trace?.web_sources) ? trace.web_sources : [];
         const seedResults = Array.isArray(trace?.seed_results) ? trace.seed_results.slice(0, 4) : [];
+        const primaryNodes = Array.isArray(trace?.primary_nodes) ? trace.primary_nodes.slice(0, 4) : [];
+        const supportNodes = Array.isArray(trace?.support_nodes) ? trace.support_nodes.slice(0, 4) : [];
+        const evidenceNodes = Array.isArray(trace?.evidence_nodes) ? trace.evidence_nodes.slice(0, 4) : [];
         const expandedResults = Array.isArray(trace?.graph_expansion_results) ? trace.graph_expansion_results.slice(0, 5) : [];
         const webResults = Array.isArray(trace?.web_results_summary) ? trace.web_results_summary.slice(0, 4) : [];
         const temporalReasoning = Array.isArray(trace?.temporal_reasoning) ? trace.temporal_reasoning : [];
+        const router = trace?.router || retrieval?.router || {};
+        const stageTrace = Array.isArray(trace?.stage_trace) ? trace.stage_trace : (Array.isArray(retrieval?.stage_trace) ? retrieval.stage_trace : []);
         const strategy = trace?.strategy || {};
         const layers = Array.isArray(trace?.layers) ? trace.layers : [];
         const maxDepth = layers.includes("raw") || layers.includes("event") ? 3 : (layers.includes("episode") ? 2 : (layers.includes("insight") || layers.includes("semantic") ? 1 : 0));
@@ -1074,15 +1176,27 @@ class WeaveApp {
             ? `
                 ${contextQueries.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Context</div><div class="thinking-trace-list">${contextQueries.map((item) => `<div>${this.escapeHtml(item)}</div>`).join('')}</div></div>` : ''}
                 ${messageQueries.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Messages</div><div class="thinking-trace-list">${messageQueries.map((item) => `<div>${this.escapeHtml(item)}</div>`).join('')}</div></div>` : ''}
+                ${webQueries.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Web</div><div class="thinking-trace-list">${webQueries.map((item) => `<div>${this.escapeHtml(item)}</div>`).join('')}</div></div>` : ''}
                 ${lexicalTerms.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Lexical</div><div class="thinking-trace-list">${lexicalTerms.map((item) => `<div>${this.escapeHtml(item)}</div>`).join('')}</div></div>` : ''}
             `
             : '<div class="thinking-trace-empty">No semantic queries were needed.</div>';
         const resultHtml = `
             <div class="thinking-trace-result-headline">${this.escapeHtml(resultHeadline)}</div>
             ${resultDetails.length ? `<div class="thinking-trace-list">${resultDetails.map((item) => `<div>${this.escapeHtml(item)}</div>`).join('')}</div>` : ''}
+            ${primaryNodes.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Primary nodes</div><div class="thinking-trace-list">${primaryNodes.map((item) => `<div>${this.escapeHtml(item.title || item.id)}${item.reason ? ` — ${this.escapeHtml(item.reason)}` : ''}</div>`).join('')}</div></div>` : ''}
             ${seedResults.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Seed results</div><div class="thinking-trace-list">${seedResults.map((item) => `<div>${this.escapeHtml(item.title || item.id)}${item.reason ? ` — ${this.escapeHtml(item.reason)}` : ''}</div>`).join('')}</div></div>` : ''}
-            ${expandedResults.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Graph expansion</div><div class="thinking-trace-list">${expandedResults.map((item) => `<div>${this.escapeHtml(item.title || item.id)}</div>`).join('')}</div></div>` : ''}
+            ${supportNodes.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Support nodes</div><div class="thinking-trace-list">${supportNodes.map((item) => `<div>${this.escapeHtml(item.title || item.id)}</div>`).join('')}</div></div>` : ''}
+            ${evidenceNodes.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Evidence nodes</div><div class="thinking-trace-list">${evidenceNodes.map((item) => `<div>${this.escapeHtml(item.title || item.id)}</div>`).join('')}</div></div>` : ''}
+            ${expandedResults.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Edge expansion</div><div class="thinking-trace-list">${expandedResults.map((item) => `<div>${this.escapeHtml(item.title || item.id)}</div>`).join('')}</div></div>` : ''}
             ${trace?.web_search_used && webResults.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Web results</div><div class="thinking-trace-list">${webResults.map((item) => `<div>${this.escapeHtml(item.title || item.url || '')}${item.url ? ` — ${this.escapeHtml(item.url)}` : ''}</div>`).join('')}</div></div>` : ''}
+        `;
+        const routerHtml = `
+            <div class="thinking-trace-body">${this.escapeHtml(router?.router_reason || trace?.thinking_summary || 'No retrieval summary available.')}</div>
+            <div class="thinking-trace-list" style="margin-top:8px;">
+                ${router?.source_mode ? `<div>Source mode: ${this.escapeHtml(router.source_mode)}</div>` : ''}
+                ${router?.summary_vs_raw ? `<div>Summary mode: ${this.escapeHtml(router.summary_vs_raw)}</div>` : ''}
+                ${router?.time_scope?.label ? `<div>Time scope: ${this.escapeHtml(router.time_scope.label)}</div>` : ''}
+            </div>
         `;
         const sourcesHtml = (dataSources.length || webSources.length)
             ? `
@@ -1090,6 +1204,9 @@ class WeaveApp {
                 ${webSources.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Web</div><div class="thinking-trace-list">${webSources.map((item) => `<div>${this.escapeHtml(item)}</div>`).join('')}</div></div>` : ''}
             `
             : '<div class="thinking-trace-empty">No supporting data sources were identified.</div>';
+        const stageHtml = stageTrace.length
+            ? `<div class="thinking-trace-list">${stageTrace.map((item) => `<div>${this.escapeHtml(item.label || item.step)} — ${this.escapeHtml(item.status || 'completed')}${item.detail ? `: ${this.escapeHtml(item.detail)}` : ''}</div>`).join('')}</div>`
+            : '<div class="thinking-trace-empty">No pipeline stages were recorded.</div>';
         const strategyHtml = `
             <div class="thinking-trace-body">${this.escapeHtml(trace?.thinking_summary || 'No retrieval summary available.')}</div>
             <div class="thinking-trace-list" style="margin-top:8px;">
@@ -1115,6 +1232,10 @@ class WeaveApp {
                         ${penetrationHtml}
                     </div>
                     <section class="thinking-trace-section">
+                        <div class="thinking-trace-section-title">Router decision</div>
+                        ${routerHtml}
+                    </section>
+                    <section class="thinking-trace-section">
                         <div class="thinking-trace-section-title">Strategy & intent analysis</div>
                         ${strategyHtml}
                     </section>
@@ -1127,8 +1248,12 @@ class WeaveApp {
                         ${queryHtml}
                     </section>
                     <section class="thinking-trace-section">
-                        <div class="thinking-trace-section-title">Ranking / result summary</div>
+                        <div class="thinking-trace-section-title">Ranking / packed context</div>
                         ${resultHtml}
+                    </section>
+                    <section class="thinking-trace-section">
+                        <div class="thinking-trace-section-title">Pipeline stages</div>
+                        ${stageHtml}
                     </section>
                     <section class="thinking-trace-section">
                         <div class="thinking-trace-section-title">Source list</div>
@@ -1478,9 +1603,8 @@ class WeaveApp {
 
         try {
             const status = await window.electronAPI.getAccessibilityStatus();
-            if (!status?.trusted) {
-                throw new Error(status?.error || 'Accessibility permission is not enabled');
-            }
+            if (!status?.trusted) throw new Error(status?.error || 'Accessibility permission is not enabled');
+
             const result = await window.electronAPI.executeAITask({
                 id: `settings_prompt_${Date.now()}`,
                 title: prompt,
@@ -1491,50 +1615,18 @@ class WeaveApp {
                 execution_mode: 'settings_prompt',
                 agentMode: true
             });
+
             const summary = result?.result || 'desktop action completed';
-    syncSettingsUI() {
-        this.captureToggle?.classList.toggle("active", this.desktopCaptureEnabled);
-    }
-            this.showToast(`Desktop prompt failed: ${failure}`);
-    async loadSettingsData() {
-        this.captureToggle?.classList.toggle("active", this.desktopCaptureEnabled);
-    }
-            if (Date.now() - this.lastPlannerStatusAt < 400) return;
-            this.lastPlannerStatusAt = Date.now();
-            this.setDesktopTestStatus('Thinking through the next desktop action…');
-            this.setDesktopPromptStatus('Thinking through the next desktop action…');
-            if (this.voiceSession?.status === 'acting') {
-                this.updateVoiceOverlay({
-                    title: 'Acting…',
-                    status: 'Planning the next desktop step.',
-                    transcript: this.voiceSession?.transcript || 'Voice command in progress…',
-                    meta: ''
-                });
+            this.setDesktopTestStatus(`Result: ${String(summary).slice(0, 200)}`);
+            this.showToast('Desktop prompt completed');
+        } catch (err) {
+            console.error('Desktop prompt failed:', err);
+            this.showToast('Desktop prompt failed');
+        } finally {
+            if (this.desktopPromptRunButton) {
+                this.desktopPromptRunButton.disabled = false;
+                this.desktopPromptRunButton.textContent = 'Run';
             }
-            return;
-        }
-        const stage = this.capitalize(payload.stage || 'working');
-        const action = payload.action ? String(payload.action).replace(/_/g, ' ').toLowerCase() : 'planning';
-        const location = [payload.app, payload.window].filter(Boolean).join(' / ');
-        const driver = payload.driver ? ` • ${String(payload.driver).toUpperCase()}` : '';
-        const reason = payload.reason ? ` • ${payload.reason}` : '';
-        const failure = payload.failure_reason ? ` • ${payload.failure_reason}` : '';
-        const progress = Number.isFinite(payload.navigation_progress) ? ` • progress ${payload.navigation_progress}` : '';
-        const effect = payload.effect_summary ? ` • ${payload.effect_summary}` : '';
-        const remaining = payload.remaining_gap ? ` • next: ${payload.remaining_gap}` : '';
-        const vision = payload.vision_used ? ' • vision assist' : ' • AX-first';
-        const statusText = `${stage}: ${action}${driver}${location ? ` • ${location}` : ''}${progress}${reason}${effect}${remaining}${failure}${vision}`;
-        this.lastPlannerStatusAt = Date.now();
-        this.setDesktopTestStatus(statusText);
-        this.setDesktopPromptStatus(statusText);
-        this.appendDesktopTimelineEntry(payload);
-        if (this.voiceSession?.status === 'acting') {
-            this.updateVoiceOverlay({
-                title: 'Acting…',
-                status: `${stage}: ${action}`,
-                transcript: this.voiceSession?.transcript || 'Voice command in progress…',
-                meta: [payload.effect_summary, payload.remaining_gap].filter(Boolean).join(' • ')
-            });
         }
     }
 

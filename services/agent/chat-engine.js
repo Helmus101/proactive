@@ -64,12 +64,29 @@ function normalizeDDGResultUrl(url) {
 }
 
 function shouldUseExternalWebSearch(query, retrievalThought, retrieval) {
-  const mode = retrievalThought?.strategy_mode;
+  const mode = retrievalThought?.source_mode || retrievalThought?.strategy_mode;
   if (mode === 'web_only' || mode === 'memory_then_web') return true;
   if (retrievalThought?.mode === 'queryless') return false;
   const evidenceCount = Number(retrieval?.evidence_count || 0);
   const seedCount = Number(retrieval?.seed_nodes?.length || 0);
   return seedCount < 2 || evidenceCount < 3;
+}
+
+function formatStageDetail(items = [], fallback = '') {
+  const cleaned = (items || []).map((item) => String(item || '').trim()).filter(Boolean);
+  return cleaned.length ? cleaned.join(' ') : fallback;
+}
+
+function buildStageEvent(step, status, overrides = {}) {
+  return {
+    step,
+    status,
+    label: overrides.label || step.replace(/_/g, ' '),
+    detail: overrides.detail || '',
+    counts: overrides.counts || {},
+    preview_items: Array.isArray(overrides.preview_items) ? overrides.preview_items : [],
+    ...overrides
+  };
 }
 
 async function searchFreeWeb(query, count = 5) {
@@ -322,7 +339,7 @@ function buildThinkingSummary(query, retrieval, drilldownEvidence = []) {
 
 function buildThinkingStrategy(retrieval, drilldownEvidence = []) {
   const plan = retrieval?.retrieval_plan || {};
-  const strategyMode = plan.strategy_mode || 'memory_only';
+  const strategyMode = plan.source_mode || plan.strategy_mode || 'memory_only';
   const entryMode = plan.entry_mode || 'hybrid';
   const summaryVsRaw = plan.summary_vs_raw || 'summary';
   const timeScope = plan.time_scope?.label || (retrieval?.applied_date_range ? 'filtered_range' : 'all_time');
@@ -333,6 +350,7 @@ function buildThinkingStrategy(retrieval, drilldownEvidence = []) {
     : (drilldownEvidence.length ? 'memory_plus_raw' : 'memory_only');
   return {
     strategy_mode: strategyMode,
+    source_mode: strategyMode,
     entry_mode: entryMode,
     summary_vs_raw: summaryVsRaw,
     time_scope: timeScope,
@@ -424,10 +442,14 @@ function buildThinkingSearchQueries(retrieval) {
   const lexicalTerms = Array.isArray(retrieval?.generated_queries?.lexical_terms)
     ? retrieval.generated_queries.lexical_terms
     : [];
+  const webQueries = Array.isArray(retrieval?.query_sets?.web_queries)
+    ? retrieval.query_sets.web_queries
+    : (Array.isArray(retrieval?.generated_queries?.web) ? retrieval.generated_queries.web : []);
   return {
     context: contextQueries.slice(0, 7),
     messages: messageQueries.slice(0, 7),
-    lexical: lexicalTerms.filter((term) => isUsefulLexical(term)).slice(0, 10)
+    lexical: lexicalTerms.filter((term) => isUsefulLexical(term)).slice(0, 10),
+    web: webQueries.slice(0, 7)
   };
 }
 
@@ -441,8 +463,11 @@ function buildThinkingResultsSummary(retrieval, drilldownEvidence = []) {
   const seedCount = Number(retrieval?.seed_nodes?.length || 0);
   const expandedCount = Number(retrieval?.expanded_nodes?.length || 0);
   const evidenceCount = Number(retrieval?.evidence_count || retrieval?.evidence?.length || 0);
+  const primaryCount = Number(retrieval?.primary_nodes?.length || seedCount);
+  const supportCount = Number(retrieval?.support_nodes?.length || 0);
+  const evidenceNodeCount = Number(retrieval?.evidence_nodes?.length || 0);
   const headline = seedCount || expandedCount || evidenceCount
-    ? `Found ${seedCount} seed memories, expanded to ${expandedCount} connected nodes, and kept ${evidenceCount} evidence items.`
+    ? `Found ${primaryCount} primary nodes, expanded to ${expandedCount} connected nodes, and packed ${evidenceCount} evidence items.`
     : 'Found little or no matching memory in the requested scope.';
   const details = [
     strongestClusterPhrase(retrieval)
@@ -451,7 +476,7 @@ function buildThinkingResultsSummary(retrieval, drilldownEvidence = []) {
     details.push(`Initial seed search found ${retrieval.seed_results.length} ranked seed results before graph expansion.`);
   }
   if (Array.isArray(retrieval?.graph_expansion_results) && retrieval.graph_expansion_results.length) {
-    details.push(`Graph expansion added ${retrieval.graph_expansion_results.length} connected nodes, capped at 10.`);
+    details.push(`Graph expansion added ${retrieval.graph_expansion_results.length} connected nodes (${supportCount} support, ${evidenceNodeCount} evidence).`);
   }
   if (drilldownEvidence.length) {
     details.push(`Loaded ${drilldownEvidence.length} raw evidence item${drilldownEvidence.length === 1 ? '' : 's'} for exact wording.`);
@@ -464,7 +489,12 @@ function buildThinkingResultsSummary(retrieval, drilldownEvidence = []) {
   }
   return {
     headline,
-    details: details.filter(Boolean).slice(0, 3)
+    details: details.filter(Boolean).slice(0, 4),
+    seed_count: seedCount,
+    primary_count: primaryCount,
+    support_count: supportCount,
+    evidence_node_count: evidenceNodeCount,
+    evidence_count: evidenceCount
   };
 }
 
@@ -488,12 +518,21 @@ async function buildThinkingTrace({ query, retrieval, drilldownEvidence = [] }) 
   return {
     thinking_summary: buildThinkingSummary(query, retrieval, drilldownEvidence),
     strategy,
+    router: retrieval?.router || {
+      source_mode: retrieval?.retrieval_plan?.source_mode || retrieval?.retrieval_plan?.strategy_mode || 'memory_only',
+      router_reason: retrieval?.retrieval_plan?.router_reason || retrieval?.retrieval_plan?.web_gate_reason || '',
+      time_scope: retrieval?.retrieval_plan?.time_scope || null,
+      summary_vs_raw: retrieval?.retrieval_plan?.summary_vs_raw || 'summary'
+    },
     filters: buildThinkingFilters(retrieval),
     search_queries: buildThinkingSearchQueries(retrieval),
     results_summary: resultsSummary,
     data_sources: dataSources,
     connection_candidates: buildConnectionCandidates(retrieval),
     seed_results: Array.isArray(retrieval?.seed_results) ? retrieval.seed_results : [],
+    primary_nodes: Array.isArray(retrieval?.primary_nodes) ? retrieval.primary_nodes : (Array.isArray(retrieval?.seed_nodes) ? retrieval.seed_nodes : []),
+    support_nodes: Array.isArray(retrieval?.support_nodes) ? retrieval.support_nodes : [],
+    evidence_nodes: Array.isArray(retrieval?.evidence_nodes) ? retrieval.evidence_nodes : [],
     graph_expansion_results: Array.isArray(retrieval?.graph_expansion_results) ? retrieval.graph_expansion_results : [],
     web_search_used: Boolean(retrieval?.web_search_used),
     web_results_summary: Array.isArray(retrieval?.web_results) ? retrieval.web_results.map((item) => ({
@@ -507,6 +546,8 @@ async function buildThinkingTrace({ query, retrieval, drilldownEvidence = [] }) 
     web_results: Array.isArray(retrieval?.web_results) ? retrieval.web_results : [],
     answer_basis: strategy.answer_basis,
     temporal_reasoning: Array.isArray(retrieval?.temporal_reasoning) ? retrieval.temporal_reasoning : [],
+    query_sets: retrieval?.query_sets || null,
+    stage_trace: Array.isArray(retrieval?.stage_trace) ? retrieval.stage_trace : [],
     initial_date_range: retrieval?.initial_date_range || null,
     applied_date_range: retrieval?.applied_date_range || null,
     widened_date_range: retrieval?.widened_date_range || null,
@@ -679,6 +720,13 @@ async function executeParallelRetrieval(baseQuery, baseThought, options) {
 
 async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   const emit = (data) => { try { onStep?.(data); } catch (_) {} };
+  const stageTrace = [];
+  const emitStage = (step, status, overrides = {}) => {
+    const event = buildStageEvent(step, status, overrides);
+    stageTrace.push(event);
+    emit(event);
+    return event;
+  };
   const chatHistory = normalizeChatHistoryWindow(options?.chat_history, 12);
   const retrievalQuery = buildQueryWithChatContext(query, chatHistory);
 
@@ -694,93 +742,222 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     }
   }).catch(e => console.warn('Failed to persist user chat turn:', e));
 
-  emit('generating query');
-
   const baseThought = await buildRetrievalThought({
     query: retrievalQuery,
     mode: 'chat',
     dateRange: options?.date_range,
     app: options?.app
   });
-
-  emit('searching');
-
-  // Passive-First Heuristic: attempt retrieval from Core, Insight, Cloud layers first
-  let retrieval = await executeParallelRetrieval(retrievalQuery, baseThought, {
-    mode: 'chat',
-    app: options?.app,
-    date_range: baseThought.applied_date_range || options?.date_range,
-    source_types: options?.source_types,
-    retrieval_thought: baseThought,
-    passiveOnly: true
+  emitStage('routing', 'completed', {
+    label: 'Routing',
+    detail: formatStageDetail([
+      `Source mode: ${baseThought.source_mode || baseThought.strategy_mode || 'memory_only'}.`,
+      baseThought.router_reason || baseThought.web_gate_reason || ''
+    ], 'Planned source routing.'),
+    counts: {
+      memory_queries: Number(baseThought.query_sets?.memory_queries?.length || baseThought.semantic_queries?.length || 0),
+      message_queries: Number(baseThought.query_sets?.message_queries?.length || baseThought.message_queries?.length || 0),
+      web_queries: Number(baseThought.query_sets?.web_queries?.length || baseThought.web_queries?.length || 0)
+    },
+    preview_items: [
+      baseThought.source_mode || baseThought.strategy_mode || 'memory_only',
+      baseThought.time_scope?.label || null,
+      baseThought.summary_vs_raw || null
+    ].filter(Boolean)
+  });
+  emitStage('query_generation', 'completed', {
+    label: 'Query generation',
+    detail: formatStageDetail([
+      `Prepared ${baseThought.query_sets?.memory_queries?.length || baseThought.semantic_queries?.length || 0} memory queries,`,
+      `${baseThought.query_sets?.message_queries?.length || baseThought.message_queries?.length || 0} message queries,`,
+      `and ${baseThought.query_sets?.web_queries?.length || baseThought.web_queries?.length || 0} web queries.`
+    ], 'Prepared retrieval queries.'),
+    counts: {
+      memory_queries: Number(baseThought.query_sets?.memory_queries?.length || baseThought.semantic_queries?.length || 0),
+      message_queries: Number(baseThought.query_sets?.message_queries?.length || baseThought.message_queries?.length || 0),
+      web_queries: Number(baseThought.query_sets?.web_queries?.length || baseThought.web_queries?.length || 0)
+    },
+    preview_items: [
+      ...((baseThought.query_sets?.memory_queries || baseThought.semantic_queries || []).slice(0, 2)),
+      ...((baseThought.query_sets?.web_queries || baseThought.web_queries || []).slice(0, 1))
+    ]
   });
 
-  const passiveMaxScore = retrieval.evidence?.length ? Math.max(...retrieval.evidence.map((e) => e.score || 0)) : 0;
-  const isPassiveSufficient = (retrieval.evidence_count >= 3 && passiveMaxScore > 0.75) || (passiveMaxScore > 0.9);
+  let retrieval = {
+    retrieval_plan: baseThought,
+    router: {
+      source_mode: baseThought.source_mode || baseThought.strategy_mode || 'memory_only',
+      router_reason: baseThought.router_reason || baseThought.web_gate_reason || '',
+      time_scope: baseThought.time_scope || null,
+      summary_vs_raw: baseThought.summary_vs_raw || 'summary'
+    },
+    query_sets: baseThought.query_sets || {
+      memory_queries: baseThought.semantic_queries || [],
+      message_queries: baseThought.message_queries || [],
+      web_queries: baseThought.web_queries || []
+    },
+    generated_queries: {
+      semantic: baseThought.semantic_queries || [],
+      messages: baseThought.message_queries || [],
+      web: baseThought.web_queries || [],
+      lexical_terms: baseThought.lexical_terms || []
+    },
+    seed_nodes: [],
+    seed_results: [],
+    primary_nodes: [],
+    support_nodes: [],
+    evidence_nodes: [],
+    expanded_nodes: [],
+    graph_expansion_results: [],
+    edge_paths: [],
+    evidence: [],
+    evidence_count: 0,
+    contextText: ''
+  };
 
-  if (!isPassiveSufficient) {
+  if ((baseThought.source_mode || baseThought.strategy_mode) !== 'web_only') {
+    emitStage('memory_search', 'started', {
+      label: 'Memory search',
+      detail: 'Searching memory graph for primary nodes and supporting context.'
+    });
+
+    // Passive-First Heuristic: attempt retrieval from Core, Insight, Cloud layers first
     retrieval = await executeParallelRetrieval(retrievalQuery, baseThought, {
       mode: 'chat',
       app: options?.app,
       date_range: baseThought.applied_date_range || options?.date_range,
       source_types: options?.source_types,
       retrieval_thought: baseThought,
-      passiveOnly: false
+      passiveOnly: true
     });
-  }
 
-  const canWiden = Boolean(baseThought?.initial_date_range) && !baseThought?.fallback_policy?.attempted;
-  if (canWiden && retrievalLooksSparse(retrieval)) {
-    const widenedRange = widenTemporalWindow(baseThought.initial_date_range);
-    if (widenedRange) {
-      const widenedThought = withTemporalFallback(baseThought, widenedRange);
-      const widenedRetrieval = await executeParallelRetrieval(retrievalQuery, widenedThought, {
+    const passiveMaxScore = retrieval.evidence?.length ? Math.max(...retrieval.evidence.map((e) => e.score || 0)) : 0;
+    const isPassiveSufficient = (retrieval.evidence_count >= 3 && passiveMaxScore > 0.75) || (passiveMaxScore > 0.9);
+
+    if (!isPassiveSufficient) {
+      retrieval = await executeParallelRetrieval(retrievalQuery, baseThought, {
         mode: 'chat',
         app: options?.app,
-        date_range: widenedRange,
+        date_range: baseThought.applied_date_range || options?.date_range,
         source_types: options?.source_types,
-        retrieval_thought: widenedThought
+        retrieval_thought: baseThought,
+        passiveOnly: false
       });
-      retrieval = {
-        ...widenedRetrieval,
-        initial_date_range: baseThought.initial_date_range,
-        widened_date_range: widenedRange,
-        date_filter_status: 'widened',
-        temporal_reasoning: widenedThought.temporal_reasoning
-      };
     }
-  }
 
-  // Deep Scan Heuristic: if results are still sparse, force recursive expansion
-  if (retrievalLooksSparse(retrieval) && !options.passiveOnly) {
-    const deepRetrieval = await executeParallelRetrieval(retrievalQuery, baseThought, {
-      ...options,
-      mode: 'chat',
-      recursionDepth: 1,
-      passiveOnly: false
+    const canWiden = Boolean(baseThought?.initial_date_range) && !baseThought?.fallback_policy?.attempted;
+    if (canWiden && retrievalLooksSparse(retrieval)) {
+      const widenedRange = widenTemporalWindow(baseThought.initial_date_range);
+      if (widenedRange) {
+        const widenedThought = withTemporalFallback(baseThought, widenedRange);
+        const widenedRetrieval = await executeParallelRetrieval(retrievalQuery, widenedThought, {
+          mode: 'chat',
+          app: options?.app,
+          date_range: widenedRange,
+          source_types: options?.source_types,
+          retrieval_thought: widenedThought
+        });
+        retrieval = {
+          ...widenedRetrieval,
+          initial_date_range: baseThought.initial_date_range,
+          widened_date_range: widenedRange,
+          date_filter_status: 'widened',
+          temporal_reasoning: widenedThought.temporal_reasoning
+        };
+      }
+    }
+
+    if (retrievalLooksSparse(retrieval) && !options.passiveOnly) {
+      const deepRetrieval = await executeParallelRetrieval(retrievalQuery, baseThought, {
+        ...options,
+        mode: 'chat',
+        recursionDepth: 1,
+        passiveOnly: false
+      });
+      if ((deepRetrieval.evidence_count || 0) > (retrieval.evidence_count || 0)) {
+         retrieval = {
+           ...deepRetrieval,
+           initial_date_range: retrieval.initial_date_range,
+           widened_date_range: retrieval.widened_date_range,
+           date_filter_status: retrieval.date_filter_status
+         };
+      }
+    }
+
+    retrieval = {
+      ...retrieval,
+      stage_trace: stageTrace,
+      router: retrieval.router || {
+        source_mode: baseThought.source_mode || baseThought.strategy_mode || 'memory_only',
+        router_reason: baseThought.router_reason || baseThought.web_gate_reason || '',
+        time_scope: baseThought.time_scope || null,
+        summary_vs_raw: baseThought.summary_vs_raw || 'summary'
+      },
+      query_sets: retrieval.query_sets || retrieval.generated_queries || baseThought.query_sets || null
+    };
+
+    emitStage('memory_search', 'completed', {
+      label: 'Memory search',
+      detail: formatStageDetail([
+        `Found ${retrieval.seed_results?.length || 0} candidate seeds and ${retrieval.evidence_count || 0} evidence items.`,
+        retrieval.date_filter_status === 'widened' ? 'Widened the time window once because the first pass was sparse.' : ''
+      ], 'Completed memory retrieval.'),
+      counts: {
+        seeds: Number(retrieval.seed_results?.length || 0),
+        evidence: Number(retrieval.evidence_count || 0)
+      },
+      preview_items: (retrieval.seed_results || []).slice(0, 3).map((item) => item.title || item.id)
     });
-    // Merge results or replace if significantly better
-    if ((deepRetrieval.evidence_count || 0) > (retrieval.evidence_count || 0)) {
-       retrieval = {
-         ...deepRetrieval,
-         initial_date_range: retrieval.initial_date_range,
-         widened_date_range: retrieval.widened_date_range,
-         date_filter_status: retrieval.date_filter_status
-       };
-    }
+    emitStage('seed_selection', 'completed', {
+      label: 'Node retrieval',
+      detail: `Selected ${retrieval.primary_nodes?.length || retrieval.seed_nodes?.length || 0} primary nodes to anchor retrieval.`,
+      counts: {
+        primary_nodes: Number(retrieval.primary_nodes?.length || retrieval.seed_nodes?.length || 0)
+      },
+      preview_items: (retrieval.primary_nodes || retrieval.seed_nodes || []).slice(0, 3).map((item) => item.title || item.id)
+    });
+    emitStage('edge_expansion', 'completed', {
+      label: 'Edge expansion',
+      detail: `Expanded downward through ${retrieval.edge_paths?.length || 0} edge paths to gather lower-chain support and evidence.`,
+      counts: {
+        support_nodes: Number(retrieval.support_nodes?.length || 0),
+        evidence_nodes: Number(retrieval.evidence_nodes?.length || 0),
+        expanded_nodes: Number(retrieval.expanded_nodes?.length || 0)
+      },
+      preview_items: [
+        ...(retrieval.support_nodes || []).slice(0, 2).map((item) => item.title || item.id),
+        ...(retrieval.evidence_nodes || []).slice(0, 2).map((item) => item.title || item.id)
+      ]
+    });
+    emitStage('ranking', 'completed', {
+      label: 'Ranking and packing',
+      detail: `Packed ${retrieval.evidence_count || 0} evidence items from primary nodes, support nodes, and downward evidence.`,
+      counts: retrieval.packed_context_stats || {
+        evidence: Number(retrieval.evidence_count || 0)
+      },
+      preview_items: (retrieval.evidence || []).slice(0, 3).map((item) => item.text || item.id)
+    });
+  } else {
+    emitStage('memory_search', 'skipped', {
+      label: 'Memory search',
+      detail: 'Skipped memory retrieval because the router selected web-only mode.'
+    });
+    emitStage('seed_selection', 'skipped', {
+      label: 'Node retrieval',
+      detail: 'No memory seed selection was needed for this request.'
+    });
+    emitStage('edge_expansion', 'skipped', {
+      label: 'Edge expansion',
+      detail: 'Skipped graph expansion because no memory seeds were selected.'
+    });
+    emitStage('ranking', 'skipped', {
+      label: 'Ranking and packing',
+      detail: 'Skipped memory context packing because the request is web-only.'
+    });
   }
-
-  emit('results');
 
   const maxScore = retrieval.evidence?.length ? Math.max(...retrieval.evidence.map((e) => e.score || 0)) : 0;
-  if (retrieval.evidence_count === 0 || (retrieval.evidence_count < 3 && maxScore < 0.45)) {
-    return {
-       content: "I couldn't find enough specific details in your memory graph to answer that accurately. Could you provide a bit more context, like a specific timeframe or associated project?",
-       needs_clarification: true,
-       retrieval,
-       thinking_trace: ["Confidence Gating: Memory retrieval returned insufficient high-confidence context. Prompting user for clarification."]
-    };
-  }
+  const sparseMemory = retrieval.evidence_count === 0 || (retrieval.evidence_count < 3 && maxScore < 0.45);
 
   const [suggestions, recentEpisodes] = await Promise.all([
     fetchActiveSuggestions(),
@@ -792,8 +969,28 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     ? await fetchDrilldownEvidence(retrieval.drilldown_refs || [])
     : [];
   const shouldSearchWeb = shouldUseExternalWebSearch(query, baseThought, retrieval);
-  const webSearchQuery = (retrieval?.generated_queries?.semantic || retrieval?.retrieval_plan?.semantic_queries || [query])[0] || query;
-  const webResults = shouldSearchWeb ? await searchFreeWeb(webSearchQuery, 4) : [];
+  const webSearchQuery = (retrieval?.query_sets?.web_queries || retrieval?.generated_queries?.web || retrieval?.generated_queries?.semantic || retrieval?.retrieval_plan?.web_queries || retrieval?.retrieval_plan?.semantic_queries || [query])[0] || query;
+  let webResults = [];
+  if (shouldSearchWeb || (baseThought.source_mode || baseThought.strategy_mode) === 'web_only') {
+    emitStage('web_search', 'started', {
+      label: 'Web search',
+      detail: `Searching the web for fresh or public context using: ${webSearchQuery}`
+    });
+    webResults = await searchFreeWeb(webSearchQuery, 4);
+    emitStage('web_search', 'completed', {
+      label: 'Web search',
+      detail: webResults.length
+        ? `Retrieved ${webResults.length} public web results.`
+        : 'No web results were returned for this query.',
+      counts: { web_results: webResults.length },
+      preview_items: webResults.slice(0, 3).map((item) => item.title || item.url)
+    });
+  } else {
+    emitStage('web_search', 'skipped', {
+      label: 'Web search',
+      detail: 'Skipped web search because memory retrieval looked sufficient.'
+    });
+  }
   if (webResults.length) {
     retrieval = {
       ...retrieval,
@@ -813,9 +1010,26 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       web_sources: []
     };
   }
+  if (sparseMemory && !webResults.length) {
+    emitStage('synthesis', 'completed', {
+      label: 'Synthesis',
+      detail: 'Available evidence was too sparse across memory and web, so the assistant is asking for clarification.'
+    });
+    return {
+       content: "I couldn't find enough specific details in your memory graph to answer that accurately. Could you provide a bit more context, like a specific timeframe or associated project?",
+       needs_clarification: true,
+       retrieval: {
+         ...retrieval,
+         stage_trace: stageTrace
+       },
+       thinking_trace: ["Confidence Gating: Retrieval returned insufficient high-confidence context across memory and web. Prompting user for clarification."]
+    };
+  }
   const thinkingTrace = await buildThinkingTrace({ query, retrieval, drilldownEvidence });
-  emit('thinking');
-  emit({ step: 'thinking', thinking_trace: thinkingTrace });
+  emitStage('synthesis', 'started', {
+    label: 'Synthesis',
+    detail: 'Reasoning over the packed context bundle to draft the answer.'
+  });
 
   let content = "I couldn't produce an answer from the current memory context.";
   if (!apiKey) {
@@ -824,6 +1038,9 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
           ? `TEMPORAL NOTE:\nThe initially requested time window was sparse, so memory retrieval widened once to ${retrieval.widened_date_range?.start} -> ${retrieval.widened_date_range?.end}.`
           : '',
         retrieval.contextText || 'No memory context is available yet.',
+        webResults.length
+          ? `WEB RESULTS:\n${webResults.map((item) => `- ${item.title || item.url}: ${item.url}`).join('\n')}`
+          : '',
         drilldownEvidence.length
           ? `RAW EVIDENCE:\n${drilldownEvidence.map((item) => `- ${item.source_type || 'event'} ${item.title || item.id}: ${item.text}`).join('\n')}`
           : ''
@@ -850,6 +1067,9 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
 
     [Priority evidence]
     ${priorityEvidence.join('\n') || 'None'}
+
+    [Web results]
+    ${webResults.length ? webResults.map((item) => `- ${item.title || item.url}\n  ${item.url}\n  ${item.snippet || ''}`).join('\n') : 'None'}
 
     [User question]
     ${query}`;
@@ -879,6 +1099,16 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       content = buildGroundedFallbackAnswer(query, retrieval, drilldownEvidence);
     }
   }
+  emitStage('synthesis', 'completed', {
+    label: 'Synthesis',
+    detail: webResults.length
+      ? 'Generated the answer from memory plus web support.'
+      : 'Generated the answer from memory context.',
+    counts: {
+      evidence: Number(retrieval.evidence_count || 0),
+      web_results: Number(webResults.length || 0)
+    }
+  });
 
   // Persist assistant chat turn as a raw event
   await ingestRawEvent({
@@ -891,6 +1121,10 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       timestamp: new Date().toISOString()
     }
   }).catch(e => console.warn('Failed to persist assistant chat turn:', e));
+  emitStage('memory_writeback', 'completed', {
+    label: 'Write-back',
+    detail: 'Stored this chat turn back into memory as raw chat events.'
+  });
 
   const correctionMatch = content.match(/<memory_correction>([\s\S]*?)<\/memory_correction>/i);
   if (correctionMatch && correctionMatch[1]) {
@@ -951,6 +1185,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     thinking_trace: thinkingTrace,
     retrieval: {
       ...retrieval,
+      stage_trace: stageTrace,
       mode: 'memory-graph',
       usedSources: [...(thinkingTrace.data_sources || []), ...(retrieval.web_search_used ? ['Web'] : [])],
       query_variants: retrieval?.generated_queries?.semantic || retrieval?.retrieval_plan?.semantic_queries || [],
@@ -967,6 +1202,11 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       web_results_summary: retrieval?.web_results_summary || [],
       memory_sources: thinkingTrace.data_sources || [],
       web_sources: retrieval?.web_sources || [],
+      router: retrieval?.router || thinkingTrace.router || null,
+      query_sets: retrieval?.query_sets || null,
+      primary_nodes: retrieval?.primary_nodes || retrieval?.seed_nodes || [],
+      support_nodes: retrieval?.support_nodes || [],
+      evidence_nodes: retrieval?.evidence_nodes || [],
       strategy: retrieval?.strategy || thinkingTrace.strategy || null,
       answer_basis: thinkingTrace.answer_basis || (retrieval?.web_search_used ? 'memory_plus_web' : 'memory_only'),
       thinking_trace: thinkingTrace
