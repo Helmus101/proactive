@@ -223,10 +223,14 @@ async function testRetrievalThoughtRoutesMemoryWebAndHybrid() {
   const hybrid = await buildRetrievalThought({
     query: 'Use my notes and the latest study techniques to help me study algebra.'
   });
+  const bio = await buildRetrievalThought({
+    query: 'write a bio about me'
+  });
 
   assert.strictEqual(memory.source_mode, 'memory_only');
   assert.strictEqual(web.source_mode, 'web_only');
   assert.strictEqual(hybrid.source_mode, 'memory_then_web');
+  assert.strictEqual(bio.source_mode, 'memory_only');
   assert.ok(typeof hybrid.router_reason === 'string' && hybrid.router_reason.length > 0);
   assert.ok(Array.isArray(hybrid.query_sets?.memory_queries));
   assert.ok(Array.isArray(hybrid.query_sets?.web_queries));
@@ -489,6 +493,132 @@ async function testAnswerChatQueryEmitsStructuredPipelineStages() {
     ingestion.ingestRawEvent = originalIngest;
     retrievalThoughtSystem.buildRetrievalThought = originalThought;
     hybrid.buildHybridGraphRetrieval = originalHybrid;
+    delete require.cache[require.resolve('../services/agent/chat-engine')];
+    db.allQuery = originalAllQuery;
+  }
+}
+
+async function testAnswerChatQueryUsesWebFallbackForSparseWorldKnowledge() {
+  const originalAllQuery = db.allQuery;
+  const ingestion = require('../services/ingestion');
+  const retrievalThoughtSystem = require('../services/agent/retrieval-thought-system');
+  const hybrid = require('../services/agent/hybrid-graph-retrieval');
+  const originalIngest = ingestion.ingestRawEvent;
+  const originalThought = retrievalThoughtSystem.buildRetrievalThought;
+  const originalHybrid = hybrid.buildHybridGraphRetrieval;
+  const originalFetch = global.fetch;
+
+  ingestion.ingestRawEvent = async () => true;
+  retrievalThoughtSystem.buildRetrievalThought = async () => ({
+    mode: 'semantic',
+    source_mode: 'memory_then_web',
+    strategy_mode: 'memory_then_web',
+    router_reason: 'Needs memory context plus external corroboration.',
+    summary_vs_raw: 'summary',
+    time_scope: { label: 'all_time' },
+    query_sets: {
+      memory_queries: ['AI Day event details'],
+      message_queries: [],
+      web_queries: ['AI Day event details']
+    },
+    semantic_queries: ['AI Day event details'],
+    message_queries: [],
+    web_queries: ['AI Day event details'],
+    lexical_terms: ['ai day']
+  });
+  hybrid.buildHybridGraphRetrieval = async () => ({
+    retrieval_plan: {
+      mode: 'semantic',
+      source_mode: 'memory_then_web',
+      strategy_mode: 'memory_then_web',
+      summary_vs_raw: 'summary',
+      time_scope: { label: 'all_time' },
+      query_sets: {
+        memory_queries: ['AI Day event details'],
+        message_queries: [],
+        web_queries: ['AI Day event details']
+      },
+      semantic_queries: ['AI Day event details'],
+      message_queries: [],
+      web_queries: ['AI Day event details']
+    },
+    router: {
+      source_mode: 'memory_then_web',
+      router_reason: 'Needs memory context plus external corroboration.',
+      time_scope: { label: 'all_time' },
+      summary_vs_raw: 'summary'
+    },
+    query_sets: {
+      memory_queries: ['AI Day event details'],
+      message_queries: [],
+      web_queries: ['AI Day event details']
+    },
+    generated_queries: {
+      semantic: ['AI Day event details'],
+      messages: [],
+      web: ['AI Day event details'],
+      lexical_terms: ['ai day']
+    },
+    seed_results: [],
+    seed_nodes: [],
+    primary_nodes: [],
+    support_nodes: [],
+    evidence_nodes: [],
+    expanded_nodes: [],
+    graph_expansion_results: [],
+    edge_paths: [],
+    packed_context_stats: {
+      primary_nodes: 0,
+      support_nodes: 0,
+      evidence_nodes: 0,
+      packed_evidence: 0
+    },
+    evidence_count: 0,
+    evidence: [],
+    contextText: '',
+    drilldown_refs: [],
+    lazy_source_refs: [],
+    temporal_reasoning: []
+  });
+  global.fetch = async (url) => {
+    if (String(url).includes('api.duckduckgo.com')) {
+      return {
+        ok: true,
+        json: async () => ({
+          Heading: 'AI Day',
+          AbstractURL: 'https://example.com/ai-day',
+          AbstractText: 'AI Day is an event about artificial intelligence.',
+          RelatedTopics: []
+        })
+      };
+    }
+    return {
+      ok: true,
+      text: async () => ''
+    };
+  };
+  db.allQuery = async () => [];
+
+  try {
+    delete require.cache[require.resolve('../services/agent/chat-engine')];
+    const { answerChatQuery } = require('../services/agent/chat-engine');
+    const steps = [];
+    const result = await answerChatQuery({
+      apiKey: null,
+      query: 'what is ai day',
+      onStep: (event) => steps.push(event)
+    });
+
+    assert.strictEqual(result.needs_clarification, undefined);
+    assert.strictEqual(result.retrieval.web_search_used, true);
+    assert.ok(Array.isArray(result.retrieval.web_results) && result.retrieval.web_results.length >= 1);
+    assert.ok(steps.some((item) => item.step === 'web_search' && item.status === 'started'));
+    assert.ok(steps.some((item) => item.step === 'web_search' && item.status === 'completed'));
+  } finally {
+    ingestion.ingestRawEvent = originalIngest;
+    retrievalThoughtSystem.buildRetrievalThought = originalThought;
+    hybrid.buildHybridGraphRetrieval = originalHybrid;
+    global.fetch = originalFetch;
     delete require.cache[require.resolve('../services/agent/chat-engine')];
     db.allQuery = originalAllQuery;
   }
@@ -791,6 +921,7 @@ async function main() {
   await testRetrievalThoughtBuildsCodingAndCommunicationAngles();
   await testHybridRetrievalPrefersDownwardExpansion();
   await testAnswerChatQueryEmitsStructuredPipelineStages();
+  await testAnswerChatQueryUsesWebFallbackForSparseWorldKnowledge();
   await testSuggestionEnginePersistsExecutionMetadata();
   testNormalizeDesktopGoalForGoogleSearch();
   testDesktopPlannerReadsUiAfterOpen();

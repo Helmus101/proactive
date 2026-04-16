@@ -777,11 +777,15 @@ function inferRouterDecision(text, llmSourceMode, webGate) {
   const asksLifeContext = /\b(what did i|did i|my study|my habits|follow up with|unfinished tasks|my notes|my history|my project|my work|my life)\b/.test(lower);
   const asksCurrentWorld = /\b(latest|current|today|news|public|internet|web|look up|online|how does .* work|what is)\b/.test(lower);
   const asksBlend = /\b(using my|based on my|with my notes|my context and|my history and|combine)\b/.test(lower);
+  const asksSelfProfileWriting = /\b(write|draft|create|generate|make)\b.*\b(bio|biography|profile|about me|personal summary|intro|introduction)\b|\b(bio|biography|profile|about me|personal summary|intro|introduction)\b.*\b(me|myself|my)\b/.test(lower);
 
   let sourceMode = 'memory_only';
   let routerReason = 'The request appears grounded in personal memory and local context.';
 
-  if (llmSourceMode === 'web') {
+  if (asksSelfProfileWriting) {
+    sourceMode = 'memory_only';
+    routerReason = 'The request is asking for a personal bio/profile grounded in memory and prior context.';
+  } else if (llmSourceMode === 'web') {
     sourceMode = 'web_only';
     routerReason = 'The structured router classified this as external or current information.';
   } else if (llmSourceMode === 'hybrid') {

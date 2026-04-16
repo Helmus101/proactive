@@ -63,13 +63,46 @@ function normalizeDDGResultUrl(url) {
   }
 }
 
-function shouldUseExternalWebSearch(query, retrievalThought, retrieval) {
-  const mode = retrievalThought?.source_mode || retrievalThought?.strategy_mode;
-  if (mode === 'web_only' || mode === 'memory_then_web') return true;
-  if (retrievalThought?.mode === 'queryless') return false;
+function assessWebSearchNecessity(query, retrievalThought, retrieval) {
+  const mode = retrievalThought?.source_mode || retrievalThought?.strategy_mode || 'memory_only';
+  const normalizedQuery = String(query || '');
+  const lowerQuery = normalizedQuery.toLowerCase();
+  if (retrievalThought?.mode === 'queryless') {
+    return { shouldSearchWeb: false, reason: 'Queryless retrieval does not require external search.' };
+  }
+  if (mode === 'web_only') {
+    return { shouldSearchWeb: true, reason: 'The router classified this as a web-first question.' };
+  }
+
   const evidenceCount = Number(retrieval?.evidence_count || 0);
-  const seedCount = Number(retrieval?.seed_nodes?.length || 0);
-  return seedCount < 2 || evidenceCount < 3;
+  const seedCount = Number(retrieval?.seed_nodes?.length || retrieval?.primary_nodes?.length || 0);
+  const maxScore = Array.isArray(retrieval?.evidence) && retrieval.evidence.length
+    ? Math.max(...retrieval.evidence.map((e) => Number(e?.score || 0)))
+    : 0;
+  const asksCurrent = /\b(latest|current|today|news|public|internet|online|look up|search the web|google|website|site)\b/i.test(normalizedQuery);
+  const looksPersonal = /\b(i|my|me|mine|we|our|us)\b/i.test(normalizedQuery);
+  const asksPersonalContext = /\b(what did i|did i|my notes|my history|my project|my work|my context|follow up|unfinished tasks|status of)\b/i.test(normalizedQuery);
+  const asksWorldKnowledge = /\b(what is|who is|when is|where is|tell me about|explain)\b/i.test(lowerQuery);
+  const sparseMemory = seedCount < 2 || evidenceCount < 3 || maxScore < 0.52;
+
+  if (mode === 'memory_then_web') {
+    if (asksCurrent && sparseMemory) {
+      return { shouldSearchWeb: true, reason: 'The request needs fresh or public context and the memory pass was not strong enough.' };
+    }
+    if (sparseMemory && !looksPersonal && !asksPersonalContext && asksWorldKnowledge) {
+      return { shouldSearchWeb: true, reason: 'The request reads like general world knowledge, and the memory pass was not strong enough.' };
+    }
+    if (!asksCurrent && sparseMemory) {
+      return { shouldSearchWeb: false, reason: 'The router allowed web fallback, but the request still looks memory-native, so it will ask for clarification before searching the web.' };
+    }
+    return { shouldSearchWeb: false, reason: 'Memory retrieval looked sufficient, so web search was not necessary.' };
+  }
+
+  if (asksCurrent && sparseMemory) {
+    return { shouldSearchWeb: true, reason: 'The request appears current and the memory pass was weak.' };
+  }
+
+  return { shouldSearchWeb: false, reason: 'Memory retrieval looked sufficient, so web search was not necessary.' };
 }
 
 function formatStageDetail(items = [], fallback = '') {
@@ -770,7 +803,8 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     detail: formatStageDetail([
       `Prepared ${baseThought.query_sets?.memory_queries?.length || baseThought.semantic_queries?.length || 0} memory queries,`,
       `${baseThought.query_sets?.message_queries?.length || baseThought.message_queries?.length || 0} message queries,`,
-      `and ${baseThought.query_sets?.web_queries?.length || baseThought.web_queries?.length || 0} web queries.`
+      `and ${baseThought.query_sets?.web_queries?.length || baseThought.web_queries?.length || 0} web fallback queries.`,
+      'Initial reasoning will decide later whether web search is actually necessary.'
     ], 'Prepared retrieval queries.'),
     counts: {
       memory_queries: Number(baseThought.query_sets?.memory_queries?.length || baseThought.semantic_queries?.length || 0),
@@ -968,13 +1002,14 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     || baseThought.summary_vs_raw === 'raw'
     ? await fetchDrilldownEvidence(retrieval.drilldown_refs || [])
     : [];
-  const shouldSearchWeb = shouldUseExternalWebSearch(query, baseThought, retrieval);
+  const webAssessment = assessWebSearchNecessity(query, baseThought, retrieval);
+  const shouldSearchWeb = webAssessment.shouldSearchWeb;
   const webSearchQuery = (retrieval?.query_sets?.web_queries || retrieval?.generated_queries?.web || retrieval?.generated_queries?.semantic || retrieval?.retrieval_plan?.web_queries || retrieval?.retrieval_plan?.semantic_queries || [query])[0] || query;
   let webResults = [];
   if (shouldSearchWeb || (baseThought.source_mode || baseThought.strategy_mode) === 'web_only') {
     emitStage('web_search', 'started', {
       label: 'Web search',
-      detail: `Searching the web for fresh or public context using: ${webSearchQuery}`
+      detail: `${webAssessment.reason} Searching the web using: ${webSearchQuery}`
     });
     webResults = await searchFreeWeb(webSearchQuery, 4);
     emitStage('web_search', 'completed', {
@@ -988,7 +1023,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   } else {
     emitStage('web_search', 'skipped', {
       label: 'Web search',
-      detail: 'Skipped web search because memory retrieval looked sufficient.'
+      detail: webAssessment.reason
     });
   }
   if (webResults.length) {
