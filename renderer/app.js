@@ -830,45 +830,21 @@ class WeaveApp {
         const thinkingPanel = this.appendThinkingPanel();
 
         const handleChatStep = (data) => {
-            const label = thinkingPanel.querySelector('.thinking-step-label');
+            const label = thinkingPanel.querySelector(".thinking-step-label");
             if (!label) return;
-            const step = data?.step || '';
-            const queryHint = data?.query ? ` "${data.query.slice(0, 30)}${data.query.length > 30 ? "..." : ""}"` : "";
-            let text = '';
-            if (step === "query_analysis") {
-                const scope = data.time_scope && data.time_scope !== "all_time" ? ` · ${data.time_scope}` : "";
-                const queries = Array.isArray(data.queries) && data.queries.length ? ` (${data.queries.slice(0, 2).join(", ")}...)` : "";
-                text = `Reconstructing query angles${queries} · ${data.strategy_mode || "memory"}${scope}`;
-            } else if (step === "query_reconstruction") {
-                const queries = Array.isArray(data.transformed_queries) && data.transformed_queries.length ? ` (${data.transformed_queries[0].slice(0, 30)}...)` : "";
-                const terms = Array.isArray(data.lexical_terms) && data.lexical_terms.length ? ` · Terms: ${data.lexical_terms.slice(0, 3).join(", ")}` : "";
-                text = `Transforming queries for high-precision anchoring${queries}${terms}`;
-            } else if (step === "passive_insufficient") {
-                text = `Initial layer pass incomplete (score: ${data.passive_score || 0}) · Deepening search`;
-            } else if (step === "passive_sufficient") {
-                text = `Found strong match in Core layers (score: ${data.passive_score || 0})`;
-            } else if (step === "memory_retrieval") {
-                const reconstructed = Array.isArray(data.reconstructed_queries) && data.reconstructed_queries.length 
-                    ? ` ("${data.reconstructed_queries[0].slice(0, 40)}...")` 
-                    : queryHint;
-                text = `Retrieving memory for${reconstructed} (${data.query_count || 0} queries)`;
-            } else if (step === "temporal_widen") {
-                text = `Sparse results · Widening temporal window`;
-            } else if (step === "deep_scan_triggered") {
-                text = `Deep Scan active · Forcing recursive graph expansion`;
-            } else if (step === "layer_penetration") {
-                const depth = data.max_depth === 3 ? "Deep (Raw)" : (data.max_depth === 2 ? "Mid (Episode)" : "Core");
-                text = `Layer penetration: ${depth} · Path discovered`;
-            } else if (step === "discovery_status") {
-                text = `Discovery: ${data.seed_count} seeds · ${data.evidence_count} evidence · Confidence ${(data.confidence * 100).toFixed(0)}%`;
-            } else if (step === "llm_fallback") {
-                text = `Model unavailable · Returning grounded memory-only answer`;
-            } else if (step === "graph_expansion") {
-                text = `Walking Knowledge Graph · ${data.expanded_count || 0} related nodes`;
-            } else if (step === "web_search") {
-                text = `Consulting external web sources`;
-            } else if (step === "composing") {
-                text = `Synthesizing final answer...`;
+            const step = data?.step || "";
+            let text = "";
+            if (step === "generating query") {
+                text = "generating query";
+            } else if (step === "searching") {
+                text = "searching";
+            } else if (step === "results") {
+                text = "results";
+            } else if (step === "thinking") {
+                text = "thinking";
+                if (data.thinking_trace) {
+                    this.finalizeThinkingPanel(thinkingPanel, data);
+                }
             }
             if (text) label.textContent = text;
             this.scrollChatToBottom();
@@ -954,14 +930,8 @@ class WeaveApp {
         const wrapper = document.createElement("div");
         wrapper.innerHTML = `
             <div class="thinking-panel expanded">
-                <div class="discovery-orbit">
-                    <div class="orbit-core"></div>
-                    <div class="orbit-satellite s1"></div>
-                    <div class="orbit-satellite s2"></div>
-                    <div class="orbit-satellite s3"></div>
-                </div>
                 <div class="thinking-content-labels">
-                    <div class="thinking-live-label">Thinking <span class="thinking-word" id="thinking-word-live">...</span></div>
+                    <div class="thinking-live-label">Thinking...</div>
                     <div class="thinking-step-label"></div>
                 </div>
             </div>
@@ -1509,7 +1479,6 @@ class WeaveApp {
             }
         });
 
-        document.getElementById('test-browser-extension-btn')?.addEventListener('click', () => this.testBrowserExtensionTask());
         this.desktopPromptRunButton?.addEventListener('click', () => this.runDesktopPromptTask());
         this.desktopPromptInput?.addEventListener('keydown', (event) => {
             if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
@@ -1519,7 +1488,6 @@ class WeaveApp {
         });
         document.getElementById('allow-full-control-btn')?.addEventListener('click', () => this.openFullControlSettings());
         document.getElementById('extension-refresh-btn')?.addEventListener('click', () => this.loadExtensionStatus());
-        document.getElementById('extension-diagnostic-btn')?.addEventListener('click', () => this.runExtensionDiagnostic());
         this.voiceControlToggle?.addEventListener('click', async () => {
             const nextEnabled = !this.voiceControlToggle.classList.contains('active');
             await this.setVoiceControlEnabled(nextEnabled);
@@ -1664,33 +1632,6 @@ class WeaveApp {
         }
     }
 
-    async testBrowserExtensionTask() {
-        const button = document.getElementById('test-browser-extension-btn');
-        if (button) button.textContent = 'Running...';
-        this.setDesktopTestStatus('Starting desktop test…');
-        try {
-            const status = await window.electronAPI.getAccessibilityStatus();
-            if (!status?.trusted) {
-                throw new Error(status?.error || 'Accessibility permission is not enabled');
-            }
-            const result = await window.electronAPI.executeAITask({
-                id: `test_google_${Date.now()}`,
-                title: 'Search Google for hello and open the second result',
-                url: 'https://www.google.com',
-                ai_draft: 'Go to google.com, search for hello, click the second search result, and report which page opened.',
-                agentMode: true
-            });
-            this.setDesktopTestStatus(`Completed: ${result?.result || 'opened the requested result.'}`);
-            this.showToast(`Desktop automation test completed: ${result?.result || 'success'}`);
-        } catch (error) {
-            console.error('Desktop automation test failed:', error);
-            const failure = error?.failure_reason || error?.error || error?.message || 'Unknown failure';
-            this.setDesktopTestStatus(`Failed: ${failure}`);
-            this.showToast(`Desktop automation test failed: ${failure}`);
-        } finally {
-            if (button) button.textContent = 'Test Desktop Control';
-        }
-    }
 
     async runDesktopPromptTask() {
         const prompt = String(this.desktopPromptInput?.value || '').trim();
@@ -2163,21 +2104,6 @@ class WeaveApp {
         this.voiceOverlay.style.display = 'none';
     }
 
-    async runExtensionDiagnostic() {
-        try {
-            const result = await window.electronAPI.accessibilityRunDiagnostic();
-            if (result?.status === 'ok' || result?.status === 'success') {
-                const activeTitle = result?.observation?.window_title || result?.observation?.frontmost_app || 'Desktop context found';
-                this.showToast(`Diagnostic OK: ${activeTitle}`);
-            } else {
-                this.showToast(`Diagnostic failed: ${result?.error || 'Unknown error'}`);
-            }
-            await this.loadExtensionStatus();
-        } catch (error) {
-            console.error('Extension diagnostic failed:', error);
-            this.showToast('Extension diagnostic failed');
-        }
-    }
 
     async loadSensorData() {
         try {
