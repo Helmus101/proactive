@@ -118,6 +118,7 @@ async function ensureEventEnvelopeColumns() {
     ['event_time', 'TEXT']
     ];
 
+  for (const [name, sqlType] of required) {
     if (!existing.has(name)) {
       await db.runQuery(`ALTER TABLE events ADD COLUMN ${name} ${sqlType}`).catch(() => {});
     }

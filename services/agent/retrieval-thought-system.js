@@ -99,6 +99,13 @@ function extractNoiseTerms(text) {
   return Array.from(matches).slice(0, 12);
 }
 
+function buildLexicalTerms(text, limit = 12) {
+  const exact = extractExactTokens(text);
+  const quoted = extractQuotedPhrases(text).map((item) => item.toLowerCase());
+  const normalized = normalizeTerms(text);
+  return safeUnique([...exact, ...quoted, ...normalized], limit);
+}
+
 function clamp(num, min, max) {
   return Math.max(min, Math.min(max, num));
 }
@@ -764,6 +771,39 @@ function inferWebGate(query) {
   return { strategyMode: 'memory_only', webGateReason: 'Memory retrieval should be sufficient unless the internal evidence is weak.' };
 }
 
+function inferRouterDecision(text, llmSourceMode, webGate) {
+  const lower = safeText(text).toLowerCase();
+  const looksPersonal = /\b(i|my|me|mine)\b/.test(lower);
+  const asksLifeContext = /\b(what did i|did i|my study|my habits|follow up with|unfinished tasks|my notes|my history|my project|my work|my life)\b/.test(lower);
+  const asksCurrentWorld = /\b(latest|current|today|news|public|internet|web|look up|online|how does .* work|what is)\b/.test(lower);
+  const asksBlend = /\b(using my|based on my|with my notes|my context and|my history and|combine)\b/.test(lower);
+
+  let sourceMode = 'memory_only';
+  let routerReason = 'The request appears grounded in personal memory and local context.';
+
+  if (llmSourceMode === 'web') {
+    sourceMode = 'web_only';
+    routerReason = 'The structured router classified this as external or current information.';
+  } else if (llmSourceMode === 'hybrid') {
+    sourceMode = 'memory_then_web';
+    routerReason = 'The structured router classified this as needing memory context plus external corroboration.';
+  } else if (asksBlend || (looksPersonal && asksCurrentWorld)) {
+    sourceMode = 'memory_then_web';
+    routerReason = 'The request mixes personal context with current or public information.';
+  } else if (asksCurrentWorld && !looksPersonal && !asksLifeContext) {
+    sourceMode = 'web_only';
+    routerReason = 'The request appears focused on current or public world knowledge.';
+  } else if (looksPersonal || asksLifeContext) {
+    sourceMode = 'memory_only';
+    routerReason = 'The request appears focused on personal activity, memory, or prior context.';
+  } else if (webGate?.strategyMode === 'memory_then_web') {
+    sourceMode = 'memory_then_web';
+    routerReason = webGate.webGateReason || 'The request may need web corroboration after memory retrieval.';
+  }
+
+  return { sourceMode, routerReason };
+}
+
 function shouldUseQuerylessMode(text, dateRange) {
   // Enforce query-driven retrieval for all memory access paths.
   // We keep temporal filters, but we always generate explicit queries.
@@ -869,17 +909,26 @@ async function buildRetrievalThought({
   const entryMode = inferEntryMode(query || mergedText, intent, mode);
   const alpha = (summaryVsRaw === 'raw' || entryMode === 'query_first') ? 0.45 : 0.7;
   const reasoning = [];
-  const lexicalTerms = []; // Entirely removed lexical terms for search logic.
+  const lexicalTerms = buildLexicalTerms(mergedText || query);
   
   const temporalReasoning = [];
-  let strategyMode = webGate.strategyMode;
-  // Use LLM router decision for source selection if available
-  if (structuredQueries?.query_bundle?.source_mode) {
-    const llmSource = structuredQueries.query_bundle.source_mode;
-    if (llmSource === 'web') strategyMode = 'web_only';
-    else if (llmSource === 'hybrid') strategyMode = 'memory_then_web';
-    else strategyMode = 'memory_only';
-  }
+  const llmSource = structuredQueries?.query_bundle?.source_mode || null;
+  const router = inferRouterDecision(mergedText || query, llmSource, webGate);
+  const strategyMode = router.sourceMode;
+
+  const webQueries = sanitizeQueryList(
+    safeUnique([
+      ...(structuredQueries?.semantic_queries || []),
+      ...fallbackSemanticQueries(mergedText || query, candidateType, 5)
+    ], 7),
+    7
+  );
+
+  const querySets = {
+    memory_queries: semanticQueries,
+    message_queries: messageQueries,
+    web_queries: webQueries
+  };
 
   const filters = {
     app: apps.length ? apps : null,
@@ -889,6 +938,7 @@ async function buildRetrievalThought({
 
   reasoning.push(`Intent: ${intent}.`);
   reasoning.push(`Entry mode: ${entryMode}.`);
+  reasoning.push(`Router source mode: ${strategyMode}.`);
   reasoning.push('Mode: Agentic Retrieval Router (LLM-based source selection + 7-Query Batch).');
   reasoning.push('Batching: Enforced strict 7-query limit.');
   reasoning.push(`Summary mode: ${summaryVsRaw === 'raw' ? 'raw evidence retrieval' : 'bounded summary retrieval'}.`);
@@ -905,11 +955,14 @@ async function buildRetrievalThought({
     temporalReasoning.push('No temporal window inferred from the user phrasing.');
   }
   reasoning.push('Embedding rule: relative time and vague deixis are handled by filters, not semantic queries.');
+  reasoning.push(`Router reason: ${router.routerReason}`);
   reasoning.push(`Web gate: ${webGate.webGateReason}`);
 
   return {
     mode: 'semantic',
     strategy_mode: strategyMode,
+    source_mode: strategyMode,
+    router_reason: router.routerReason,
     entry_mode: entryMode,
     alpha,
     summary_vs_raw: summaryVsRaw,
@@ -925,6 +978,7 @@ async function buildRetrievalThought({
     semantic_queries: semanticQueries,
     message_queries: messageQueries,
     lexical_terms: lexicalTerms,
+    query_sets: querySets,
     query_bundle: structuredQueries?.query_bundle || null,
     query_debug: structuredQueries?.debug || {
       inferred_entities: extractNamedEntities(mergedText || query),
@@ -949,6 +1003,7 @@ async function buildRetrievalThought({
     context_budget_tokens: mode === 'suggestion' ? 550 : 800,
     search_queries: semanticQueries,
     search_queries_messages: messageQueries,
+    web_queries: webQueries,
     app_hints: apps,
     date_range: normalizedDateRange,
     reasoning
@@ -959,12 +1014,17 @@ function summarizeRetrievalThought(thought) {
   const plan = thought || {};
   const lines = [];
   lines.push(`Retrieval thought mode=${plan.mode || 'semantic'} strategy=${plan.strategy_mode || 'memory_only'} entry=${plan.entry_mode || 'hybrid'} intent=${plan.intent || 'unknown'}.`);
+  if (plan.source_mode) lines.push(`Router source mode=${plan.source_mode}.`);
+  if (plan.router_reason) lines.push(`Router reason=${plan.router_reason}`);
   lines.push(`Summary mode=${plan.summary_vs_raw || 'summary'}.`);
   if (Array.isArray(plan.semantic_queries || plan.search_queries) && (plan.semantic_queries || plan.search_queries).length) {
     lines.push(`Screen queries: ${(plan.semantic_queries || plan.search_queries).join(' | ')}.`);
   }
   if (Array.isArray(plan.message_queries || plan.search_queries_messages) && (plan.message_queries || plan.search_queries_messages).length) {
     lines.push(`Message queries: ${(plan.message_queries || plan.search_queries_messages).join(' | ')}.`);
+  }
+  if (Array.isArray(plan.web_queries) && plan.web_queries.length) {
+    lines.push(`Web queries: ${plan.web_queries.join(' | ')}.`);
   }
   return lines.concat(Array.isArray(plan.reasoning) ? plan.reasoning : []);
 }

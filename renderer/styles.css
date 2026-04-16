@@ -2225,22 +2225,95 @@ body.compact-mode .suggestion-card {
 }
 
 .thinking-panel.expanded {
-    max-height: 300px;
+    max-height: 900px;
     opacity: 1;
     padding: 16px;
-    display: flex;
-    align-items: center;
-    gap: 4px;
+    display: block;
 }
 .thinking-panel.ready {
     max-height: none;
-    padding: 0;
-    background: transparent;
-    border: none;
+    padding: 16px;
     margin: 16px 0 10px;
-    overflow: visible;
-    backdrop-filter: none;
-    -webkit-backdrop-filter: none;
+}
+
+.thinking-timeline {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 12px;
+}
+
+.thinking-timeline-row {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+}
+
+.thinking-timeline-marker {
+    width: 10px;
+    height: 10px;
+    border-radius: 999px;
+    margin-top: 6px;
+    background: rgba(255,255,255,0.18);
+    border: 1px solid rgba(255,255,255,0.12);
+}
+
+.thinking-timeline-row.status-started .thinking-timeline-marker {
+    background: rgba(123, 182, 255, 0.9);
+}
+
+.thinking-timeline-row.status-completed .thinking-timeline-marker {
+    background: rgba(90, 211, 147, 0.95);
+}
+
+.thinking-timeline-row.status-skipped .thinking-timeline-marker {
+    background: rgba(255,255,255,0.14);
+}
+
+.thinking-timeline-row.status-failed .thinking-timeline-marker {
+    background: rgba(255, 107, 107, 0.95);
+}
+
+.thinking-timeline-body {
+    flex: 1;
+    min-width: 0;
+}
+
+.thinking-timeline-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: baseline;
+}
+
+.thinking-timeline-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.thinking-timeline-status,
+.thinking-timeline-meta {
+    font-size: 11px;
+    color: var(--text-tertiary);
+}
+
+.thinking-timeline-detail {
+    margin-top: 4px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+}
+
+.thinking-timeline-preview {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 6px;
+}
+
+.thinking-final-card {
+    margin-top: 14px;
 }
 
 .thinking-header {

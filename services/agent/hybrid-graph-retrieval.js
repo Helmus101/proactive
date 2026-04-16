@@ -257,6 +257,9 @@ async function coreDownRanking(nodeRows = [], retrievalPlan = {}, limit = 80) {
     .slice(0, limit);
 }
 
+// Seed discovery helper used before canonical bounded graph expansion.
+// This can bias retrieval toward lower-ranked evidence, but it is not the main
+// graph-expansion stage exposed to chat.
 async function recursiveDownTraversal(nodeRows = [], retrievalPlan = {}, limit = 60) {
   if (!Array.isArray(nodeRows) || !nodeRows.length) return [];
   const mapById = new Map(nodeRows.map((row) => [row.id, row]));
@@ -469,6 +472,8 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
     .filter(s => s.node_id || s.id)
     .map((s) => ({ id: s.node_id || s.id, layer: s.layer, depth: 0 }));
   const expanded = [];
+  const supportNodes = [];
+  const evidenceNodes = [];
   const edgePaths = [];
 
   // Strictly enforce 1-2 hop limit (hopLimit passed from retrieval plan)
@@ -530,7 +535,7 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
       .forEach((item) => {
         if (seen.has(item.id)) return;
         seen.add(item.id);
-        expanded.push({
+        const expandedNode = {
           id: item.id,
           layer: item.layer,
           type: item.layer,
@@ -539,13 +544,21 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
           summary: item.summary,
           timestamp: item.timestamp,
           depth: item.depth
-        });
+        };
+        expanded.push(expandedNode);
+        if (item.layer === 'episode' || item.layer === 'raw' || item.layer === 'event') evidenceNodes.push(expandedNode);
+        else supportNodes.push(expandedNode);
         edgePaths.push(item.edge);
         queue.push({ id: item.id, layer: item.layer, depth: item.depth });
       });
   }
 
-  return { expandedNodes: expanded, edgePaths };
+  return {
+    expandedNodes: expanded,
+    supportNodes,
+    evidenceNodes,
+    edgePaths
+  };
 }
 
 function alphaBlendedSearch(lexicalRanking, semanticRankings, alpha = 0.45) {
@@ -611,6 +624,7 @@ async function buildHybridGraphRetrieval({
     context_budget_tokens: basePlan.context_budget_tokens || (options.mode === 'suggestion' ? 550 : 800),
     search_queries: basePlan.search_queries || basePlan.semantic_queries || [],
     search_queries_messages: basePlan.search_queries_messages || basePlan.message_queries || [],
+    web_queries: basePlan.web_queries || basePlan.query_sets?.web_queries || [],
     temporal_reasoning: Array.isArray(basePlan.temporal_reasoning) ? basePlan.temporal_reasoning : [],
     initial_date_range: basePlan.initial_date_range || basePlan.filters?.date_range || null,
     applied_date_range: options.date_range || basePlan.applied_date_range || basePlan.filters?.date_range || null,
@@ -681,6 +695,55 @@ async function buildHybridGraphRetrieval({
     .map(r => ({ ...r, node_id: r.id }));
     
   const graph = await expandGraph([...seeds, ...coreNodesForExpansion], retrievalPlan.hop_limit, MAX_EXPANDED);
+  const primaryNodes = seeds.map((seed) => ({
+    id: seed.node_id || seed.event_id || seed.key,
+    node_id: seed.node_id || null,
+    event_id: seed.event_id || null,
+    source_type: seed.source_type || null,
+    layer: seed.layer || seed.source_type,
+    type: seed.layer || seed.source_type,
+    subtype: seed.subtype || null,
+    anchor_at: seed.anchor_at || null,
+    latest_activity_at: seed.latest_activity_at || seed.timestamp || null,
+    title: String(seed.text || '').split('\n')[0].slice(0, 140),
+    text: String(seed.text || '').slice(0, 220),
+    app: seed.app || null,
+    activity_summary: seed.activity_summary || null,
+    content_type: seed.content_type || null,
+    uncertainty: seed.uncertainty || null,
+    score: Number((seed.rerank_score || seed.fused_score || seed.base_score || 0).toFixed(6)),
+    reason: seed.match_reason
+  }));
+  const supportNodes = Array.from(new Map([
+    ...((Array.isArray(graph.supportNodes) ? graph.supportNodes : []).map((item) => [item.id, item])),
+    ...(primaryNodes
+      .filter((item) => item.layer === 'semantic' && ['task', 'person', 'decision', 'fact'].includes(String(item.subtype || '')))
+      .map((item) => [item.id, {
+        id: item.id,
+        layer: item.layer,
+        type: item.type,
+        subtype: item.subtype,
+        title: item.title,
+        summary: item.text,
+        timestamp: item.latest_activity_at || item.anchor_at || null,
+        depth: 0
+      }]))
+  ]).values());
+  const evidenceNodes = Array.from(new Map([
+    ...((Array.isArray(graph.evidenceNodes) ? graph.evidenceNodes : []).map((item) => [item.id, item])),
+    ...(primaryNodes
+      .filter((item) => item.layer === 'episode' || item.layer === 'raw' || item.layer === 'event')
+      .map((item) => [item.id, {
+        id: item.id,
+        layer: item.layer,
+        type: item.type,
+        subtype: item.subtype,
+        title: item.title,
+        summary: item.text,
+        timestamp: item.latest_activity_at || item.anchor_at || null,
+        depth: 0
+      }]))
+  ]).values());
 
   // Spiral retrieval ordering: Insights -> Semantics -> Episodes
   let evidenceRows = reranked.slice(0, 18);
@@ -718,7 +781,38 @@ async function buildHybridGraphRetrieval({
     evidenceRows = ordered.slice(0, 60);
   }
 
-  const evidence = evidenceRows.slice(0, 18).map((row) => ({
+  const prioritizedEvidenceRows = [];
+  const prioritizedSeen = new Set();
+  const pushEvidenceRow = (row, key) => {
+    const identity = key || row.node_id || row.event_id || row.key || row.id;
+    if (!identity || prioritizedSeen.has(identity)) return;
+    prioritizedSeen.add(identity);
+    prioritizedEvidenceRows.push(row);
+  };
+  seeds.forEach((row) => pushEvidenceRow(row));
+  evidenceNodes.forEach((node) => pushEvidenceRow({
+    key: `node:${node.id}`,
+    node_id: node.id,
+    layer: node.layer,
+    subtype: node.subtype,
+    text: [node.title, node.summary].filter(Boolean).join('\n'),
+    timestamp: node.timestamp,
+    base_score: 0.88 - ((node.depth || 1) * 0.08),
+    match_reason: 'downward_evidence'
+  }));
+  supportNodes.forEach((node) => pushEvidenceRow({
+    key: `node:${node.id}`,
+    node_id: node.id,
+    layer: node.layer,
+    subtype: node.subtype,
+    text: [node.title, node.summary].filter(Boolean).join('\n'),
+    timestamp: node.timestamp,
+    base_score: 0.62 - ((node.depth || 1) * 0.06),
+    match_reason: 'downward_support'
+  }));
+  evidenceRows.forEach((row) => pushEvidenceRow(row));
+
+  const evidence = prioritizedEvidenceRows.slice(0, 18).map((row) => ({
     id: row.node_id || row.event_id || row.key,
     node_id: row.node_id || null,
     event_id: row.event_id || null,
@@ -740,10 +834,11 @@ async function buildHybridGraphRetrieval({
 
   const traceSummary = [
     `Mode: ${retrievalPlan.mode}`,
+    `Router: ${retrievalPlan.source_mode || retrievalPlan.strategy_mode || 'memory_only'}`,
     `Seeds: ${seedNodeIds.join(', ') || 'none'}`,
     ...(retrievalPlan.applied_date_range ? [`Applied date window: ${retrievalPlan.applied_date_range.start} -> ${retrievalPlan.applied_date_range.end}`] : []),
     `Stage 1: hybrid seed search returned ${seeds.length} primary seeds.`,
-    `Stage 2: graph expansion added ${graph.expandedNodes.length} connected nodes.`,
+    `Stage 2: graph expansion added ${graph.expandedNodes.length} connected nodes (${supportNodes.length} support, ${evidenceNodes.length} evidence).`,
     ...summarizeRetrievalThought(retrievalPlan)
   ];
 
@@ -782,8 +877,20 @@ async function buildHybridGraphRetrieval({
       query_bundle: retrievalPlan.query_bundle || null,
       semantic: retrievalPlan.semantic_queries || [],
       messages: retrievalPlan.message_queries || [],
-      lexical_terms: [], // Lexical terms removed
+      web: retrievalPlan.web_queries || [],
+      lexical_terms: retrievalPlan.lexical_terms || [],
       debug: retrievalPlan.query_debug || null
+    },
+    router: {
+      source_mode: retrievalPlan.source_mode || retrievalPlan.strategy_mode || 'memory_only',
+      router_reason: retrievalPlan.router_reason || retrievalPlan.web_gate_reason || '',
+      time_scope: retrievalPlan.time_scope || null,
+      summary_vs_raw: retrievalPlan.summary_vs_raw || 'summary'
+    },
+    query_sets: retrievalPlan.query_sets || {
+      memory_queries: retrievalPlan.semantic_queries || [],
+      message_queries: retrievalPlan.message_queries || [],
+      web_queries: retrievalPlan.web_queries || []
     },
     thought_summary: summarizeRetrievalThought(retrievalPlan),
     trace_summary: traceSummary,
@@ -818,25 +925,10 @@ async function buildHybridGraphRetrieval({
       content_type: seed.content_type || null,
       uncertainty: seed.uncertainty || null
     })),
-    seed_nodes: seeds.map((seed) => ({
-      id: seed.node_id || seed.event_id || seed.key,
-      node_id: seed.node_id || null,
-      event_id: seed.event_id || null,
-      source_type: seed.source_type || null,
-      layer: seed.layer || seed.source_type,
-      type: seed.layer || seed.source_type,
-      subtype: seed.subtype || null,
-      anchor_at: seed.anchor_at || null,
-      latest_activity_at: seed.latest_activity_at || seed.timestamp || null,
-      title: String(seed.text || '').split('\n')[0].slice(0, 140),
-      text: String(seed.text || '').slice(0, 220),
-      app: seed.app || null,
-      activity_summary: seed.activity_summary || null,
-      content_type: seed.content_type || null,
-      uncertainty: seed.uncertainty || null,
-      score: Number((seed.rerank_score || seed.fused_score || seed.base_score || 0).toFixed(6)),
-      reason: seed.match_reason
-    })),
+    seed_nodes: primaryNodes,
+    primary_nodes: primaryNodes,
+    support_nodes: supportNodes,
+    evidence_nodes: evidenceNodes,
     expanded_nodes: graph.expandedNodes,
     graph_expansion_results: graph.expandedNodes,
     edge_paths: graph.edgePaths,
@@ -848,6 +940,12 @@ async function buildHybridGraphRetrieval({
       freshness_field: 'latest_activity_at',
       seed_then_expand: true,
       summary_vs_raw: retrievalPlan.summary_vs_raw || 'summary'
+    },
+    packed_context_stats: {
+      primary_nodes: primaryNodes.length,
+      support_nodes: supportNodes.length,
+      evidence_nodes: evidenceNodes.length,
+      packed_evidence: evidence.length
     },
     evidence_count: evidence.length,
     evidence,
