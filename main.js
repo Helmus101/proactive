@@ -9203,7 +9203,7 @@ ipcMain.handle('search-memory-graph', async (event, query, options = {}) => {
       try {
         const { buildRetrievalThought } = require('./services/agent/retrieval-thought-system');
         const { buildHybridGraphRetrieval } = require('./services/agent/hybrid-graph-retrieval');
-        const thought = buildRetrievalThought({
+        const thought = await buildRetrievalThought({
           query: effectiveQuery,
           mode: 'chat',
           dateRange: dateRange || null,

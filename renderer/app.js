@@ -832,9 +832,9 @@ class WeaveApp {
         const handleChatStep = (data) => {
             const label = thinkingPanel.querySelector(".thinking-step-label");
             if (!label) return;
-            const step = data?.step || "";
+            const step = typeof data === "string" ? data : (data?.step || "");
             label.textContent = step;
-            if (step === "thinking" && data.thinking_trace) {
+            if (step === "thinking" && data?.thinking_trace) {
                 this.finalizeThinkingPanel(thinkingPanel, data);
             }
             this.scrollChatToBottom();
