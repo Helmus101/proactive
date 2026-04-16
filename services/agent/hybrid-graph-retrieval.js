@@ -55,11 +55,6 @@ function normalizeDateRange(dateRange) {
 function rowMatchesFilters(row, filters = {}) {
   if (row.id === 'global_core' || row.layer === 'core') return true;
 
-  if (filters.exclude_browser_history) {
-    const hay = `${row.source_type || ''} ${row.app || ''}`.toLowerCase();
-    if (hay.includes('browser') || hay.includes('history')) return false;
-  }
-
   const appFilter = Array.isArray(filters.app) ? filters.app : (filters.app ? [filters.app] : []);
   if (appFilter.length) {
     const app = String(row.app || '').toLowerCase();
@@ -145,9 +140,17 @@ function rerankFusedResults(rows, retrievalPlan) {
       const episodeBonus = row.layer === 'episode' ? (summaryVsRaw === 'summary' ? 0.09 : 0.03) : 0;
       const rawEvidenceBonus = summaryVsRaw === 'raw' && (row.source_type === 'event' || row.layer === 'event') ? 0.08 : 0;
       
-      // Passive-First Heuristic: Boost direct observations
-      const isPassive = row.layer === 'raw' || row.source_type === 'screen' || row.source_type === 'capture' || row.source_type_group === 'desktop';
-      const passiveBoost = isPassive ? 0.15 : 0;
+      // ScreenCapture Prioritization: 30-min baseline check
+      const isScreenCapture = row.source_type === 'screen' || row.source_type === 'capture' || row.subtype === 'screencapture';
+      const isBrowserHistory = String(row.app || '').toLowerCase().includes('browser') || String(row.app || '').toLowerCase().includes('chrome') || String(row.source_type || '').toLowerCase().includes('history');
+      
+      let passiveBoost = 0;
+      if (retrievalPlan?.filters?.prioritize_screen_capture) {
+        if (isScreenCapture) passiveBoost = 0.15;
+        else if (isBrowserHistory) passiveBoost = 0.05;
+      } else {
+        if (isScreenCapture || isBrowserHistory || row.source_type_group === 'desktop') passiveBoost = 0.12;
+      }
 
       const sourceBonus = sourceAgreementBonus(row, preferred);
       const dateBonus = dateFreshnessBonus(row, retrievalPlan?.applied_date_range);
@@ -694,12 +697,12 @@ async function buildHybridGraphRetrieval({
   passiveOnly = false
 } = {}) {
   const oldestCapture = await db.getQuery(`SELECT occurred_at FROM events WHERE type = 'ScreenCapture' ORDER BY occurred_at ASC LIMIT 1`).catch(() => null);
-  let excludeBrowserHistory = false;
+  let prioritizeScreenCapture = false;
   if (oldestCapture && oldestCapture.occurred_at) {
     const oldestTs = new Date(oldestCapture.occurred_at).getTime();
     const thirtyMinsAgo = Date.now() - (30 * 60 * 1000);
     if (oldestTs < thirtyMinsAgo) {
-      excludeBrowserHistory = true;
+      prioritizeScreenCapture = true;
     }
   }
 
@@ -717,7 +720,7 @@ async function buildHybridGraphRetrieval({
       app: options.app || basePlan.filters?.app || null,
       date_range: options.date_range || basePlan.filters?.date_range || null,
       source_types: options.source_types || basePlan.filters?.source_types || null,
-      exclude_browser_history: excludeBrowserHistory
+      prioritize_screen_capture: prioritizeScreenCapture
     },
     seed_limit: seedLimit || basePlan.seed_limit || DEFAULT_SEED_LIMIT,
     hop_limit: hopLimit || basePlan.hop_limit || DEFAULT_HOP_LIMIT,
