@@ -54,7 +54,7 @@ let activeStudySession = null;
 const DEFAULT_VOICE_SHORTCUT = 'CommandOrControl+Shift+Space';
 const LEGACY_VOICE_SHORTCUT = 'CommandOrControl+Space';
 const PLANNER_STEP_THROTTLE_MS = 700;
-const SCREENSHOT_RETENTION_DAYS = 7;
+const SCREENSHOT_RETENTION_DAYS = 36500;
 
 // Memory Graph Processing Timers
 let episodeGenerationTimer = null;
@@ -164,20 +164,8 @@ function inferStudySignal(text = '', metadata = {}) {
 }
 
 function pruneOldSensorCaptures(events = []) {
-  const retentionMs = SCREENSHOT_RETENTION_DAYS * 24 * 60 * 60 * 1000;
-  const cutoff = Date.now() - retentionMs;
-  const kept = [];
-  for (const event of Array.isArray(events) ? events : []) {
-    const ts = Number(event?.timestamp || 0);
-    if (!ts || ts >= cutoff) {
-      kept.push(event);
-      continue;
-    }
-    if (event?.imagePath && fs.existsSync(event.imagePath)) {
-      try { fs.unlinkSync(event.imagePath); } catch (_) {}
-    }
-  }
-  return kept;
+  // Pruning disabled to ensure nothing is deleted
+  return Array.isArray(events) ? events : [];
 }
 
 function startScreenshotCleanupLoop() {
@@ -1529,7 +1517,7 @@ async function runEpisodeGeneration() {
   episodeJobLock = true;
   
   try {
-    console.log('[EpisodeJob] Running 30-minute episode generation...');
+    console.log('[EpisodeJob] Running 90-minute episode generation...');
     const { runEpisodeJob } = require('./services/agent/intelligence-engine');
     
     store.set('memoryGraphHealth', {
@@ -1835,16 +1823,16 @@ function startMemoryGraphProcessing() {
     // schedule first aligned run, then set repeating intervals
     setTimeout(() => {
       runEpisodeGeneration().catch((e) => console.warn('[MemoryGraph] Aligned episode generation failed:', e?.message || e));
-      try { episodeGenerationTimer = setInterval(runEpisodeGeneration, halfHourMs); } catch (_) {}
+      try { episodeGenerationTimer = setInterval(runEpisodeGeneration, 90 * 60 * 1000); } catch (_) {}
       // also kick off semantic window at same boundary
       runSemanticWindowGeneration().catch((e) => console.warn('[MemoryGraph] Aligned semantic window failed:', e?.message || e));
       try { semanticsTimer = setInterval(runSemanticWindowGeneration, halfHourMs); } catch (_) {}
     }, delay);
-    console.log('[MemoryGraph] Aligned episode & semantic scheduling to half-hour boundaries, first run in', Math.round(delay / 1000), 's');
+    console.log('[MemoryGraph] Aligned episode (90m) & semantic (30m) scheduling, first run in', Math.round(delay / 1000), 's');
   } catch (e) {
     console.warn('[MemoryGraph] Failed to schedule aligned half-hour jobs, falling back to interval timers:', e?.message || e);
     if (episodeGenerationTimer) clearInterval(episodeGenerationTimer);
-    episodeGenerationTimer = setInterval(runEpisodeGeneration, 30 * 60 * 1000);
+    episodeGenerationTimer = setInterval(runEpisodeGeneration, 90 * 60 * 1000);
     if (semanticsTimer) clearInterval(semanticsTimer);
     semanticsTimer = setInterval(runSemanticWindowGeneration, 30 * 60 * 1000);
   }
@@ -6860,7 +6848,7 @@ ipcMain.handle('save-chat-sessions-to-memory', async (event, sessions) => {
     await saveChatSessionsToDb(sessions).catch((e) => {
       console.warn('[save-chat-sessions-to-memory] durable save failed', e?.message || e);
     });
-    for (const session of sessions.slice(0, 50)) {
+    for (const session of sessions) {
       try {
         const meta = {
           session_id: session.id,
@@ -6869,7 +6857,7 @@ ipcMain.handle('save-chat-sessions-to-memory', async (event, sessions) => {
           saved_from_ui: true
         };
         // Persist each message as a raw event so it enters the L1 event stream
-        for (const msg of (session.messages || []).slice(-200)) {
+        for (const msg of (session.messages || [])) {
           await ingestRawEvent({
             type: 'chat_message',
             timestamp: msg.ts ? new Date(msg.ts).toISOString() : new Date().toISOString(),
