@@ -104,6 +104,8 @@ class WeaveApp {
         this.suggestionBaseUrlInput = document.getElementById('suggestion-llm-base-url');
         this.suggestionApiKeyInput = document.getElementById('suggestion-llm-api-key');
         this.suggestionProviderStatus = document.getElementById('suggestion-llm-status');
+        this.discoveryOrbitContainer = document.getElementById('discovery-orbit-container');
+        this.discoveryOrbitLabel = document.getElementById('discovery-orbit-label');
     }
 
     async loadInitialData() {
@@ -1740,6 +1742,7 @@ class WeaveApp {
 
     handlePlannerStep(payload = {}) {
         if (!this.desktopTestStatus || !payload) return;
+        this.updateDiscoveryOrbit(payload);
         if (payload.phase === 'thinking') {
             if (Date.now() - this.lastPlannerStatusAt < 400) return;
             this.lastPlannerStatusAt = Date.now();
@@ -1782,6 +1785,20 @@ class WeaveApp {
 
     setDesktopPromptStatus(text) {
         if (this.desktopPromptStatus) this.desktopPromptStatus.textContent = text;
+    }
+
+    updateDiscoveryOrbit(payload = {}) {
+        if (!this.discoveryOrbitContainer) return;
+        const isThinking = payload.phase === "thinking" || payload.stage === "thinking" || payload.status === "thinking";
+        if (isThinking) {
+            this.discoveryOrbitContainer.classList.remove("hidden");
+            if (this.discoveryOrbitLabel) {
+                const action = payload.action ? "Thinking: " + payload.action.replace(/_/g, " ") + "..." : "Discovery Thinking...";
+                this.discoveryOrbitLabel.textContent = action;
+            }
+        } else {
+            this.discoveryOrbitContainer.classList.add("hidden");
+        }
     }
 
     async openFullControlSettings() {
