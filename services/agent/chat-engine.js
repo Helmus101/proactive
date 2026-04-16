@@ -680,6 +680,8 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   const chatHistory = normalizeChatHistoryWindow(options?.chat_history, 12);
   const retrievalQuery = buildQueryWithChatContext(query, chatHistory);
 
+  emit({ step: 'generating query' });
+
   const baseThought = buildRetrievalThought({
     query: retrievalQuery,
     mode: 'chat',
@@ -687,21 +689,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     app: options?.app
   });
 
-  emit({
-    step: 'query_analysis',
-    query: retrievalQuery,
-    intent: baseThought.mode || 'semantic',
-    strategy_mode: baseThought.strategy_mode || 'memory_only',
-    time_scope: baseThought.time_scope?.label || 'all_time',
-    query_count: (baseThought.semantic_queries || []).length,
-    queries: baseThought.semantic_queries || []
-  });
-
-  emit({
-    step: 'query_reconstruction',
-    transformed_queries: baseThought.semantic_queries || [],
-    lexical_terms: baseThought.lexical_terms || []
-  });
+  emit({ step: 'searching' });
 
   // Passive-First Heuristic: attempt retrieval from Core, Insight, Cloud layers first
   let retrieval = await executeParallelRetrieval(retrievalQuery, baseThought, {
@@ -717,7 +705,6 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   const isPassiveSufficient = (retrieval.evidence_count >= 3 && passiveMaxScore > 0.75) || (passiveMaxScore > 0.9);
 
   if (!isPassiveSufficient) {
-    emit({ step: 'passive_insufficient', passive_score: passiveMaxScore });
     retrieval = await executeParallelRetrieval(retrievalQuery, baseThought, {
       mode: 'chat',
       app: options?.app,
@@ -726,27 +713,12 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       retrieval_thought: baseThought,
       passiveOnly: false
     });
-  } else {
-    emit({ step: 'passive_sufficient', passive_score: passiveMaxScore });
   }
-
-  emit({
-    step: 'memory_retrieval',
-    query: retrievalQuery,
-    reconstructed_queries: baseThought.semantic_queries || [],
-    seed_count: retrieval?.seed_nodes?.length || 0,
-    query_count: (baseThought.semantic_queries || baseThought.retrieval_plan?.semantic_queries || []).length
-  });
 
   const canWiden = Boolean(baseThought?.initial_date_range) && !baseThought?.fallback_policy?.attempted;
   if (canWiden && retrievalLooksSparse(retrieval)) {
     const widenedRange = widenTemporalWindow(baseThought.initial_date_range);
     if (widenedRange) {
-      emit({
-        step: 'temporal_widen',
-        from_range: baseThought.initial_date_range,
-        to_range: widenedRange
-      });
       const widenedThought = withTemporalFallback(baseThought, widenedRange);
       const widenedRetrieval = await executeParallelRetrieval(retrievalQuery, widenedThought, {
         mode: 'chat',
@@ -767,7 +739,6 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
 
   // Deep Scan Heuristic: if results are still sparse, force recursive expansion
   if (retrievalLooksSparse(retrieval) && !options.passiveOnly) {
-    emit({ step: 'deep_scan_triggered', reason: 'sparse_results' });
     const deepRetrieval = await executeParallelRetrieval(retrievalQuery, baseThought, {
       ...options,
       mode: 'chat',
@@ -785,28 +756,10 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     }
   }
 
-  const layers = Array.from(new Set((retrieval.evidence || []).map(e => e.layer))).filter(Boolean);
-  emit({
-    step: 'layer_penetration',
-    layers,
-    max_depth: layers.includes('raw') || layers.includes('event') ? 3 : (layers.includes('episode') ? 2 : 1)
-  });
-
-  emit({
-    step: 'discovery_status',
-    seed_count: retrieval?.seed_nodes?.length || 0,
-    evidence_count: retrieval?.evidence_count || 0,
-    confidence: retrieval.evidence?.length ? Math.max(...retrieval.evidence.map(e => e.score || 0)) : 0
-  });
+  emit({ step: 'results' });
 
   const maxScore = retrieval.evidence?.length ? Math.max(...retrieval.evidence.map((e) => e.score || 0)) : 0;
   if (retrieval.evidence_count === 0 || (retrieval.evidence_count < 3 && maxScore < 0.45)) {
-    emit({
-      step: 'confidence_gating',
-      status: 'needs_clarification',
-      reason: 'Memory retrieval returned insufficient high-confidence context.'
-    });
-    
     return {
        content: "I couldn't find enough specific details in your memory graph to answer that accurately. Could you provide a bit more context, like a specific timeframe or associated project?",
        needs_clarification: true,
@@ -814,11 +767,6 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
        thinking_trace: ["Confidence Gating: Memory retrieval returned insufficient high-confidence context. Prompting user for clarification."]
     };
   }
-
-  emit({
-    step: 'graph_expansion',
-    expanded_count: retrieval?.expanded_nodes?.length || 0
-  });
 
   const [suggestions, recentEpisodes] = await Promise.all([
     fetchActiveSuggestions(),
@@ -831,7 +779,6 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     : [];
   const shouldSearchWeb = shouldUseExternalWebSearch(query, baseThought, retrieval);
   const webSearchQuery = (retrieval?.generated_queries?.semantic || retrieval?.retrieval_plan?.semantic_queries || [query])[0] || query;
-  if (shouldSearchWeb) emit({ step: 'web_search', query: webSearchQuery });
   const webResults = shouldSearchWeb ? await searchFreeWeb(webSearchQuery, 4) : [];
   if (webResults.length) {
     retrieval = {
@@ -853,6 +800,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     };
   }
   const thinkingTrace = await buildThinkingTrace({ query, retrieval, drilldownEvidence });
+  emit({ step: 'thinking', thinking_trace: thinkingTrace });
 
   if (!apiKey) {
     return {
@@ -870,7 +818,6 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     };
   }
 
-  emit({ step: 'composing' });
   const priorityEvidence = buildPriorityEvidenceLines(retrieval, drilldownEvidence, 6);
 
   const prompt = `[System]
@@ -977,7 +924,6 @@ ${query}`;
     const data = await response.json().catch(() => ({}));
     content = data?.choices?.[0]?.message?.content || content;
   } catch (llmError) {
-    emit({ step: 'llm_fallback', reason: String(llmError?.message || llmError) });
     content = buildGroundedFallbackAnswer(query, retrieval, drilldownEvidence);
   }
 
@@ -985,8 +931,6 @@ ${query}`;
   if (correctionMatch && correctionMatch[1]) {
     const correctionText = correctionMatch[1].trim();
     content = content.replace(/<memory_correction>[\s\S]*?<\/memory_correction>/i, '').trim();
-    
-    emit({ step: 'writing_correction', note: correctionText });
     
     const { upsertMemoryNode, stableHash } = require('./graph-store');
     const correctionId = `core_corr_${stableHash(correctionText)}`;
@@ -1009,7 +953,6 @@ ${query}`;
   if (searchMatch && searchMatch[1]) {
     const queryText = searchMatch[1].trim();
     content = content.replace(/<memory_search>[\s\S]*?<\/memory_search>/i, '').trim();
-    emit({ step: 'tool_use', tool: 'memory_search', query: queryText });
     await dispatchTool({ tool: 'memory_search', input: { query: queryText } }).catch(() => null);
   }
 
@@ -1017,7 +960,6 @@ ${query}`;
   if (drilldownMatch && drilldownMatch[1]) {
     const nodeId = drilldownMatch[1].trim();
     content = content.replace(/<memory_drilldown>[\s\S]*?<\/memory_drilldown>/i, '').trim();
-    emit({ step: 'tool_use', tool: 'memory_drilldown', node_id: nodeId });
     await dispatchTool({ tool: 'memory_drilldown', input: { node_id: nodeId } }).catch(() => null);
   }
 
@@ -1026,7 +968,6 @@ ${query}`;
     try {
       const input = JSON.parse(updateMatch[1].trim());
       content = content.replace(/<memory_update>[\s\S]*?<\/memory_update>/i, '').trim();
-      emit({ step: 'tool_use', tool: 'memory_update', node_id: input.node_id });
       await dispatchTool({ tool: 'memory_update', input }).catch(() => null);
     } catch (_) {}
   }
@@ -1036,7 +977,6 @@ ${query}`;
     try {
       const input = JSON.parse(linkMatch[1].trim());
       content = content.replace(/<memory_link>[\s\S]*?<\/memory_link>/i, '').trim();
-      emit({ step: 'tool_use', tool: 'memory_link', from_id: input.from_id, to_id: input.to_id });
       await dispatchTool({ tool: 'memory_link', input }).catch(() => null);
     } catch (_) {}
   }

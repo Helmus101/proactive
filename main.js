@@ -1126,13 +1126,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   }
 
   const existing = pruneOldSensorCaptures(getSensorEvents());
-  const nextEvents = [event, ...existing].slice(0, settings.maxEvents);
-  const retainedPaths = new Set(nextEvents.map(item => item.imagePath));
-  existing.forEach(item => {
-    if (item.imagePath && !retainedPaths.has(item.imagePath) && fs.existsSync(item.imagePath)) {
-      try { fs.unlinkSync(item.imagePath); } catch (_) {}
-    }
-  });
+  const nextEvents = [event, ...existing];
 
   store.set('sensorEvents', nextEvents);
   
@@ -6688,7 +6682,6 @@ function normalizeChatSessionSnapshot(sessions = []) {
   if (!Array.isArray(sessions)) return [];
   return sessions
     .filter((session) => session && session.id)
-    .slice(0, 40)
     .map((session) => ({
       id: String(session.id),
       title: String(session.title || 'New chat').slice(0, 180),
@@ -6697,7 +6690,6 @@ function normalizeChatSessionSnapshot(sessions = []) {
       messages: Array.isArray(session.messages)
         ? session.messages
             .filter((msg) => msg && typeof msg.content === 'string')
-            .slice(-180)
             .map((msg) => ({
               role: msg.role === 'assistant' ? 'assistant' : 'user',
               content: String(msg.content || '').slice(0, 32000),
@@ -6714,14 +6706,6 @@ async function saveChatSessionsToDb(sessions = []) {
   const keepIds = normalized.map((session) => session.id).filter(Boolean);
   const placeholders = keepIds.map(() => '?').join(',');
 
-  if (keepIds.length) {
-    await db.runQuery(`DELETE FROM chat_messages WHERE session_id NOT IN (${placeholders})`, keepIds).catch(() => {});
-    await db.runQuery(`DELETE FROM chat_sessions WHERE id NOT IN (${placeholders})`, keepIds).catch(() => {});
-  } else {
-    await db.runQuery(`DELETE FROM chat_messages`).catch(() => {});
-    await db.runQuery(`DELETE FROM chat_sessions`).catch(() => {});
-    return { saved: 0 };
-  }
 
   for (const session of normalized) {
     const createdIso = new Date(session.createdAt || Date.now()).toISOString();
@@ -6740,7 +6724,6 @@ async function saveChatSessionsToDb(sessions = []) {
         `INSERT OR REPLACE INTO chat_messages
          (id, session_id, role, content, retrieval, thinking_trace, ts, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
           messageId,
           session.id,
           msg.role,

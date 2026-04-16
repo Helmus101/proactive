@@ -231,6 +231,15 @@
                     <div class="settings-card">
                         <div class="settings-row">
                             <div>
+                                <div class="settings-label">Enable Screenshots</div>
+                                <div class="settings-description">Automatic screen analysis for memory</div>
+                            </div>
+                            <div class="settings-control">
+                                <div class="toggle-switch" id="capture-toggle"></div>
+                            </div>
+                        </div>
+                        <div class="settings-row">
+                            <div>
                                 <div class="settings-label">Push Notifications</div>
                                 <div class="settings-description">Get notified about important updates</div>
                             </div>
@@ -245,47 +254,6 @@
                             </div>
                             <div class="settings-control">
                                 <div class="toggle-switch" id="sound-toggle"></div>
-                            </div>
-                        </div>
-                        <div class="settings-row">
-                            <div>
-                                <div class="settings-label">Desktop Capture</div>
-                                <div class="settings-description">Automatic screen analysis for memory</div>
-                            </div>
-                            <div class="settings-control">
-                                <div class="toggle-switch" id="capture-toggle"></div>
-                            </div>
-                        </div>
-                        <div class="settings-row">
-                            <div>
-                                <div class="settings-label">OCR Provider</div>
-                                <div class="settings-description">Free OCR is built in and works without API keys</div>
-                            </div>
-                            <div class="settings-control">
-                                <select id="ocr-provider-select" style="min-width: 170px; height: 36px; border-radius: 12px; border: 1px solid var(--separator); background: rgba(255,255,255,0.45); color: var(--text-primary); padding: 0 10px;">
-                                    <option value="ocrspace">OCR.space (Free, No Key)</option>
-                                    <option value="auto">Auto (Cloud + Local Fallback)</option>
-                                    <option value="google-vision">Google Vision API</option>
-                                    <option value="vision-local">Local Vision (offline)</option>
-                                </select>
-                            </div>
-                        </div>
-                        <div class="settings-row">
-                            <div>
-                                <div class="settings-label">OCR Language</div>
-                                <div class="settings-description">Language hint (for example: en, fr, nl)</div>
-                            </div>
-                            <div class="settings-control">
-                                <input id="ocr-language-input" type="text" maxlength="16" placeholder="en" style="width: 110px; height: 36px; border-radius: 12px; border: 1px solid var(--separator); background: rgba(255,255,255,0.45); color: var(--text-primary); padding: 0 10px;" />
-                            </div>
-                        </div>
-                        <div class="settings-row">
-                            <div>
-                                <div class="settings-label">OCR API Key</div>
-                                <div class="settings-description">Optional, only needed for Google Vision or custom OCR key</div>
-                            </div>
-                            <div class="settings-control">
-                                <input id="ocr-api-key-input" type="password" placeholder="Enter API key" style="width: 220px; height: 36px; border-radius: 12px; border: 1px solid var(--separator); background: rgba(255,255,255,0.45); color: var(--text-primary); padding: 0 10px;" />
                             </div>
                         </div>
                     </div>
@@ -331,15 +299,6 @@
                                 <button class="ghost-button" id="clear-all-tasks-btn">Delete Suggestions</button>
                             </div>
                         </div>
-                        <div class="settings-row">
-                            <div>
-                                <div class="settings-label">Test Desktop Control</div>
-                                <div class="settings-description" id="desktop-test-status">Run a live macOS automation test: search Google for hello and open the second result. Uses AX-first control with adaptive vision.</div>
-                            </div>
-                            <div class="settings-control">
-                                <button class="ghost-button" id="test-browser-extension-btn">Test Desktop Control</button>
-                            </div>
-                        </div>
                         <div class="settings-row" style="display:block;">
                             <div>
                                 <div class="settings-label">Run Desktop Prompt</div>
@@ -363,7 +322,6 @@
                             <div class="settings-control" style="display:flex; gap:8px;">
                                 <button class="ghost-button" id="allow-full-control-btn">Allow Full Control</button>
                                 <button class="ghost-button" id="extension-refresh-btn">Refresh</button>
-                                <button class="ghost-button" id="extension-diagnostic-btn">Diagnostic</button>
                             </div>
                         </div>
                         <div class="settings-row">

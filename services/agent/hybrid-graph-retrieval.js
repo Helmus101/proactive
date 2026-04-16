@@ -54,6 +54,12 @@ function normalizeDateRange(dateRange) {
 
 function rowMatchesFilters(row, filters = {}) {
   if (row.id === 'global_core' || row.layer === 'core') return true;
+
+  if (filters.exclude_browser_history) {
+    const hay = `${row.source_type || ''} ${row.app || ''}`.toLowerCase();
+    if (hay.includes('browser') || hay.includes('history')) return false;
+  }
+
   const appFilter = Array.isArray(filters.app) ? filters.app : (filters.app ? [filters.app] : []);
   if (appFilter.length) {
     const app = String(row.app || '').toLowerCase();
@@ -687,6 +693,16 @@ async function buildHybridGraphRetrieval({
   recursionDepth = 0,
   passiveOnly = false
 } = {}) {
+  const oldestCapture = await db.getQuery(`SELECT occurred_at FROM events WHERE type = 'ScreenCapture' ORDER BY occurred_at ASC LIMIT 1`).catch(() => null);
+  let excludeBrowserHistory = false;
+  if (oldestCapture && oldestCapture.occurred_at) {
+    const oldestTs = new Date(oldestCapture.occurred_at).getTime();
+    const thirtyMinsAgo = Date.now() - (30 * 60 * 1000);
+    if (oldestTs < thirtyMinsAgo) {
+      excludeBrowserHistory = true;
+    }
+  }
+
   const basePlan = options.retrieval_thought || buildRetrievalThought({
     query,
     mode: options.mode || 'chat',
@@ -700,7 +716,8 @@ async function buildHybridGraphRetrieval({
       ...(basePlan.filters || {}),
       app: options.app || basePlan.filters?.app || null,
       date_range: options.date_range || basePlan.filters?.date_range || null,
-      source_types: options.source_types || basePlan.filters?.source_types || null
+      source_types: options.source_types || basePlan.filters?.source_types || null,
+      exclude_browser_history: excludeBrowserHistory
     },
     seed_limit: seedLimit || basePlan.seed_limit || DEFAULT_SEED_LIMIT,
     hop_limit: hopLimit || basePlan.hop_limit || DEFAULT_HOP_LIMIT,
