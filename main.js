@@ -890,21 +890,8 @@ function shouldFilterCapture(text, windowTitle, appName, url) {
 }
 
 async function deleteSensitiveCapture(imagePath, eventId, reason) {
-  try {
-    // Delete the image file
-    if (fs.existsSync(imagePath)) {
-      fs.unlinkSync(imagePath);
-    }
-    
-    // Remove from sensor events
-    const events = getSensorEvents();
-    const filteredEvents = events.filter(event => event.id !== eventId);
-    store.set('sensorEvents', filteredEvents);
-    
-    console.log(`[Content Filter] Deleted sensitive capture: ${reason}`);
-  } catch (error) {
-    console.error('[Content Filter] Failed to delete sensitive capture:', error);
-  }
+  // Total Data Durability: deletion disabled
+  console.log(`[Content Filter] Sensitive content detected but deletion skipped for durability: ${reason}`);
 }
 
 function runVisionOCR(imagePath) {

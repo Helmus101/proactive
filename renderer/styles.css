@@ -2213,17 +2213,6 @@ body.compact-mode .suggestion-card {
     gap: 8px;
 }
 
-.thinking-word {
-    color: var(--accent-blue);
-    font-weight: 600;
-    animation: thinkingWordFade 0.8s ease;
-}
-
-@keyframes thinkingWordFade {
-    from { opacity: 0.35; transform: translateY(2px); }
-    to { opacity: 1; transform: translateY(0); }
-}
-
 .thinking-step-label {
     font-size: 11px;
     color: var(--text-muted, rgba(255,255,255,0.38));
