@@ -6709,8 +6709,9 @@ async function saveChatSessionsToDb(sessions = []) {
       const messageId = chatMessageId(session.id, msg, idx);
       await db.runQuery(
         `INSERT OR REPLACE INTO chat_messages
-         (id, session_id, role, content, retrieval, thinking_trace, ts, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, session_id, role, content, retrieval, thinking_trace, ts, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
           messageId,
           session.id,
           msg.role,
