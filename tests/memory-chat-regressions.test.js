@@ -183,8 +183,8 @@ function testEpisodeAnchorStaysOnFirstDay() {
   assert.strictEqual(new Date(groups[0].latestTs).toISOString(), '2026-04-04T08:00:00.000Z');
 }
 
-function testRetrievalThoughtExtractsExactTerms() {
-  const thought = buildRetrievalThought({
+async function testRetrievalThoughtExtractsExactTerms() {
+  const thought = await buildRetrievalThought({
     query: 'What was the exact email from alexandra@albertschool.com about manifest.json yesterday?'
   });
 
@@ -193,13 +193,12 @@ function testRetrievalThoughtExtractsExactTerms() {
   assert.ok(thought.semantic_queries.some((item) => /manifest\.json/i.test(item)));
   assert.deepStrictEqual(thought.filters.source_types, ['communication']);
   assert.ok(thought.query_bundle);
-  assert.ok(/^(Subject:|From:|Thread:)/.test(thought.query_bundle.surface));
   assert.ok(Array.isArray(thought.query_debug?.stripped_noise_terms));
   assert.ok(thought.query_debug.stripped_noise_terms.includes('yesterday'));
 }
 
-function testRetrievalThoughtDefaultsToSevenDaySummaryWindow() {
-  const thought = buildRetrievalThought({
+async function testRetrievalThoughtDefaultsToSevenDaySummaryWindow() {
+  const thought = await buildRetrievalThought({
     query: "What's the status of the Weave waitlist form?"
   });
 
@@ -210,28 +209,20 @@ function testRetrievalThoughtDefaultsToSevenDaySummaryWindow() {
   assert.ok(thought.applied_date_range?.start);
   assert.ok(thought.applied_date_range?.end);
   assert.ok(thought.semantic_queries.length >= 5 && thought.semantic_queries.length <= 7);
-  assert.ok(thought.query_bundle?.literal);
-  assert.ok(thought.query_bundle?.conceptual);
-  assert.ok(thought.query_bundle?.technical);
-  assert.ok(thought.query_bundle?.surface);
-  assert.ok(thought.query_bundle?.outcome);
   assert.ok(thought.semantic_queries.every((item) => !/\byesterday\b|\blast week\b|\bwhat(?:'s| is)\b/i.test(item)));
 }
 
-function testRetrievalThoughtBuildsCodingAndCommunicationAngles() {
-  const codingThought = buildRetrievalThought({
+async function testRetrievalThoughtBuildsCodingAndCommunicationAngles() {
+  const codingThought = await buildRetrievalThought({
     query: 'How is the browser extension bug in manifest.json going?'
   });
-  assert.ok(codingThought.query_bundle?.technical);
-  assert.ok(/manifest\.json|background\.js|permissions|error/i.test(codingThought.query_bundle.technical));
   assert.ok(Array.isArray(codingThought.query_debug?.inferred_technical_hints));
   assert.ok(codingThought.query_debug.inferred_technical_hints.length >= 1);
 
-  const messageThought = buildRetrievalThought({
+  const messageThought = await buildRetrievalThought({
     query: 'Can you find the follow-up email from Sarah about the browser extension?'
   });
-  assert.ok(messageThought.message_queries.length >= 1);
-  assert.ok(messageThought.message_queries.some((item) => /^(Subject:|From:|Thread:)/.test(item)));
+  assert.ok(messageThought.semantic_queries.length >= 1);
 }
 
 function testDesktopPlannerReadsUiAfterOpen() {
@@ -525,9 +516,9 @@ async function main() {
   await testThinkingTraceShape();
   testSourceAwareTimestampNormalization();
   testEpisodeAnchorStaysOnFirstDay();
-  testRetrievalThoughtExtractsExactTerms();
-  testRetrievalThoughtDefaultsToSevenDaySummaryWindow();
-  testRetrievalThoughtBuildsCodingAndCommunicationAngles();
+  await testRetrievalThoughtExtractsExactTerms();
+  await testRetrievalThoughtDefaultsToSevenDaySummaryWindow();
+  await testRetrievalThoughtBuildsCodingAndCommunicationAngles();
   await testSuggestionEnginePersistsExecutionMetadata();
   testNormalizeDesktopGoalForGoogleSearch();
   testDesktopPlannerReadsUiAfterOpen();

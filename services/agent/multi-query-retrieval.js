@@ -193,7 +193,7 @@ async function retrieveMultiQueryContext({ query, options = {}, limit = 24 } = {
   const resolvedDataSource = requestedDataSource === 'auto'
     ? chooseAutoDataSource(normalizedQuery, dateRange)
     : requestedDataSource;
-  const retrievalThought = options.retrieval_thought || buildRetrievalThought({
+  const retrievalThought = options.retrieval_thought || await buildRetrievalThought({
     query: normalizedQuery,
     mode: options.mode || 'chat',
     candidate: options.candidate || null,
