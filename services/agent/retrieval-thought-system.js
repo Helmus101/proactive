@@ -481,7 +481,7 @@ function buildMessageQueriesFromBundle(bundle, { max = 5 } = {}) {
   return queries.filter(Boolean).slice(0, max);
 }
 
-function buildMultiAngleQueryBundle(baseText, {
+async function buildMultiAngleQueryBundle(baseText, {
   max = 7,
   candidateType = '',
   appScope = [],
@@ -489,89 +489,86 @@ function buildMultiAngleQueryBundle(baseText, {
   mode = 'chat',
   deepScan = false
 } = {}) {
-  const intent = inferIntent(baseText, mode, candidateType);
+  const apiKey = process.env.DEEPSEEK_API_KEY;
   const cleaned = stripEmbeddingWeakTerms(stripQuestionFormatting(baseText));
-  const terms = normalizeTerms(cleaned);
-  const namedEntities = extractNamedEntities(baseText);
-  const entity = namedEntities[0] || terms[0] || '';
-  const clusters = getThematicClusters(baseText);
-  const synonyms = expandSynonyms(terms.slice(0, 3));
+  let finalQueries = [];
 
-  // Decomposition for Cross-Layer
-  const decomposition = {
-    intent,
-    entity,
-    terms,
-    clusters
-  };
+  if (apiKey) {
+    const prompt = `
+You are a retrieval query generator for an AI memory system. 
+Your goal is to take a user query and generate exactly 7 distinct search queries that will be used for vector search across the user's memory (screen captures, browser history, emails, etc.).
 
-  const semanticQueries = [];
+Use Intent Decomposition and Semantic Expansion to cover different angles:
+1. Literal: The cleaned user query.
+2. Decomposed (Sub-intent 1): A specific sub-task or entity mentioned.
+3. Decomposed (Sub-intent 2): Another specific sub-task or entity.
+4. Expanded (Semantic 1): Using synonyms or related concepts.
+5. Expanded (Semantic 2): Broader context or thematic expansion.
+6. Contextual: Search for the likely environment (app, site, or situation).
+7. Thematic: Search for the overarching project or topic.
 
-  // Step 1: Add the literal cleaned query
-  uniquePush(semanticQueries, cleaned, 7);
+Return strict JSON: {"queries": ["query 1", "query 2", "query 3", "query 4", "query 5", "query 6", "query 7"]}
 
-  // Step 2: Add intent-based query
-  if (intent === 'fact') {
-    uniquePush(semanticQueries, `${entity} exact details`.trim(), 7);
-  } else if (intent === 'proactive') {
-    uniquePush(semanticQueries, `${entity} next steps and actions`.trim(), 7);
-  } else {
-    uniquePush(semanticQueries, `${entity} current status and progress`.trim(), 7);
-  }
-
-  // Step 3: Add Cross-Layer queries (3 queries)
-  const crossLayer = buildCrossLayerQueries(decomposition);
-  crossLayer.forEach(q => uniquePush(semanticQueries, q, 7));
-
-  // Step 4: Add synonym-expanded query
-  if (synonyms.length > terms.length) {
-    const extraSynonym = synonyms.find(s => !terms.includes(s.toLowerCase()));
-    if (extraSynonym) {
-      uniquePush(semanticQueries, `${entity} ${extraSynonym}`.trim(), 7);
+User Query: "${baseText.replace(/"/g, '\\"')}"
+`;
+    try {
+      const result = await callLLM(prompt, apiKey, 0.3);
+      if (result && Array.isArray(result.queries)) {
+        finalQueries = result.queries.slice(0, 7);
+      }
+    } catch (e) {
+      console.warn('[retrieval-thought] LLM query generation failed:', e.message);
     }
   }
 
-  // Step 5: Add cluster-based query
-  uniquePush(semanticQueries, `${entity} ${clusters[0].replace(/_/g, ' ')}`.trim(), 7);
-
-  // Ensure exactly 7 queries
-  if (semanticQueries.length < 7) {
-    const filler = [
-      `${entity} recent context`,
-      `${entity} implementation details`,
-      `${entity} related activity`,
-      `${entity} overview`,
-      `${entity} background`
-    ];
+  // Fallback to heuristics if LLM failed or no API key
+  if (finalQueries.length < 7) {
+    const intent = inferIntent(baseText, mode, candidateType);
+    const terms = normalizeTerms(cleaned);
+    const namedEntities = extractNamedEntities(baseText);
+    const entity = namedEntities[0] || terms[0] || '';
+    const clusters = getThematicClusters(baseText);
+    const synonyms = expandSynonyms(terms.slice(0, 3));
+    const decomposition = { intent, entity, terms, clusters };
+    const semanticQueries = [];
+    uniquePush(semanticQueries, cleaned, 7);
+    if (intent === 'fact') uniquePush(semanticQueries, `${entity} exact details`.trim(), 7);
+    else if (intent === 'proactive') uniquePush(semanticQueries, `${entity} next steps and actions`.trim(), 7);
+    else uniquePush(semanticQueries, `${entity} current status and progress`.trim(), 7);
+    buildCrossLayerQueries(decomposition).forEach(q => uniquePush(semanticQueries, q, 7));
+    if (synonyms.length > terms.length) {
+      const extraSynonym = synonyms.find(s => !terms.includes(s.toLowerCase()));
+      if (extraSynonym) uniquePush(semanticQueries, `${entity} ${extraSynonym}`.trim(), 7);
+    }
+    uniquePush(semanticQueries, `${entity} ${clusters[0].replace(/_/g, ' ')}`.trim(), 7);
+    const filler = [`${entity} recent context`, `${entity} implementation details`, `${entity} related activity`, `${entity} overview`, `${entity} background`];
     for (const f of filler) {
-      uniquePush(semanticQueries, f, 7);
       if (semanticQueries.length >= 7) break;
+      uniquePush(semanticQueries, f, 7);
     }
+    finalQueries = semanticQueries.slice(0, 7);
   }
-
-  // Final clamp to exactly 7
-  const finalQueries = semanticQueries.slice(0, 7);
 
   const lexicalTerms = safeUnique([
     ...normalizeTerms(cleaned).slice(0, 10),
     ...extractExactTokens(baseText),
-    ...namedEntities.map((item) => item.toLowerCase())
+    ...extractNamedEntities(baseText).map((item) => item.toLowerCase())
   ], 18).filter((term) => isUsefulLexicalTerm(term)).slice(0, 18);
 
   return {
     query_bundle: {
-      intent,
-      entity,
-      clusters,
+      intent: inferIntent(baseText, mode, candidateType),
+      entity: extractNamedEntities(baseText)[0] || normalizeTerms(cleaned)[0] || '',
+      clusters: getThematicClusters(baseText),
       semantic_queries: finalQueries
     },
     semantic_queries: finalQueries,
-    message_queries: [], // Simplified for now as per ticket focus
+    message_queries: [],
     lexical_terms: lexicalTerms,
     debug: {
-      intent,
-      clusters,
-      entities: namedEntities
+      intent: inferIntent(baseText, mode, candidateType),
+      clusters: getThematicClusters(baseText),
+      entities: extractNamedEntities(baseText)
     }
   };
 }
@@ -809,7 +806,9 @@ function buildMessageQueries(baseText, { max = 5, candidateType = '' } = {}) {
   return queries.filter(Boolean).slice(0, max);
 }
 
-function buildRetrievalThought({
+const { callLLM } = require('./intelligence-engine');
+
+async function buildRetrievalThought({
   query = '',
   mode = 'chat',
   candidate = null,
@@ -844,7 +843,7 @@ function buildRetrievalThought({
   
   const requiresDeepContext = /\b(relationship|pattern|habit|preference|long-term|study habits|multi-hop|recurring|theme|trend|habitual|regularly|typical)\b/i.test(mergedText || query);
 
-  const structuredQueries = buildMultiAngleQueryBundle(mergedText || query, {
+  const structuredQueries = await buildMultiAngleQueryBundle(mergedText || query, {
     max: 7,
     candidateType,
     appScope: apps,

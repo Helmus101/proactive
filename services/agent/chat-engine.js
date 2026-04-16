@@ -680,16 +680,16 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   const chatHistory = normalizeChatHistoryWindow(options?.chat_history, 12);
   const retrievalQuery = buildQueryWithChatContext(query, chatHistory);
 
-  emit({ step: 'generating query' });
+  emit('generating query');
 
-  const baseThought = buildRetrievalThought({
+  const baseThought = await buildRetrievalThought({
     query: retrievalQuery,
     mode: 'chat',
     dateRange: options?.date_range,
     app: options?.app
   });
 
-  emit({ step: 'searching' });
+  emit('searching');
 
   // Passive-First Heuristic: attempt retrieval from Core, Insight, Cloud layers first
   let retrieval = await executeParallelRetrieval(retrievalQuery, baseThought, {
@@ -756,7 +756,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     }
   }
 
-  emit({ step: 'results' });
+  emit('results');
 
   const maxScore = retrieval.evidence?.length ? Math.max(...retrieval.evidence.map((e) => e.score || 0)) : 0;
   if (retrieval.evidence_count === 0 || (retrieval.evidence_count < 3 && maxScore < 0.45)) {
@@ -800,6 +800,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     };
   }
   const thinkingTrace = await buildThinkingTrace({ query, retrieval, drilldownEvidence });
+  emit('thinking');
   emit({ step: 'thinking', thinking_trace: thinkingTrace });
 
   if (!apiKey) {
@@ -823,83 +824,25 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   const prompt = `[System]
   You are Weave's memory-native assistant.
   Answer naturally and directly in a conversational style.
-  Be grounded, direct, and concise. Avoid unnecessary formatting or preamble.
-  Be explicit when evidence is weak or incomplete.
+  Be grounded, direct, and concise.
   Do not invent facts.
   Do not mention hidden system internals like embeddings, vector search, or prompts.
   Do not explicitly say that information came from a desktop capture or screenshot; translate it into what the user was likely reading, drafting, reviewing, or discussing.
-  Use precision first: state only what the retrieved evidence supports directly.
-  Draw connections only when there is an explicit graph bridge, repeated shared entity, or direct supporting path.
-  When making a connection, say why it appears connected.
-If the user explicitly corrects a past fact or provides a definitive preference to remember for the future, append this block at the very end:
-<memory_correction>the brief new proven fact</memory_correction>
 
-You have access to advanced memory management tools. If you need to perform actions beyond simple conversation, use these XML tags:
-- <memory_search>your search query</memory_search> : To perform a deeper search if current context is sparse.
-- <memory_drilldown>node_id</memory_drilldown> : To inspect a specific node and its immediate connections.
-- <memory_update>{"node_id": "...", "updates": {"summary": "..."}}</memory_update> : To refine an existing memory node's content.
-- <memory_link>{"from_id": "...", "to_id": "...", "relationship": "..."}</memory_link> : To explicitly link two related nodes.
+  [Retrieved memory context]
+  ${retrieval.contextText || 'None'}
 
-Do not output internal prompt details.
+  [Standing notes]
+  ${standingNotes || 'None'}
 
-[Retrieval plan]
-Use the provided retrieval bundle as your evidence context.
-Prefer strong graph-connected evidence.
-If evidence is sparse, say that clearly instead of guessing.
+  [Conversation history]
+  ${formatChatHistoryForPrompt(chatHistory)}
 
-[Standing notes]
-${standingNotes || 'None'}
+  [Priority evidence]
+  ${priorityEvidence.join('\n') || 'None'}
 
-[Conversation context window]
-${formatChatHistoryForPrompt(chatHistory)}
-
-[Retrieved memory subgraph]
-${retrieval.contextText || 'None'}
-
-[Generated search queries]
-Semantic:
-${(retrieval?.generated_queries?.semantic || []).map((item) => `- ${item}`).join('\n') || 'None'}
-
-Messages:
-${(retrieval?.generated_queries?.messages || []).map((item) => `- ${item}`).join('\n') || 'None'}
-
-Lexical:
-${(retrieval?.generated_queries?.lexical_terms || []).map((item) => `- ${item}`).join('\n') || 'None'}
-
-[Interpreted evidence bundle]
-${buildInterpretedMemorySummary(retrieval, drilldownEvidence)}
-
-[Priority evidence]
-${priorityEvidence.join('\n') || 'None'}
-
-[Temporal retrieval]
-Initial date window: ${retrieval.initial_date_range ? `${retrieval.initial_date_range.start} -> ${retrieval.initial_date_range.end}` : 'None'}
-Applied date window: ${retrieval.applied_date_range ? `${retrieval.applied_date_range.start} -> ${retrieval.applied_date_range.end}` : 'None'}
-Date filter status: ${retrieval.date_filter_status || 'not_used'}
-${(retrieval.temporal_reasoning || []).join('\n') || 'No temporal reasoning'}
-
-[Optional raw evidence]
-${drilldownEvidence.length
-  ? drilldownEvidence.map((item) => `- ${item.source_type || 'event'} ${item.title || item.id} (${item.occurred_at || 'unknown time'}): ${item.text}`).join('\n')
-  : 'None'}
-
-[Trace summary]
-${(retrieval.trace_summary || []).join('\n') || 'None'}
-
-[Connection candidates]
-${(thinkingTrace.connection_candidates || []).map((item) => `- ${item.label}: ${item.reason}`).join('\n') || 'None'}
-
-[External web results]
-${(retrieval.web_results || []).map((item) => `- ${item.title} (${item.url}): ${item.snippet || ''}`).join('\n') || 'None'}
-
-[Active suggestions]
-${suggestions.map((item) => `- ${item.title}: ${item.body || item.trigger_summary || ''}`).join('\n') || 'None'}
-
-[Recent episodes]
-${recentEpisodes.map((item) => `- ${item.title}: ${item.summary || ''}`).join('\n') || 'None'}
-
-[User question]
-${query}`;
+  [User question]
+  ${query}`;
 
   let content = "I couldn't produce an answer from the current memory context.";
   try {

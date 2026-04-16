@@ -55,6 +55,14 @@ function normalizeDateRange(dateRange) {
 function rowMatchesFilters(row, filters = {}) {
   if (row.id === 'global_core' || row.layer === 'core') return true;
 
+  if (filters.prioritize_screen_capture) {
+    const isBrowserHistory = String(row.app || '').toLowerCase().includes('browser') || 
+                            String(row.app || '').toLowerCase().includes('chrome') || 
+                            String(row.source_type || '').toLowerCase().includes('history') ||
+                            row.source_type === 'visit';
+    if (isBrowserHistory) return false;
+  }
+
   const appFilter = Array.isArray(filters.app) ? filters.app : (filters.app ? [filters.app] : []);
   if (appFilter.length) {
     const app = String(row.app || '').toLowerCase();
@@ -423,105 +431,6 @@ async function vectorSearchNodes(nodeRows, semanticQueries = []) {
   return rankings;
 }
 
-async function lexicalSearchDocs(terms = [], filters = {}) {
-  if (!terms.length) return [];
-  const query = terms.map((term) => `"${String(term).replace(/"/g, '""')}"`).join(' OR ');
-  const rows = await db.allQuery(
-    `SELECT d.doc_id, d.source_type, d.node_id, d.event_id, d.app, d.timestamp, d.text, d.metadata,
-            bm25(retrieval_docs_fts) AS bm25_score
-     FROM retrieval_docs_fts
-     JOIN retrieval_docs d ON d.doc_id = retrieval_docs_fts.doc_id
-     WHERE retrieval_docs_fts MATCH ?
-     LIMIT 120`,
-    [query]
-  ).catch(() => []);
-
-  return rows
-    .map((row) => {
-      const metadata = asObj(row.metadata);
-      return {
-        key: row.doc_id,
-        source_type: row.source_type,
-        node_id: row.node_id,
-        event_id: row.event_id,
-        layer: metadata.layer || metadata.type || row.source_type,
-        subtype: metadata.subtype || null,
-        source_type_group: metadata.source_type_group || metadata.envelope?.type_group || null,
-        anchor_at: metadata.anchor_at || row.timestamp,
-        latest_activity_at: metadata.latest_activity_at || row.timestamp,
-        timestamp: row.timestamp,
-        app: row.app,
-        text: row.text,
-        activity_summary: metadata.activity_summary || metadata.envelope?.metadata?.activity_summary || null,
-        content_type: metadata.content_type || metadata.envelope?.metadata?.content_type || null,
-        uncertainty: metadata.capture_uncertainty || metadata.envelope?.metadata?.capture_uncertainty || null,
-        source_refs: metadata.source_refs || [],
-        base_score: Number((Math.abs(row.bm25_score || 0) / (Math.abs(row.bm25_score || 0) + 12.0)).toFixed(6)),
-        match_reason: `lexical:${terms.join(',')}`
-      };
-    })
-    .filter((row) => rowMatchesFilters(row, filters))
-    .sort((a, b) => (b.base_score || 0) - (a.base_score || 0));
-}
-
-async function lexicalSearchRawEvents(terms = [], filters = {}, limit = 120) {
-  const cleanTerms = (Array.isArray(terms) ? terms : [])
-    .map((t) => String(t || '').trim())
-    .filter((t) => t.length >= 2)
-    .slice(0, 12);
-  if (!cleanTerms.length) return [];
-
-  const clauses = cleanTerms.map(() => `(COALESCE(redacted_text, text, raw_text, '') LIKE ? OR COALESCE(title, '') LIKE ?)` ).join(' OR ');
-  const params = cleanTerms.flatMap((t) => {
-    const like = `%${t}%`;
-    return [like, like];
-  });
-
-  const rows = await db.allQuery(
-    `SELECT id, type, source_type, source, app, timestamp, occurred_at, date, title, text, redacted_text, raw_text, metadata
-     FROM events
-     WHERE ${clauses}
-     ORDER BY COALESCE(occurred_at, timestamp) DESC
-     LIMIT ?`,
-    [...params, Math.max(30, Number(limit || 120))]
-  ).catch(() => []);
-
-  return rows
-    .map((row) => {
-      const metadata = asObj(row.metadata);
-      const body = String(row.redacted_text || row.text || row.raw_text || '').slice(0, 1200);
-      const header = [row.title, row.app, row.source].filter(Boolean).join(' • ');
-      const combined = [header, body].filter(Boolean).join('\n');
-      const exactHits = countExactTermHits(combined, cleanTerms);
-      const ts = parseTs(row.occurred_at || row.timestamp);
-      const recencyBoost = ts ? Math.max(0, 1 - ((Date.now() - ts) / (1000 * 60 * 60 * 24 * 30))) : 0;
-      return {
-        key: `event:${row.id}`,
-        source_type: row.source_type || row.type || 'event',
-        node_id: null,
-        event_id: row.id,
-        layer: 'event',
-        subtype: (row.source_type || row.type || '').toLowerCase(),
-        source_type_group: metadata.source_type_group || (String(row.source_type || row.type || '').toLowerCase().includes('screen') ? 'desktop' : null),
-        anchor_at: row.occurred_at || row.timestamp,
-        latest_activity_at: row.occurred_at || row.timestamp,
-        timestamp: row.occurred_at || row.timestamp,
-        app: row.app || null,
-        text: combined,
-        activity_summary: metadata.activity_summary || null,
-        content_type: metadata.content_type || null,
-        uncertainty: metadata.capture_uncertainty || null,
-        source_refs: [row.id],
-        base_score: Number((Math.min(1.4, (exactHits * 0.22) + recencyBoost)).toFixed(6)),
-        match_reason: `lexical_event:${cleanTerms.join(',')}`
-      };
-    })
-    .filter((row) => row.base_score > 0)
-    .filter((row) => rowMatchesFilters(row, filters))
-    .sort((a, b) => (b.base_score || 0) - (a.base_score || 0))
-    .slice(0, Math.max(18, Math.min(120, Number(limit || 120))));
-}
-
 async function querylessRecentDocs(filters = {}, limit = 24) {
   const rows = await db.allQuery(
     `SELECT doc_id, source_type, node_id, event_id, app, timestamp, text, metadata
@@ -657,25 +566,15 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
 function alphaBlendedSearch(lexicalRanking, semanticRankings, alpha = 0.45) {
   const scores = new Map();
   const allSemantic = [].concat(...semanticRankings);
-  const keys = new Set([
-    ...lexicalRanking.map((r) => r.key),
-    ...allSemantic.map((r) => r.key)
-  ]);
-
-  for (const key of keys) {
-    const lex = lexicalRanking.find((r) => r.key === key);
-    const sem = allSemantic.filter((r) => r.key === key).sort((a, b) => b.base_score - a.base_score)[0];
-
-    const sScore = sem ? sem.base_score : 0;
-    const lScore = lex ? lex.base_score : 0;
-
-    // Alpha-blending: sScore is cosine (0-1), lScore is normalized BM25 (0-1)
-    const combined = (alpha * sScore) + ((1 - alpha) * lScore);
-
-    if (combined > 0) {
+  
+  // Since lexicalRanking is now always empty, this simplifies to semantic-only max merge
+  for (const sem of allSemantic) {
+    const key = sem.key;
+    const prev = scores.get(key);
+    if (!prev || sem.base_score > prev.score) {
       scores.set(key, {
-        row: sem || lex,
-        score: combined
+        row: sem,
+        score: sem.base_score
       });
     }
   }
@@ -706,7 +605,7 @@ async function buildHybridGraphRetrieval({
     }
   }
 
-  const basePlan = options.retrieval_thought || buildRetrievalThought({
+  const basePlan = options.retrieval_thought || await buildRetrievalThought({
     query,
     mode: options.mode || 'chat',
     candidate: options.candidate || null,
@@ -746,8 +645,8 @@ async function buildHybridGraphRetrieval({
     finalFilters = { ...finalFilters, passive_only: true };
   }
 
-  const lexicalRanking = await lexicalSearchDocs(retrievalPlan.lexical_terms || [], finalFilters);
-  const rawEventLexicalRanking = await lexicalSearchRawEvents(retrievalPlan.lexical_terms || [], finalFilters, 120);
+  const lexicalRanking = [];
+  const rawEventLexicalRanking = [];
   const semanticRankings = retrievalPlan.mode === 'queryless'
     ? []
     : await vectorSearchNodes(finalNodeRows, retrievalPlan.semantic_queries || retrievalPlan.search_queries || []);
