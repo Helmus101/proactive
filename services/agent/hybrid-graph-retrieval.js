@@ -11,7 +11,7 @@ const {
 
 const DEFAULT_SEED_LIMIT = 5;
 const DEFAULT_HOP_LIMIT = 2;
-const MAX_EXPANDED = 10;
+const MAX_EXPANDED = 18;
 
 const LAYER_RANKS = {
   'core': 5,
@@ -192,14 +192,14 @@ async function coreDownRanking(nodeRows = [], retrievalPlan = {}, limit = 80) {
     return [id, base];
   }));
 
-  for (let depth = 1; depth <= 2 && frontier.length; depth++) {
+  for (let depth = 1; depth <= 3 && frontier.length; depth++) {
     const placeholders = frontier.map(() => '?').join(',');
     const edges = await db.allQuery(
       `SELECT from_node_id, to_node_id, weight, evidence_count, edge_type, trace_label
        FROM memory_edges
        WHERE from_node_id IN (${placeholders}) OR to_node_id IN (${placeholders})
        ORDER BY weight DESC, evidence_count DESC
-       LIMIT 320`,
+       LIMIT 400`,
       [...frontier, ...frontier]
     ).catch(() => []);
     const next = [];
@@ -447,7 +447,7 @@ async function lexicalSearchDocs(terms = [], filters = {}) {
         content_type: metadata.content_type || metadata.envelope?.metadata?.content_type || null,
         uncertainty: metadata.capture_uncertainty || metadata.envelope?.metadata?.capture_uncertainty || null,
         source_refs: metadata.source_refs || [],
-        base_score: 1 / (1 + Math.exp(Number(row.bm25_score || 0) / 4.0)),
+        base_score: Number((Math.abs(row.bm25_score || 0) / (Math.abs(row.bm25_score || 0) + 12.0)).toFixed(6)),
         match_reason: `lexical:${terms.join(',')}`
       };
     })
@@ -769,7 +769,14 @@ async function buildHybridGraphRetrieval({
   const seeds = reranked.slice(0, retrievalPlan.seed_limit);
   // canonical list of seed node ids/keys used for tracing and logging
   const seedNodeIds = Array.from(new Set(seeds.map((s) => (s.node_id || s.event_id || s.key)).filter(Boolean))).slice(0, retrievalPlan.seed_limit);
-  const graph = await expandGraph(seeds, retrievalPlan.hop_limit, MAX_EXPANDED);
+  
+  // Ensure recursive expansion from Core nodes even if not in primary seeds
+  const coreNodesForExpansion = finalNodeRows
+    .filter(r => r.layer === 'core')
+    .slice(0, 6)
+    .map(r => ({ ...r, node_id: r.id }));
+    
+  const graph = await expandGraph([...seeds, ...coreNodesForExpansion], retrievalPlan.hop_limit, MAX_EXPANDED);
 
   // Spiral retrieval ordering: Insights -> Semantics -> Episodes
   let evidenceRows = reranked.slice(0, 18);
