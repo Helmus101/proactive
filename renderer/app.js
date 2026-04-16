@@ -1335,161 +1335,12 @@ class WeaveApp {
     }
 
     setupSettings() {
-        const darkModeToggle = document.getElementById('dark-mode-toggle');
-        darkModeToggle?.addEventListener('click', () => {
-            darkModeToggle.classList.toggle('active');
-            const nextTheme = darkModeToggle.classList.contains('active') ? 'dark' : 'light';
-            localStorage.setItem('theme', nextTheme);
-            this.applyTheme(nextTheme);
-            this.showToast(`Theme: ${nextTheme}`);
-        });
-
-        const compactModeToggle = document.getElementById('compact-view-toggle');
-        compactModeToggle?.addEventListener('click', () => {
-            compactModeToggle.classList.toggle('active');
-            this.compactMode = compactModeToggle.classList.contains('active');
-            localStorage.setItem('compactMode', String(this.compactMode));
-            this.applyCompactMode();
-        });
-
-        const notificationsToggle = document.getElementById('notifications-toggle');
-        notificationsToggle?.addEventListener('click', async () => {
-            notificationsToggle.classList.toggle('active');
-            this.notificationsEnabled = notificationsToggle.classList.contains('active');
-            localStorage.setItem('notificationsEnabled', String(this.notificationsEnabled));
-            if (this.notificationsEnabled && 'Notification' in window) {
-                try { await Notification.requestPermission(); } catch (_) {}
-            }
-            this.showToast(`Notifications ${this.notificationsEnabled ? 'enabled' : 'disabled'}`);
-        });
-
-        const soundToggle = document.getElementById('sound-toggle');
-        soundToggle?.addEventListener('click', () => {
-            soundToggle.classList.toggle('active');
-            this.soundEnabled = soundToggle.classList.contains('active');
-            localStorage.setItem('soundEnabled', String(this.soundEnabled));
-            if (this.soundEnabled) this.playUiSound('toggle');
-        });
-
-        const captureToggle = document.getElementById('capture-toggle');
-        captureToggle?.addEventListener('click', async () => {
-            captureToggle.classList.toggle('active');
-            const enabled = captureToggle.classList.contains('active');
+        this.captureToggle = document.getElementById("capture-toggle");
+        this.captureToggle?.addEventListener("click", async () => {
+            this.captureToggle.classList.toggle("active");
+            const enabled = this.captureToggle.classList.contains("active");
             await this.setDesktopCaptureEnabled(enabled);
         });
-
-        const formality = document.getElementById('formality-slider');
-        const verbosity = document.getElementById('verbosity-slider');
-
-        [formality, verbosity].forEach((slider) => {
-            slider?.addEventListener('input', () => this.updatePersonalityPreview());
-        });
-
-        const saveSuggestionProviderSettings = async () => {
-            const provider = this.suggestionProviderSelect?.value || 'deepseek';
-            const payload = {
-                provider,
-                model: String(this.suggestionModelInput?.value || '').trim(),
-                baseUrl: String(this.suggestionBaseUrlInput?.value || '').trim(),
-                apiKey: String(this.suggestionApiKeyInput?.value || '').trim()
-            };
-            try {
-                const saved = await window.electronAPI.saveSuggestionLLMSettings(payload);
-                this.renderSuggestionProviderStatus(saved);
-                this.showToast(`Suggestion provider saved: ${saved?.provider || provider}`);
-            } catch (error) {
-                console.error('Failed to save suggestion provider settings:', error);
-                this.showToast('Failed to save suggestion provider');
-            }
-        };
-        const refreshSuggestionProviderFields = () => {
-            const provider = this.suggestionProviderSelect?.value || 'deepseek';
-            if (this.suggestionBaseUrlInput) this.suggestionBaseUrlInput.disabled = provider !== 'ollama';
-        };
-        this.suggestionProviderSelect?.addEventListener('change', saveSuggestionProviderSettings);
-        this.suggestionProviderSelect?.addEventListener('change', refreshSuggestionProviderFields);
-        this.suggestionModelInput?.addEventListener('change', saveSuggestionProviderSettings);
-        this.suggestionBaseUrlInput?.addEventListener('change', saveSuggestionProviderSettings);
-        this.suggestionApiKeyInput?.addEventListener('change', saveSuggestionProviderSettings);
-        refreshSuggestionProviderFields();
-
-        document.getElementById('google-connect-btn')?.addEventListener('click', async () => {
-            try {
-                await window.electronAPI.startGoogleAuth();
-                this.showToast('Google connected');
-                await this.loadGoogleStatus();
-            } catch (error) {
-                console.error('Google auth failed:', error);
-                this.showToast('Google connection failed');
-            }
-        });
-
-        document.getElementById('sign-out-link')?.addEventListener('click', () => {
-            localStorage.clear();
-            window.location.reload();
-        });
-
-        document.getElementById('delete-all-data-btn')?.addEventListener('click', async () => {
-            const confirmed = window.confirm('Delete all local data and relaunch the app?');
-            if (!confirmed) return;
-            try {
-                await window.electronAPI.deleteAllSettings();
-            } catch (error) {
-                console.error('Delete all data failed:', error);
-                this.showToast('Delete all data failed');
-            }
-        });
-
-        document.getElementById('clear-all-tasks-btn')?.addEventListener('click', async () => {
-            const confirmed = window.confirm('Delete all suggestions?');
-            if (!confirmed) return;
-            try {
-                await window.electronAPI.clearSuggestions();
-                await window.electronAPI.savePersistentTodos([]);
-                this.todos = [];
-                this.expandedCards.clear();
-                this.renderSuggestions();
-                this.showToast('All suggestions deleted');
-            } catch (error) {
-                console.error('Failed to clear all suggestions:', error);
-                this.showToast('Failed to clear suggestions');
-            }
-        });
-
-        this.desktopPromptRunButton?.addEventListener('click', () => this.runDesktopPromptTask());
-        this.desktopPromptInput?.addEventListener('keydown', (event) => {
-            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                event.preventDefault();
-                this.runDesktopPromptTask();
-            }
-        });
-        document.getElementById('allow-full-control-btn')?.addEventListener('click', () => this.openFullControlSettings());
-        document.getElementById('extension-refresh-btn')?.addEventListener('click', () => this.loadExtensionStatus());
-        this.voiceControlToggle?.addEventListener('click', async () => {
-            const nextEnabled = !this.voiceControlToggle.classList.contains('active');
-            await this.setVoiceControlEnabled(nextEnabled);
-        });
-
-        document.getElementById('history-refresh-btn')?.addEventListener('click', () => this.loadBrowserHistory());
-        document.getElementById('capture-now-btn')?.addEventListener('click', () => this.captureNow());
-        document.getElementById('memory-refresh-btn')?.addEventListener('click', () => this.loadMemoryGraphStatus());
-        document.getElementById('search-memory-btn')?.addEventListener('click', () => this.searchMemoryGraph());
-        this.memorySearchInput?.addEventListener('keydown', (event) => {
-            if (event.key === 'Enter') this.searchMemoryGraph();
-        });
-
-        document.getElementById('memory-detail-modal')?.addEventListener('click', (event) => {
-            if (event.target?.id === 'memory-detail-modal') this.closeMemoryModal();
-        });
-
-        document.getElementById('modal-copy-btn')?.addEventListener('click', () => {
-            const raw = document.getElementById('modal-memory-raw')?.textContent || '';
-            navigator.clipboard.writeText(raw);
-            this.showToast('Memory JSON copied');
-        });
-
-        this.syncSettingsUI();
-        this.updatePersonalityPreview();
     }
 
     syncSettingsUI() {
@@ -1641,27 +1492,13 @@ class WeaveApp {
                 agentMode: true
             });
             const summary = result?.result || 'desktop action completed';
-            this.setDesktopPromptStatus(`Completed: ${summary}`);
-            this.setDesktopTestStatus(`Completed: ${summary}`);
-            this.showToast(`Desktop prompt completed: ${summary}`);
-        } catch (error) {
-            console.error('Desktop prompt failed:', error);
-            const failure = error?.failure_reason || error?.error || error?.message || 'Unknown failure';
-            this.setDesktopPromptStatus(`Failed: ${failure}`);
-            this.setDesktopTestStatus(`Failed: ${failure}`);
-            this.showToast(`Desktop prompt failed: ${failure}`);
-        } finally {
-            if (this.desktopPromptRunButton) {
-                this.desktopPromptRunButton.disabled = false;
-                this.desktopPromptRunButton.textContent = 'Run Prompt';
-            }
-        }
+    syncSettingsUI() {
+        this.captureToggle?.classList.toggle("active", this.desktopCaptureEnabled);
     }
-
-    handlePlannerStep(payload = {}) {
-        if (!this.desktopTestStatus || !payload) return;
-        this.updateDiscoveryOrbit(payload);
-        if (payload.phase === 'thinking') {
+            this.showToast(`Desktop prompt failed: ${failure}`);
+    async loadSettingsData() {
+        this.captureToggle?.classList.toggle("active", this.desktopCaptureEnabled);
+    }
             if (Date.now() - this.lastPlannerStatusAt < 400) return;
             this.lastPlannerStatusAt = Date.now();
             this.setDesktopTestStatus('Thinking through the next desktop action…');
@@ -1707,7 +1544,7 @@ class WeaveApp {
 
     updateDiscoveryOrbit(payload = {}) {
         if (!this.discoveryOrbitContainer) return;
-        const isThinking = payload.phase === "thinking" || payload.stage === "thinking" || payload.status === "thinking";
+        const isThinking = false;
         if (isThinking) {
             this.discoveryOrbitContainer.classList.remove("hidden");
             if (this.discoveryOrbitLabel) {

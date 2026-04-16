@@ -20,18 +20,7 @@
 
     <div class="app-shell">
     
-    <!-- Discovery Orbit Overlay -->
-    <div id="discovery-orbit-container" class="discovery-orbit-container hidden">
-        <div class="discovery-orbit">
-            <div class="orbit-ring"></div>
-            <div class="orbit-ring"></div>
-            <div class="orbit-ring"></div>
-            <div class="orbit-center">
-                <span class="material-symbols-outlined thinking-icon">psychology</span>
-            </div>
-        </div>
-        <div class="orbit-label" id="discovery-orbit-label">Discovery Thinking...</div>
-    </div>
+    <!-- Discovery Orbit Overlay removed -->
 
     <!-- Top Bar -->
     <header class="top-bar">
@@ -129,252 +118,19 @@
             
             <!-- ───── SETTINGS VIEW ───── -->
             <section id="settings-view" class="view hidden">
-
-                <!-- Appearance -->
                 <div class="settings-section">
                     <div class="settings-card">
                         <div class="settings-row">
                             <div>
-                                <div class="settings-label">Dark Mode</div>
-                                <div class="settings-description">Switch between light and dark themes</div>
+                                <div class="settings-label">Enable Screenshots</div>
+                                <div class="settings-description">Allow Weave to capture periodic screenshots for memory enrichment.</div>
                             </div>
                             <div class="settings-control">
-                                <div class="toggle-switch" id="dark-mode-toggle"></div>
-                            </div>
-                        </div>
-                        <div class="settings-row">
-                            <div>
-                                <div class="settings-label">Compact View</div>
-                                <div class="settings-description">Show more content with reduced spacing</div>
-                            </div>
-                            <div class="settings-control">
-                                <div class="toggle-switch" id="compact-view-toggle"></div>
-                            </div>
-                        </div>
-                        <div class="settings-row">
-                            <div>
-                                <div class="settings-label">Notifications</div>
-                                <div class="settings-description">Desktop notifications for key updates</div>
-                            </div>
-                            <div class="settings-control">
-                                <div class="toggle-switch" id="notifications-toggle"></div>
-                            </div>
-                        </div>
-                        <div class="settings-row">
-                            <div>
-                                <div class="settings-label">Sound</div>
-                                <div class="settings-description">Play sounds for actions and alerts</div>
-                            </div>
-                            <div class="settings-control">
-                                <div class="toggle-switch" id="sound-toggle"></div>
-                            </div>
-                        </div>
-                        <div class="settings-row">
-                            <div>
-                                <div class="settings-label">Desktop Capture</div>
-                                <div class="settings-description" id="capture-status-text">Capture status loading…</div>
-                            </div>
-                            <div class="settings-control" style="display:flex; gap:8px; align-items:center;">
                                 <div class="toggle-switch" id="capture-toggle"></div>
-                                <button class="ghost-button" id="capture-now-btn">Capture Now</button>
-                            </div>
-                        </div>
-                        <div class="settings-row" style="display:block;">
-                            <div>
-                                <div class="settings-label">Chat Tone</div>
-                                <div class="settings-description">Adjust how formal and detailed responses should be.</div>
-                            </div>
-                            <div style="margin-top:10px; display:flex; flex-direction:column; gap:8px;">
-                                <label class="settings-description" for="formality-slider">Formality: <span id="formality-value">50%</span></label>
-                                <input id="formality-slider" type="range" min="0" max="100" value="50" />
-                                <label class="settings-description" for="verbosity-slider">Verbosity: <span id="verbosity-value">50%</span></label>
-                                <input id="verbosity-slider" type="range" min="0" max="100" value="50" />
-                            </div>
-                            <div class="settings-description" id="preview-message" style="margin-top:8px;">"I can help sort out what matters next."</div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Suggestion Provider -->
-                <div class="settings-section">
-                    <div class="settings-card">
-                        <div class="settings-row">
-                            <div>
-                                <div class="settings-label">Suggestion Provider</div>
-                                <div class="settings-description">Choose which model generates suggestions</div>
-                            </div>
-                            <div class="settings-control">
-                                <select id="suggestion-llm-provider">
-                                    <option value="deepseek">DeepSeek</option>
-                                    <option value="ollama">Ollama</option>
-                                </select>
-                            </div>
-                        </div>
-                        <div class="settings-row">
-                            <div>
-                                <div class="settings-label">Model</div>
-                                <div class="settings-description">Model name for current provider</div>
-                            </div>
-                            <div class="settings-control">
-                                <input id="suggestion-llm-model" type="text" placeholder="deepseek-chat" />
-                            </div>
-                        </div>
-                        <div class="settings-row">
-                            <div>
-                                <div class="settings-label">Ollama Base URL</div>
-                                <div class="settings-description">Used when provider is Ollama</div>
-                            </div>
-                            <div class="settings-control">
-                                <input id="suggestion-llm-base-url" type="text" placeholder="http://127.0.0.1:11434" />
-                            </div>
-                        </div>
-                        <div class="settings-row">
-                            <div>
-                                <div class="settings-label">Provider API Key</div>
-                                <div class="settings-description">Optional for Ollama, required for DeepSeek</div>
-                            </div>
-                            <div class="settings-control">
-                                <input id="suggestion-llm-api-key" type="password" placeholder="API key" />
-                            </div>
-                        </div>
-                        <div class="settings-row">
-                            <div class="settings-description" id="suggestion-llm-status">Suggestion provider settings not loaded</div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Access & Voice -->
-                <div class="settings-section">
-                    <div class="settings-card">
-                        <div class="settings-row">
-                            <div>
-                                <div class="settings-label">Full Control</div>
-                                <div class="settings-description" id="extension-status-text">Checking Accessibility permission...</div>
-                            </div>
-                            <div class="settings-control" style="display:flex; gap:8px;">
-                                <button class="ghost-button" id="allow-full-control-btn">Allow Full Control</button>
-                                <button class="ghost-button" id="extension-refresh-btn">Refresh</button>
-                            </div>
-                        </div>
-                        <div class="settings-row">
-                            <div>
-                                <div class="settings-label">Perception Mode</div>
-                                <div class="settings-description" id="desktop-perception-mode">Current mode: loading…</div>
-                            </div>
-                        </div>
-                        <div class="settings-row">
-                            <div>
-                                <div class="settings-label">Voice Control</div>
-                                <div class="settings-description" id="voice-control-status">Loading voice control status…</div>
-                                <div class="settings-description" id="voice-shortcut-value"></div>
-                            </div>
-                            <div class="settings-control">
-                                <div class="toggle-switch" id="voice-control-toggle"></div>
-                            </div>
-                        </div>
-                        <div class="settings-row" style="display:block;">
-                            <div>
-                                <div class="settings-label">Desktop Prompt</div>
-                                <div class="settings-description" id="desktop-prompt-status">Run a direct desktop command.</div>
-                            </div>
-                            <div style="margin-top:10px; display:flex; gap:8px;">
-                                <textarea id="desktop-prompt-input" rows="3" placeholder="Open Gmail and draft a reply..." style="flex:1;"></textarea>
-                                <button class="ghost-button" id="run-desktop-prompt-btn">Run Prompt</button>
-                            </div>
-                            <div class="settings-description" id="desktop-test-status" style="margin-top:8px;">Idle</div>
-                        </div>
-                        <div id="desktop-control-timeline" class="history-list" style="margin-top:12px;"></div>
-                    </div>
-                </div>
-
-                <!-- Data & Search -->
-                <div class="settings-section">
-                    <div class="settings-card">
-                        <div class="settings-row">
-                            <div>
-                                <div class="settings-label">Google Workspace</div>
-                                <div class="settings-description" id="google-status">Not connected</div>
-                            </div>
-                            <div class="settings-control" style="display:flex; gap:8px;">
-                                <button class="ghost-button" id="google-connect-btn">Connect</button>
-                                <button class="ghost-button" id="sign-out-link">Sign out</button>
-                            </div>
-                        </div>
-                        <div class="settings-row">
-                            <div>
-                                <div class="settings-label">Memory Processing</div>
-                                <div class="settings-description">Graph ingestion and indexing status</div>
-                            </div>
-                            <div class="settings-control" style="display:flex; gap:8px; align-items:center;">
-                                <span class="settings-description">Events: <strong id="mem-count-events">0</strong></span>
-                                <span class="settings-description">Nodes: <strong id="mem-count-nodes">0</strong></span>
-                                <span class="settings-description">Edges: <strong id="mem-count-edges">0</strong></span>
-                                <span class="settings-description inactive" id="mem-processing-status">Idle</span>
-                            </div>
-                        </div>
-                        <div class="settings-row">
-                            <div>
-                                <div class="settings-label">Browser History</div>
-                                <div class="settings-description" id="settings-history-meta">Recent browsing context</div>
-                            </div>
-                            <div class="settings-control">
-                                <button class="ghost-button" id="history-refresh-btn">Refresh</button>
-                            </div>
-                        </div>
-                        <div id="settings-history-list" class="history-list"></div>
-
-                        <div class="settings-row" style="margin-top:12px;">
-                            <div>
-                                <div class="settings-label">Screen Captures</div>
-                                <div class="settings-description">Latest OCR-based captures</div>
-                            </div>
-                        </div>
-                        <div id="screen-captures-list" class="history-list"></div>
-
-                        <div class="settings-row" style="margin-top:12px;">
-                            <div>
-                                <div class="settings-label">Memory Search</div>
-                                <div class="settings-description">Search graph + raw evidence</div>
-                            </div>
-                            <div class="settings-control" style="display:flex; gap:8px; align-items:center;">
-                                <select id="memory-filter-type">
-                                    <option value="all">All</option>
-                                    <option value="core">Core</option>
-                                    <option value="insight">Insight</option>
-                                    <option value="semantic">Semantic</option>
-                                    <option value="episode">Episode</option>
-                                    <option value="raw_event">Raw</option>
-                                </select>
-                                <button class="ghost-button" id="memory-refresh-btn">Refresh</button>
-                            </div>
-                        </div>
-                        <div style="display:flex; gap:8px; margin-top:8px;">
-                            <input id="memory-search-input" type="text" placeholder="Search memory..." style="flex:1;" />
-                            <button class="ghost-button" id="search-memory-btn">Search</button>
-                        </div>
-                        <div id="memory-explorer-results" class="history-list" style="margin-top:10px;"></div>
-
-                        <div class="settings-row" style="margin-top:12px;">
-                            <div>
-                                <div class="settings-label">Delete All Data</div>
-                                <div class="settings-description">Clear local settings and memory data</div>
-                            </div>
-                            <div class="settings-control">
-                                <button class="ghost-button" id="delete-all-data-btn">Delete</button>
-                            </div>
-                        </div>
-                        <div class="settings-row">
-                            <div>
-                                <div class="settings-label">Delete All Suggestions</div>
-                                <div class="settings-description">Remove all generated suggestions</div>
-                            </div>
-                            <div class="settings-control">
-                                <button class="ghost-button" id="clear-all-tasks-btn">Delete Suggestions</button>
                             </div>
                         </div>
                     </div>
                 </div>
-
             </section>
 
             <!-- ───── CHAT VIEW ───── -->

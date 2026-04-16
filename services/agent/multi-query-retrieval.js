@@ -52,16 +52,6 @@ function normalizeTerms(text) {
     .slice(0, 24);
 }
 
-function lexicalScore(text, terms) {
-  if (!terms.length) return 0;
-  const hay = String(text || '').toLowerCase();
-  let score = 0;
-  for (const term of terms) {
-    if (hay.includes(term)) score += 1;
-  }
-  return score;
-}
-
 function uniquePush(arr, value, limit) {
   if (!value) return;
   if (arr.includes(value)) return;
@@ -239,9 +229,8 @@ async function retrieveMultiQueryContext({ query, options = {}, limit = 24 } = {
           chunkEmbedding = [];
         }
         const vector = cosineSimilarity(variantEmbedding, chunkEmbedding);
-        const lexical = lexicalScore(`${row.text} ${JSON.stringify(asObj(row.metadata))}`, terms) * 0.05;
         const channelBoost = channel === 'messages' ? 0.06 : 0;
-        const score = Number((vector + lexical + channelBoost).toFixed(6));
+        const score = Number((vector + channelBoost).toFixed(6));
         if (score <= 0) continue;
         scored.push({
           ...row,
@@ -256,22 +245,6 @@ async function retrieveMultiQueryContext({ query, options = {}, limit = 24 } = {
   await scoreRowsForVariants(ensuredQueryVariants, filteredChunks, 'screen');
   if (messageQueryVariants.length) {
     await scoreRowsForVariants(messageQueryVariants, messageLikeRows.length ? messageLikeRows : filteredChunks, 'messages');
-  }
-  // Safety fallback when embeddings are sparse: keep query-driven lexical+recency scoring.
-  if (!scored.length) {
-    const refTs = dateRange ? dateRange.end.getTime() : Date.now();
-    const lexicalTerms = normalizeTerms(ensuredQueryVariants.join(' '));
-    for (const row of filteredChunks) {
-      const lexical = lexicalScore(`${row.text} ${JSON.stringify(asObj(row.metadata))}`, lexicalTerms) * 0.05;
-      const score = Number((0.2 + recencyScore(row, refTs) + lexical).toFixed(6));
-      if (score <= 0) continue;
-      scored.push({
-        ...row,
-        score,
-        query_variant: ensuredQueryVariants[0] || normalizedQuery || 'recent activity',
-        search_channel: 'screen'
-      });
-    }
   }
 
   const merged = dedupeByIdentity(scored, limit);
