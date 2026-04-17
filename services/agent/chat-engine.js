@@ -705,8 +705,8 @@ async function executeParallelRetrieval(baseQuery, baseThought, options) {
       ...options,
       retrieval_thought: { ...baseThought, semantic_queries: [q] }
     },
-    seedLimit: Math.max(3, Math.floor(10 / queries.length)),
-    hopLimit: 4,
+    seedLimit: Math.max(5, Math.floor(20 / queries.length)),
+    hopLimit: 6,
     recursionDepth,
     passiveOnly: options.passiveOnly || false
   })));

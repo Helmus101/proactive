@@ -9,9 +9,9 @@ const {
   logRetrievalRun
 } = require('./graph-store');
 
-const DEFAULT_SEED_LIMIT = 5;
-const DEFAULT_HOP_LIMIT = 4;
-const MAX_EXPANDED = 28;
+const DEFAULT_SEED_LIMIT = 10;
+const DEFAULT_HOP_LIMIT = 6;
+const MAX_EXPANDED = 100;
 
 const LAYER_RANKS = {
   'core': 5,
@@ -462,7 +462,7 @@ async function querylessRecentDocs(filters = {}, limit = 24) {
     .slice(0, limit);
 }
 
-async function loadEventEvidenceRows(refs = [], limit = 24) {
+async function loadEventEvidenceRows(refs = [], limit = 100) {
   const ids = Array.from(new Set((refs || []).filter(Boolean))).slice(0, Math.max(1, limit));
   if (!ids.length) return [];
   const placeholders = ids.map(() => '?').join(',');
@@ -518,7 +518,7 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
   const evidenceNodes = [];
   const edgePaths = [];
 
-  const effectiveHopLimit = Math.min(4, Math.max(1, hopLimit || DEFAULT_HOP_LIMIT));
+  const effectiveHopLimit = Math.min(8, Math.max(1, hopLimit || DEFAULT_HOP_LIMIT));
 
   while (queue.length && expanded.length < maxExpanded) {
     const current = queue.shift();
@@ -527,7 +527,7 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
       `SELECT id, from_node_id, to_node_id, edge_type, weight, trace_label, evidence_count, metadata
        FROM memory_edges
        WHERE from_node_id = ? OR to_node_id = ?
-       LIMIT 80`,
+       LIMIT 200`,
       [current.id, current.id]
     ).catch(() => []);
 
@@ -573,7 +573,7 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
 
     neighbors
       .sort((a, b) => b.sort_score - a.sort_score)
-      .slice(0, 8)
+      .slice(0, 20)
       .forEach((item) => {
         if (seen.has(item.id)) return;
         seen.add(item.id);
@@ -801,7 +801,7 @@ async function buildHybridGraphRetrieval({
         episodeSourceRefMap.get(ref).add(item.id);
       });
     });
-  const sourceRefEvidenceRows = await loadEventEvidenceRows(Array.from(episodeSourceRefMap.keys()), 24);
+  const sourceRefEvidenceRows = await loadEventEvidenceRows(Array.from(episodeSourceRefMap.keys()), 100);
   const sourceRefEdges = sourceRefEvidenceRows.flatMap((row) => {
     const parents = Array.from(episodeSourceRefMap.get(row.event_id) || []);
     return parents.map((episodeId) => ({
@@ -834,7 +834,7 @@ async function buildHybridGraphRetrieval({
   });
 
   // Spiral retrieval ordering: Insights -> Semantics -> Episodes
-  let evidenceRows = reranked.slice(0, 18);
+  let evidenceRows = reranked.slice(0, 60);
   if ((retrievalPlan.strategy_mode || retrievalPlan.strategy || options.strategy) === 'spiral') {
     // insights from expanded graph
     const insightNodes = graph.expandedNodes.filter((n) => n.layer === 'insight');
@@ -902,7 +902,7 @@ async function buildHybridGraphRetrieval({
   }));
   evidenceRows.forEach((row) => pushEvidenceRow(row));
 
-  const evidence = prioritizedEvidenceRows.slice(0, 18).map((row) => ({
+  const evidence = prioritizedEvidenceRows.slice(0, 60).map((row) => ({
     id: row.node_id || row.event_id || row.key,
     node_id: row.node_id || null,
     event_id: row.event_id || null,
@@ -961,7 +961,7 @@ async function buildHybridGraphRetrieval({
       ...(item.source_refs || []),
       item.event_id || null
     ]).filter(Boolean)
-  )).slice(0, 18);
+  )).slice(0, 60);
 
   return {
     retrieval_run_id: retrievalRunId,
