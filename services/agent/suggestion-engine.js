@@ -392,7 +392,7 @@ async function ensureMemoryLayersReady(apiKey) {
   return counts;
 }
 
-async function retrieveCoreToFactsContext(query = '', maxNodes = 42) {
+async function retrieveCoreToFactsContext(query = '', maxNodes = 100) {
   const terms = tokenizeTerms(query);
   const coreNodes = await db.allQuery(
     `SELECT id, layer, subtype, title, summary, canonical_text, confidence, metadata, updated_at
@@ -549,16 +549,19 @@ async function generateTopTodosFromMemoryQuery(llmConfig, options = {}) {
     'Look through my memory and generate the top 5 todos or actions I need to do right now.'
   ).trim();
   const layerCounts = await ensureMemoryLayersReady((llmConfig && llmConfig.provider === 'deepseek') ? llmConfig.apiKey : null).catch(() => ({}));
-  const coreRetrieval = await retrieveCoreToFactsContext(query, 42).catch(() => null);
-  const branchRetrieval = await buildHybridGraphRetrieval({
-    query,
-    options: {
-      mode: 'suggestion',
-      strategy: 'spiral'
-    },
-    seedLimit: 12,
-    hopLimit: 4
-  }).catch(() => null);
+  
+  const [coreRetrieval, branchRetrieval] = await Promise.all([
+    retrieveCoreToFactsContext(query, 100).catch(() => null),
+    buildHybridGraphRetrieval({
+      query,
+      options: {
+        mode: 'suggestion',
+        strategy: 'spiral'
+      },
+      seedLimit: 20,
+      hopLimit: 8
+    }).catch(() => null)
+  ]);
 
   const mergedEvidence = [];
   const seenEvidence = new Set();

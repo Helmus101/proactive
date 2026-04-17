@@ -726,7 +726,7 @@ function inferHardSourceTypes(text, candidateType = '') {
 
 function inferSummaryVsRaw(text) {
   const lower = safeText(text).toLowerCase();
-  if (/\b(exact|verbatim|quote|quoted|precise|wording|show me the email|exact email|exact message|what did .* say)\b/.test(lower)) {
+  if (/\b(exact|verbatim|quote|quoted|precise|wording|show me the email|exact email|exact message|what did .* say|ocr|screenshot|image|reading from|screen|capture|text in|visible)\b/.test(lower)) {
     return 'raw';
   }
   if (/\b(status|progress|update|where do things stand|what's the status|how is .* going|what did i work on|summary)\b/.test(lower)) {
@@ -911,7 +911,7 @@ async function buildRetrievalThought({
   const messageQueries = [];
   const intent = inferIntent(query || mergedText, mode, candidateType);
   const entryMode = inferEntryMode(query || mergedText, intent, mode);
-  const alpha = (summaryVsRaw === 'raw' || entryMode === 'query_first') ? 0.45 : 0.7;
+  const alpha = (summaryVsRaw === 'raw' || entryMode === 'query_first') ? 0.35 : 0.65;
   const reasoning = [];
   const lexicalTerms = buildLexicalTerms(mergedText || query);
   
@@ -1002,9 +1002,9 @@ async function buildRetrievalThought({
       attempted: false,
       widened: false
     },
-    seed_limit: 10,
-    hop_limit: 4,
-    context_budget_tokens: mode === 'suggestion' ? 550 : 800,
+    seed_limit: 20,
+    hop_limit: 8,
+    context_budget_tokens: mode === 'suggestion' ? 1000 : 1500,
     search_queries: semanticQueries,
     search_queries_messages: messageQueries,
     web_queries: webQueries,
