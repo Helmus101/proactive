@@ -265,7 +265,7 @@ function buildInterpretedMemorySummary(retrieval, drilldownEvidence = []) {
   return lines.length ? lines.join('\n') : 'None';
 }
 
-function buildPriorityEvidenceLines(retrieval, drilldownEvidence = [], limit = 6) {
+function buildPriorityEvidenceLines(retrieval, drilldownEvidence = [], limit = 12) {
   const lines = [];
   const evidence = Array.isArray(retrieval?.evidence) ? retrieval.evidence : [];
   const ranked = [...evidence]
@@ -273,12 +273,12 @@ function buildPriorityEvidenceLines(retrieval, drilldownEvidence = [], limit = 6
     .slice(0, Math.max(1, limit - 2));
   for (const item of ranked) {
     const layer = item.layer || item.type || 'memory';
-    const text = String(item.text || item.title || '').replace(/\s+/g, ' ').trim().slice(0, 170);
+    const text = String(item.text || item.title || '').replace(/\s+/g, ' ').trim().slice(0, 1000);
     if (!text) continue;
     lines.push(`- [${layer}] ${text}`);
   }
   for (const row of (drilldownEvidence || []).slice(0, 2)) {
-    const text = String(row.text || row.title || '').replace(/\s+/g, ' ').trim().slice(0, 170);
+    const text = String(row.text || row.title || '').replace(/\s+/g, ' ').trim().slice(0, 1000);
     if (!text) continue;
     lines.push(`- [raw:${row.source_type || 'event'}] ${text}`);
   }
@@ -637,7 +637,7 @@ function needsRawDrilldown(query) {
 }
 
 async function fetchDrilldownEvidence(refs = []) {
-  const ids = Array.from(new Set((refs || []).filter(Boolean))).slice(0, 6);
+  const ids = Array.from(new Set((refs || []).filter(Boolean))).slice(0, 20);
   if (!ids.length) return [];
   const placeholders = ids.map(() => '?').join(',');
   const rows = await db.allQuery(
@@ -654,7 +654,7 @@ async function fetchDrilldownEvidence(refs = []) {
     title: row.title,
     app: row.app,
     source_account: row.source_account,
-    text: String(row.redacted_text || row.raw_text || '').slice(0, 700)
+    text: String(row.redacted_text || row.raw_text || '').slice(0, 4000)
   }));
 }
 
@@ -699,19 +699,27 @@ async function executeParallelRetrieval(baseQuery, baseThought, options) {
   const recursionDepth = (requiresDeepContext && !options.passiveOnly) ? 1 : 0;
 
   // Parallel multi-agent dispatch
-  const results = await Promise.all(queries.map((q) => buildHybridGraphRetrieval({
+  const results = await Promise.allSettled(queries.map((q) => buildHybridGraphRetrieval({
     query: q,
     options: {
       ...options,
       retrieval_thought: { ...baseThought, semantic_queries: [q] }
     },
     seedLimit: Math.max(5, Math.floor(20 / queries.length)),
-    hopLimit: 6,
+    hopLimit: 8,
     recursionDepth,
     passiveOnly: options.passiveOnly || false
   })));
 
-  if (results.length === 1) return results[0];
+  const successfulResults = results
+    .filter((r) => r.status === 'fulfilled')
+    .map((r) => r.value);
+
+  if (successfulResults.length === 0) {
+    throw new Error('All parallel retrieval attempts failed.');
+  }
+
+  if (successfulResults.length === 1) return successfulResults[0];
 
   const mergeById = (lists) => {
     const map = new Map();
@@ -727,27 +735,27 @@ async function executeParallelRetrieval(baseQuery, baseThought, options) {
     return Array.from(map.values()).sort((a, b) => (b.score || 0) - (a.score || 0));
   };
   
-  const evidence = mergeById(results.map((r) => r.evidence)).slice(0, Math.max(...results.map((r) => r.evidence_count)));
-  const expanded_nodes = mergeById(results.map((r) => r.expanded_nodes));
-  const seed_nodes = mergeById(results.map((r) => r.seed_nodes));
+  const evidence = mergeById(successfulResults.map((r) => r.evidence)).slice(0, Math.max(...successfulResults.map((r) => r.evidence_count)));
+  const expanded_nodes = mergeById(successfulResults.map((r) => r.expanded_nodes));
+  const seed_nodes = mergeById(successfulResults.map((r) => r.seed_nodes));
 
   return {
-    ...results[0],
-    retrieval_run_id: results.map((r) => r.retrieval_run_id).join(','),
+    ...successfulResults[0],
+    retrieval_run_id: successfulResults.map((r) => r.retrieval_run_id).join(','),
     retrieval_plan: {
-      ...results[0].retrieval_plan,
+      ...successfulResults[0].retrieval_plan,
       recursion_depth: recursionDepth
     },
-    thought_summary: Array.from(new Set(results.flatMap((r) => r.thought_summary))),
-    trace_summary: Array.from(new Set(results.flatMap((r) => r.trace_summary))),
+    thought_summary: Array.from(new Set(successfulResults.flatMap((r) => r.thought_summary))),
+    trace_summary: Array.from(new Set(successfulResults.flatMap((r) => r.trace_summary))),
     evidence,
     evidence_count: evidence.length,
     expanded_nodes,
     seed_nodes,
-    edge_paths: results.flatMap((r) => r.edge_paths),
-    drilldown_refs: Array.from(new Set(results.flatMap((r) => r.drilldown_refs))),
-    lazy_source_refs: Array.from(new Set(results.flatMap((r) => r.lazy_source_refs.map((x) => x.ref)))).map((ref) => ({ ref })),
-    contextText: results.map((r) => r.contextText).join('\n\n---\n\n')
+    edge_paths: successfulResults.flatMap((r) => r.edge_paths),
+    drilldown_refs: Array.from(new Set(successfulResults.flatMap((r) => r.drilldown_refs))),
+    lazy_source_refs: Array.from(new Set(successfulResults.flatMap((r) => r.lazy_source_refs.map((x) => x.ref)))).map((ref) => ({ ref })),
+    contextText: successfulResults.map((r) => r.contextText).join('\n\n---\n\n')
   };
 }
 
