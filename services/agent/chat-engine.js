@@ -273,12 +273,12 @@ function buildPriorityEvidenceLines(retrieval, drilldownEvidence = [], limit = 1
     .slice(0, Math.max(1, limit - 2));
   for (const item of ranked) {
     const layer = item.layer || item.type || 'memory';
-    const text = String(item.text || item.title || '').replace(/\s+/g, ' ').trim().slice(0, 1000);
+    const text = String(item.text || item.title || '').replace(/\s+/g, ' ').trim().slice(0, 4000);
     if (!text) continue;
     lines.push(`- [${layer}] ${text}`);
   }
   for (const row of (drilldownEvidence || []).slice(0, 2)) {
-    const text = String(row.text || row.title || '').replace(/\s+/g, ' ').trim().slice(0, 1000);
+    const text = String(row.text || row.title || '').replace(/\s+/g, ' ').trim().slice(0, 4000);
     if (!text) continue;
     lines.push(`- [raw:${row.source_type || 'event'}] ${text}`);
   }
@@ -641,21 +641,25 @@ async function fetchDrilldownEvidence(refs = []) {
   if (!ids.length) return [];
   const placeholders = ids.map(() => '?').join(',');
   const rows = await db.allQuery(
-    `SELECT id, source_type, occurred_at, title, redacted_text, raw_text, app, source_account
+    `SELECT id, source_type, occurred_at, title, redacted_text, raw_text, app, source_account, metadata
      FROM events
      WHERE id IN (${placeholders})
      ORDER BY COALESCE(occurred_at, timestamp) DESC`,
     ids
   ).catch(() => []);
-  return rows.map((row) => ({
-    id: row.id,
-    source_type: row.source_type,
-    occurred_at: row.occurred_at,
-    title: row.title,
-    app: row.app,
-    source_account: row.source_account,
-    text: String(row.redacted_text || row.raw_text || '').slice(0, 4000)
-  }));
+  return rows.map((row) => {
+    const metadata = safeJsonParse(row.metadata, {});
+    const text = metadata.cleaned_capture_text || row.redacted_text || row.raw_text || '';
+    return {
+      id: row.id,
+      source_type: row.source_type,
+      occurred_at: row.occurred_at,
+      title: row.title,
+      app: row.app,
+      source_account: row.source_account,
+      text: String(text).slice(0, 4000)
+    };
+  });
 }
 
 function retrievalLooksSparse(retrieval) {
