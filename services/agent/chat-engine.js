@@ -273,12 +273,12 @@ function buildPriorityEvidenceLines(retrieval, drilldownEvidence = [], limit = 1
     .slice(0, Math.max(1, limit - 2));
   for (const item of ranked) {
     const layer = item.layer || item.type || 'memory';
-    const text = String(item.text || item.title || '').replace(/\s+/g, ' ').trim().slice(0, 4000);
+    const text = String(item.text || item.title || '').replace(/\s+/g, ' ').trim().slice(0, 8000);
     if (!text) continue;
     lines.push(`- [${layer}] ${text}`);
   }
   for (const row of (drilldownEvidence || []).slice(0, 2)) {
-    const text = String(row.text || row.title || '').replace(/\s+/g, ' ').trim().slice(0, 4000);
+    const text = String(row.text || row.title || '').replace(/\s+/g, ' ').trim().slice(0, 8000);
     if (!text) continue;
     lines.push(`- [raw:${row.source_type || 'event'}] ${text}`);
   }
@@ -657,7 +657,7 @@ async function fetchDrilldownEvidence(refs = []) {
       title: row.title,
       app: row.app,
       source_account: row.source_account,
-      text: String(text).slice(0, 4000)
+      text: String(text).slice(0, 8000)
     };
   });
 }

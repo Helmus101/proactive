@@ -10,8 +10,8 @@ const {
 } = require('./graph-store');
 
 const DEFAULT_SEED_LIMIT = 10;
-const DEFAULT_HOP_LIMIT = 8;
-const MAX_EXPANDED = 250;
+const DEFAULT_HOP_LIMIT = 10;
+const MAX_EXPANDED = 300;
 
 const LAYER_RANKS = {
   'core': 5,
@@ -203,7 +203,7 @@ async function coreDownRanking(nodeRows = [], retrievalPlan = {}, limit = 80) {
     return [id, base];
   }));
 
-  for (let depth = 1; depth <= 8 && frontier.length; depth++) {
+  for (let depth = 1; depth <= 10 && frontier.length; depth++) {
     const placeholders = frontier.map(() => '?').join(',');
     const edges = await db.allQuery(
       `SELECT from_node_id, to_node_id, weight, evidence_count, edge_type, trace_label
@@ -285,7 +285,7 @@ async function recursiveDownTraversal(nodeRows = [], retrievalPlan = {}, limit =
   const visited = new Set(frontier);
   const results = [];
 
-  for (let depth = 1; depth <= 8 && frontier.length && results.length < limit; depth++) {
+  for (let depth = 1; depth <= 10 && frontier.length && results.length < limit; depth++) {
     const placeholders = frontier.map(() => '?').join(',');
     const edges = await db.allQuery(
       `SELECT from_node_id, to_node_id, edge_type, weight FROM memory_edges 
@@ -490,7 +490,7 @@ async function loadEventEvidenceRows(refs = [], limit = 100) {
       app: row.app || null,
       source_account: row.source_account || null,
       title: row.title || row.source_type || row.id,
-      text: String(text).slice(0, 4000),
+      text: String(text).slice(0, 8000),
       source_refs: [row.id],
       base_score: Number((0.82 - (index * 0.015)).toFixed(6)),
       match_reason: 'episode_source_ref'
@@ -522,7 +522,7 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
   const evidenceNodes = [];
   const edgePaths = [];
 
-  const effectiveHopLimit = Math.min(8, Math.max(1, hopLimit || DEFAULT_HOP_LIMIT));
+  const effectiveHopLimit = Math.min(10, Math.max(1, hopLimit || DEFAULT_HOP_LIMIT));
 
   while (queue.length && expanded.length < maxExpanded) {
     const current = queue.shift();
@@ -577,7 +577,7 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
 
     neighbors
       .sort((a, b) => b.sort_score - a.sort_score)
-      .slice(0, 20)
+      .slice(0, 30)
       .forEach((item) => {
         if (seen.has(item.id)) return;
         seen.add(item.id);
@@ -668,7 +668,7 @@ async function buildHybridGraphRetrieval({
     },
     seed_limit: seedLimit || basePlan.seed_limit || DEFAULT_SEED_LIMIT,
     hop_limit: hopLimit || basePlan.hop_limit || DEFAULT_HOP_LIMIT,
-    context_budget_tokens: basePlan.context_budget_tokens || (options.mode === 'suggestion' ? 550 : 800),
+    context_budget_tokens: basePlan.context_budget_tokens || (options.mode === 'suggestion' ? 1200 : 2000),
     search_queries: basePlan.search_queries || basePlan.semantic_queries || [],
     search_queries_messages: basePlan.search_queries_messages || basePlan.message_queries || [],
     web_queries: basePlan.web_queries || basePlan.query_sets?.web_queries || [],
@@ -753,7 +753,7 @@ async function buildHybridGraphRetrieval({
     anchor_at: seed.anchor_at || null,
     latest_activity_at: seed.latest_activity_at || seed.timestamp || null,
     title: String(seed.text || '').split('\n')[0].slice(0, 140),
-    text: String(seed.text || '').slice(0, 4000),
+    text: String(seed.text || '').slice(0, 8000),
     app: seed.app || null,
     activity_summary: seed.activity_summary || null,
     content_type: seed.content_type || null,
@@ -923,7 +923,7 @@ async function buildHybridGraphRetrieval({
     score: Number((row.rerank_score || row.fused_score || row.base_score || 0).toFixed(6)),
     reason: row.match_reason,
     source_refs: row.source_refs || [],
-    text: String(row.text || '').slice(0, 4000)
+    text: String(row.text || '').slice(0, 8000)
   }));
 
   const traceSummary = [
