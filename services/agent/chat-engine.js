@@ -754,6 +754,10 @@ async function executeParallelRetrieval(baseQuery, baseThought, options) {
 async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   const emit = (data) => { try { onStep?.(data); } catch (_) {} };
   const stageTrace = [];
+  // Normalize API key: prefer explicit param, then environment, then options; treat empty string as absent
+  if (!apiKey) {
+    apiKey = process.env.DEEPSEEK_API_KEY || options?.apiKey || null;
+  }
   const emitStage = (step, status, overrides = {}) => {
     const event = buildStageEvent(step, status, overrides);
     stageTrace.push(event);
@@ -1046,19 +1050,29 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     };
   }
   if (sparseMemory && !webResults.length) {
-    emitStage('synthesis', 'completed', {
+    // If no API key is available, ask the user for clarification as before.
+    if (!apiKey) {
+      emitStage('synthesis', 'completed', {
+        label: 'Synthesis',
+        detail: 'Available evidence was too sparse across memory and web, so the assistant is asking for clarification.'
+      });
+      return {
+         content: "I couldn't find enough specific details in your memory graph to answer that accurately. Could you provide a bit more context, like a specific timeframe or associated project?",
+         needs_clarification: true,
+         retrieval: {
+           ...retrieval,
+           stage_trace: stageTrace
+         },
+         thinking_trace: ["Confidence Gating: Retrieval returned insufficient high-confidence context across memory and web. Prompting user for clarification."]
+      };
+    }
+
+    // If an API key is present, proceed to synthesize an answer using the LLM
+    // even when memory evidence is sparse. Emit a low-confidence note in the trace.
+    emitStage('synthesis', 'started', {
       label: 'Synthesis',
-      detail: 'Available evidence was too sparse across memory and web, so the assistant is asking for clarification.'
+      detail: 'Evidence was sparse across memory and web, but an LLM key is available — proceeding to generate an answer with low confidence.'
     });
-    return {
-       content: "I couldn't find enough specific details in your memory graph to answer that accurately. Could you provide a bit more context, like a specific timeframe or associated project?",
-       needs_clarification: true,
-       retrieval: {
-         ...retrieval,
-         stage_trace: stageTrace
-       },
-       thinking_trace: ["Confidence Gating: Retrieval returned insufficient high-confidence context across memory and web. Prompting user for clarification."]
-    };
   }
   const thinkingTrace = await buildThinkingTrace({ query, retrieval, drilldownEvidence });
   emitStage('synthesis', 'started', {
