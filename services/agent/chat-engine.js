@@ -706,7 +706,7 @@ async function executeParallelRetrieval(baseQuery, baseThought, options) {
       retrieval_thought: { ...baseThought, semantic_queries: [q] }
     },
     seedLimit: Math.max(3, Math.floor(10 / queries.length)),
-    hopLimit: 2,
+    hopLimit: 4,
     recursionDepth,
     passiveOnly: options.passiveOnly || false
   })));
@@ -1002,8 +1002,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     fetchRecentEpisodes()
   ]);
   const standingNotes = String(options?.standing_notes || options?.core_memory || '').trim();
-  const drilldownEvidence = needsRawDrilldown(query)
-    || baseThought.summary_vs_raw === 'raw'
+  const drilldownEvidence = (retrieval.drilldown_refs || []).length
     ? await fetchDrilldownEvidence(retrieval.drilldown_refs || [])
     : [];
   const webAssessment = assessWebSearchNecessity(query, baseThought, retrieval);
@@ -1049,7 +1048,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       web_sources: []
     };
   }
-  if (sparseMemory && !webResults.length) {
+  if (sparseMemory && !webResults.length && !drilldownEvidence.length) {
     // If no API key is available, ask the user for clarification as before.
     if (!apiKey) {
       emitStage('synthesis', 'completed', {

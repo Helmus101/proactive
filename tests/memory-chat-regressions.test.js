@@ -330,6 +330,18 @@ async function testHybridRetrievalPrefersDownwardExpansion() {
         { from_node_id: 'episode_1', to_node_id: 'insight_1', edge_type: 'RELATED_TO', weight: 1, evidence_count: 1, trace_label: 'episode->insight' }
       ];
     }
+    if (/FROM events/i.test(sql)) {
+      return [{
+        id: 'evt_1',
+        source_type: 'EmailThread',
+        occurred_at: '2026-04-12T10:00:00.000Z',
+        title: 'Algebra practice follow-up',
+        redacted_text: 'You missed quadratic factoring on questions 3 and 4.',
+        raw_text: 'You missed quadratic factoring on questions 3 and 4.',
+        app: 'Gmail',
+        source_account: 'study@example.com'
+      }];
+    }
     return [];
   };
   db.getQuery = async (sql, params = []) => {
@@ -365,8 +377,11 @@ async function testHybridRetrievalPrefersDownwardExpansion() {
 
     assert.ok(Array.isArray(retrieval.primary_nodes) && retrieval.primary_nodes.length >= 1);
     assert.ok(retrieval.evidence_nodes.some((item) => item.id === 'episode_1'));
+    assert.ok(retrieval.evidence_nodes.some((item) => item.id === 'evt_1'));
+    assert.ok(retrieval.drilldown_refs.includes('evt_1'));
+    assert.ok(retrieval.edge_paths.some((edge) => edge.relation === 'SOURCE_REF' && edge.to === 'evt_1'));
     assert.ok(!retrieval.evidence_nodes.some((item) => item.id === 'insight_1'));
-    assert.ok(retrieval.edge_paths.every((edge) => Number(edge.depth || 0) <= 2));
+    assert.ok(retrieval.edge_paths.every((edge) => Number(edge.depth || 0) <= 4));
   } finally {
     db.allQuery = originalAllQuery;
     db.getQuery = originalGetQuery;
@@ -619,6 +634,116 @@ async function testAnswerChatQueryUsesWebFallbackForSparseWorldKnowledge() {
     retrievalThoughtSystem.buildRetrievalThought = originalThought;
     hybrid.buildHybridGraphRetrieval = originalHybrid;
     global.fetch = originalFetch;
+    delete require.cache[require.resolve('../services/agent/chat-engine')];
+    db.allQuery = originalAllQuery;
+  }
+}
+
+async function testAnswerChatQueryUsesDrilldownEvidenceBeforeClarifying() {
+  const originalAllQuery = db.allQuery;
+  const ingestion = require('../services/ingestion');
+  const retrievalThoughtSystem = require('../services/agent/retrieval-thought-system');
+  const hybrid = require('../services/agent/hybrid-graph-retrieval');
+  const originalIngest = ingestion.ingestRawEvent;
+  const originalThought = retrievalThoughtSystem.buildRetrievalThought;
+  const originalHybrid = hybrid.buildHybridGraphRetrieval;
+
+  ingestion.ingestRawEvent = async () => true;
+  retrievalThoughtSystem.buildRetrievalThought = async () => ({
+    mode: 'semantic',
+    source_mode: 'memory_only',
+    strategy_mode: 'memory_only',
+    router_reason: 'Personal memory request.',
+    summary_vs_raw: 'summary',
+    time_scope: { label: 'all_time' },
+    query_sets: {
+      memory_queries: ['algebra practice'],
+      message_queries: [],
+      web_queries: []
+    },
+    semantic_queries: ['algebra practice'],
+    message_queries: [],
+    web_queries: [],
+    lexical_terms: ['algebra']
+  });
+  hybrid.buildHybridGraphRetrieval = async () => ({
+    retrieval_plan: {
+      mode: 'semantic',
+      source_mode: 'memory_only',
+      strategy_mode: 'memory_only',
+      summary_vs_raw: 'summary',
+      time_scope: { label: 'all_time' }
+    },
+    router: {
+      source_mode: 'memory_only',
+      router_reason: 'Personal memory request.',
+      time_scope: { label: 'all_time' },
+      summary_vs_raw: 'summary'
+    },
+    query_sets: {
+      memory_queries: ['algebra practice'],
+      message_queries: [],
+      web_queries: []
+    },
+    generated_queries: {
+      semantic: ['algebra practice'],
+      messages: [],
+      web: [],
+      lexical_terms: ['algebra']
+    },
+    seed_results: [{ id: 'episode_1', title: 'Algebra practice session', reason: 'semantic:algebra practice' }],
+    seed_nodes: [{ id: 'episode_1', title: 'Algebra practice session', layer: 'episode', source_refs: ['evt_1'] }],
+    primary_nodes: [{ id: 'episode_1', title: 'Algebra practice session', layer: 'episode', source_refs: ['evt_1'] }],
+    support_nodes: [],
+    evidence_nodes: [{ id: 'episode_1', title: 'Algebra practice session', layer: 'episode', source_refs: ['evt_1'] }],
+    expanded_nodes: [],
+    graph_expansion_results: [],
+    edge_paths: [],
+    packed_context_stats: {
+      primary_nodes: 1,
+      support_nodes: 0,
+      evidence_nodes: 1,
+      packed_evidence: 1
+    },
+    evidence_count: 1,
+    evidence: [
+      { id: 'episode_1', layer: 'episode', text: 'Algebra practice session', score: 0.7, source_refs: ['evt_1'], source_type: 'EmailThread' }
+    ],
+    contextText: 'Algebra practice session',
+    drilldown_refs: ['evt_1'],
+    lazy_source_refs: [{ ref: 'evt_1' }],
+    temporal_reasoning: []
+  });
+  db.allQuery = async (sql) => {
+    if (/FROM events/i.test(sql)) {
+      return [{
+        id: 'evt_1',
+        source_type: 'EmailThread',
+        occurred_at: '2026-04-12T10:00:00.000Z',
+        title: 'Algebra practice follow-up',
+        redacted_text: 'You missed quadratic factoring on questions 3 and 4.',
+        raw_text: 'You missed quadratic factoring on questions 3 and 4.',
+        app: 'Gmail',
+        source_account: 'study@example.com'
+      }];
+    }
+    return [];
+  };
+
+  try {
+    delete require.cache[require.resolve('../services/agent/chat-engine')];
+    const { answerChatQuery } = require('../services/agent/chat-engine');
+    const result = await answerChatQuery({
+      apiKey: null,
+      query: 'what happened in my algebra practice session?'
+    });
+
+    assert.strictEqual(result.needs_clarification, undefined);
+    assert.ok(/quadratic factoring/i.test(result.content));
+  } finally {
+    ingestion.ingestRawEvent = originalIngest;
+    retrievalThoughtSystem.buildRetrievalThought = originalThought;
+    hybrid.buildHybridGraphRetrieval = originalHybrid;
     delete require.cache[require.resolve('../services/agent/chat-engine')];
     db.allQuery = originalAllQuery;
   }
@@ -922,6 +1047,7 @@ async function main() {
   await testHybridRetrievalPrefersDownwardExpansion();
   await testAnswerChatQueryEmitsStructuredPipelineStages();
   await testAnswerChatQueryUsesWebFallbackForSparseWorldKnowledge();
+  await testAnswerChatQueryUsesDrilldownEvidenceBeforeClarifying();
   await testSuggestionEnginePersistsExecutionMetadata();
   testNormalizeDesktopGoalForGoogleSearch();
   testDesktopPlannerReadsUiAfterOpen();

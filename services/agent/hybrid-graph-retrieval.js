@@ -10,8 +10,8 @@ const {
 } = require('./graph-store');
 
 const DEFAULT_SEED_LIMIT = 5;
-const DEFAULT_HOP_LIMIT = 2;
-const MAX_EXPANDED = 18;
+const DEFAULT_HOP_LIMIT = 4;
+const MAX_EXPANDED = 28;
 
 const LAYER_RANKS = {
   'core': 5,
@@ -50,6 +50,16 @@ function normalizeDateRange(dateRange) {
   const end = dateRange.end ? new Date(dateRange.end) : null;
   if (!start || !end || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
   return { start, end };
+}
+
+function parseSourceRefs(value) {
+  if (Array.isArray(value)) return value.filter(Boolean);
+  try {
+    const parsed = JSON.parse(value || '[]');
+    return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+  } catch (_) {
+    return [];
+  }
 }
 
 function rowMatchesFilters(row, filters = {}) {
@@ -452,6 +462,38 @@ async function querylessRecentDocs(filters = {}, limit = 24) {
     .slice(0, limit);
 }
 
+async function loadEventEvidenceRows(refs = [], limit = 24) {
+  const ids = Array.from(new Set((refs || []).filter(Boolean))).slice(0, Math.max(1, limit));
+  if (!ids.length) return [];
+  const placeholders = ids.map(() => '?').join(',');
+  const rows = await db.allQuery(
+    `SELECT id, source_type, occurred_at, title, redacted_text, raw_text, app, source_account
+     FROM events
+     WHERE id IN (${placeholders})
+     ORDER BY COALESCE(occurred_at, timestamp) DESC`,
+    ids
+  ).catch(() => []);
+
+  return rows.map((row, index) => ({
+    key: `event:${row.id}`,
+    source_type: 'event',
+    node_id: null,
+    event_id: row.id,
+    layer: 'event',
+    subtype: row.source_type || null,
+    anchor_at: row.occurred_at || null,
+    latest_activity_at: row.occurred_at || null,
+    timestamp: row.occurred_at || null,
+    app: row.app || null,
+    source_account: row.source_account || null,
+    title: row.title || row.source_type || row.id,
+    text: String(row.redacted_text || row.raw_text || '').slice(0, 700),
+    source_refs: [row.id],
+    base_score: Number((0.82 - (index * 0.015)).toFixed(6)),
+    match_reason: 'episode_source_ref'
+  }));
+}
+
 function expansionScore(layer, subtype) {
   if (layer === 'insight') return 10;
   if (layer === 'semantic' && subtype === 'task') return 9;
@@ -476,8 +518,7 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
   const evidenceNodes = [];
   const edgePaths = [];
 
-  // Strictly enforce 1-2 hop limit (hopLimit passed from retrieval plan)
-  const effectiveHopLimit = Math.min(2, Math.max(1, hopLimit || DEFAULT_HOP_LIMIT));
+  const effectiveHopLimit = Math.min(4, Math.max(1, hopLimit || DEFAULT_HOP_LIMIT));
 
   while (queue.length && expanded.length < maxExpanded) {
     const current = queue.shift();
@@ -512,6 +553,7 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
         subtype: node.subtype || null,
         title: node.title || metadata.name || metadata.fact || node.id,
         summary: node.summary || metadata.summary || '',
+        source_refs: parseSourceRefs(node.source_refs),
         anchor_at: metadata.anchor_at || metadata.start || null,
         latest_activity_at: metadata.latest_activity_at || metadata.end || node.updated_at || node.created_at || null,
         timestamp: metadata.end || metadata.start || metadata.latest_interaction_at || node.updated_at || node.created_at || null,
@@ -543,7 +585,8 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
           title: item.title,
           summary: item.summary,
           timestamp: item.timestamp,
-          depth: item.depth
+          depth: item.depth,
+          source_refs: item.source_refs || []
         };
         expanded.push(expandedNode);
         if (item.layer === 'episode' || item.layer === 'raw' || item.layer === 'event') evidenceNodes.push(expandedNode);
@@ -712,7 +755,8 @@ async function buildHybridGraphRetrieval({
     content_type: seed.content_type || null,
     uncertainty: seed.uncertainty || null,
     score: Number((seed.rerank_score || seed.fused_score || seed.base_score || 0).toFixed(6)),
-    reason: seed.match_reason
+    reason: seed.match_reason,
+    source_refs: seed.source_refs || []
   }));
   const supportNodes = Array.from(new Map([
     ...((Array.isArray(graph.supportNodes) ? graph.supportNodes : []).map((item) => [item.id, item])),
@@ -726,7 +770,8 @@ async function buildHybridGraphRetrieval({
         title: item.title,
         summary: item.text,
         timestamp: item.latest_activity_at || item.anchor_at || null,
-        depth: 0
+        depth: 0,
+        source_refs: item.source_refs || []
       }]))
   ]).values());
   const evidenceNodes = Array.from(new Map([
@@ -741,9 +786,52 @@ async function buildHybridGraphRetrieval({
         title: item.title,
         summary: item.text,
         timestamp: item.latest_activity_at || item.anchor_at || null,
-        depth: 0
+        depth: 0,
+        source_refs: item.source_refs || []
       }]))
   ]).values());
+
+  const episodeSourceRefMap = new Map();
+  [...primaryNodes, ...graph.expandedNodes]
+    .filter((item) => item && item.layer === 'episode')
+    .forEach((item) => {
+      const refs = parseSourceRefs(item.source_refs);
+      refs.forEach((ref) => {
+        if (!episodeSourceRefMap.has(ref)) episodeSourceRefMap.set(ref, new Set());
+        episodeSourceRefMap.get(ref).add(item.id);
+      });
+    });
+  const sourceRefEvidenceRows = await loadEventEvidenceRows(Array.from(episodeSourceRefMap.keys()), 24);
+  const sourceRefEdges = sourceRefEvidenceRows.flatMap((row) => {
+    const parents = Array.from(episodeSourceRefMap.get(row.event_id) || []);
+    return parents.map((episodeId) => ({
+      from: episodeId,
+      to: row.event_id,
+      relation: 'SOURCE_REF',
+      trace_label: 'episode->event',
+      weight: 1,
+      evidence_count: 1,
+      depth: 1,
+      synthetic: true
+    }));
+  });
+  sourceRefEvidenceRows.forEach((row) => {
+    const identity = row.event_id || row.key;
+    if (!identity) return;
+    if (!evidenceNodes.find((item) => item.id === identity)) {
+      evidenceNodes.push({
+        id: identity,
+        layer: row.layer,
+        type: row.layer,
+        subtype: row.subtype,
+        title: row.title,
+        summary: row.text,
+        timestamp: row.timestamp,
+        depth: 1,
+        source_refs: row.source_refs || []
+      });
+    }
+  });
 
   // Spiral retrieval ordering: Insights -> Semantics -> Episodes
   let evidenceRows = reranked.slice(0, 18);
@@ -791,8 +879,9 @@ async function buildHybridGraphRetrieval({
   };
   seeds.forEach((row) => pushEvidenceRow(row));
   evidenceNodes.forEach((node) => pushEvidenceRow({
-    key: `node:${node.id}`,
+    key: node.layer === 'event' ? `event:${node.id}` : `node:${node.id}`,
     node_id: node.id,
+    event_id: node.layer === 'event' ? node.id : null,
     layer: node.layer,
     subtype: node.subtype,
     text: [node.title, node.summary].filter(Boolean).join('\n'),
@@ -800,6 +889,7 @@ async function buildHybridGraphRetrieval({
     base_score: 0.88 - ((node.depth || 1) * 0.08),
     match_reason: 'downward_evidence'
   }));
+  sourceRefEvidenceRows.forEach((row) => pushEvidenceRow(row, row.event_id || row.key));
   supportNodes.forEach((node) => pushEvidenceRow({
     key: `node:${node.id}`,
     node_id: node.id,
@@ -839,6 +929,7 @@ async function buildHybridGraphRetrieval({
     ...(retrievalPlan.applied_date_range ? [`Applied date window: ${retrievalPlan.applied_date_range.start} -> ${retrievalPlan.applied_date_range.end}`] : []),
     `Stage 1: hybrid seed search returned ${seeds.length} primary seeds.`,
     `Stage 2: graph expansion added ${graph.expandedNodes.length} connected nodes (${supportNodes.length} support, ${evidenceNodes.length} evidence).`,
+    ...(sourceRefEvidenceRows.length ? [`Stage 3: loaded ${sourceRefEvidenceRows.length} raw source events attached to matched episodes.`] : []),
     ...summarizeRetrievalThought(retrievalPlan)
   ];
 
@@ -849,8 +940,9 @@ async function buildHybridGraphRetrieval({
   if (graph.expandedNodes.length) {
     contextSections.push(`EXPANDED GRAPH:\n${graph.expandedNodes.slice(0, MAX_EXPANDED).map((node) => `- [${node.layer}${node.subtype ? `/${node.subtype}` : ''}] ${node.title}${node.summary ? ` — ${node.summary}` : ''}`).join('\n')}`);
   }
-  if (graph.edgePaths.length) {
-    contextSections.push(`TRACE:\n${graph.edgePaths.slice(0, 12).map((edge) => `- ${edge.from} -> ${edge.to} via ${edge.relation}${edge.trace_label ? ` (${edge.trace_label})` : ''}`).join('\n')}`);
+  const allEdgePaths = [...graph.edgePaths, ...sourceRefEdges];
+  if (allEdgePaths.length) {
+    contextSections.push(`TRACE:\n${allEdgePaths.slice(0, 20).map((edge) => `- ${edge.from} -> ${edge.to} via ${edge.relation}${edge.trace_label ? ` (${edge.trace_label})` : ''}`).join('\n')}`);
   }
 
   const retrievalRunId = await logRetrievalRun({
@@ -859,7 +951,8 @@ async function buildHybridGraphRetrieval({
     metadata: {
       plan: retrievalPlan,
       seeds: seedNodeIds,
-      evidence_count: evidence.length
+      evidence_count: evidence.length,
+      source_ref_events: sourceRefEvidenceRows.length
     }
   });
 
@@ -931,8 +1024,8 @@ async function buildHybridGraphRetrieval({
     evidence_nodes: evidenceNodes,
     expanded_nodes: graph.expandedNodes,
     graph_expansion_results: graph.expandedNodes,
-    edge_paths: graph.edgePaths,
-    trace_labels: graph.edgePaths.map((edge) => edge.trace_label).filter(Boolean),
+    edge_paths: allEdgePaths,
+    trace_labels: allEdgePaths.map((edge) => edge.trace_label).filter(Boolean),
     lazy_source_refs: drilldownRefs.map((ref) => ({ ref })),
     drilldown_refs: drilldownRefs,
     ranking_policy: {
