@@ -9218,8 +9218,8 @@ ipcMain.handle('search-memory-graph', async (event, query, options = {}) => {
             source_types: normalizedDataSource ? [normalizedDataSource] : null,
             retrieval_thought: thought
           },
-          seedLimit: 6,
-          hopLimit: 2
+          seedLimit: 12,
+          hopLimit: 4
         }).catch(() => null);
         const routedEvidence = Array.isArray(routed?.evidence) ? routed.evidence : [];
         if (routedEvidence.length) {

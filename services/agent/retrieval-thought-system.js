@@ -503,24 +503,24 @@ async function buildMultiAngleQueryBundle(baseText, {
 
   if (apiKey) {
     const prompt = `
-	You are a retrieval query generator and router for an AI memory system. 
-	Your goal is to:
+    You are a retrieval query generator and router for an AI memory system. 
+    Your goal is to:
     1. Decide the best source for the information: "memory" (personal history/context), "web" (public knowledge), or "hybrid" (both).
     2. Generate exactly 7 distinct search queries for vector search across the user's memory.
-	
-	Use Intent Decomposition and Semantic Expansion for queries:
-	1. Literal: The cleaned user query.
-	2. Decomposed (Sub-intent 1): A specific sub-task or entity mentioned.
-	3. Decomposed (Sub-intent 2): Another specific sub-task or entity.
-	4. Expanded (Semantic 1): Using synonyms or related concepts.
-	5. Expanded (Semantic 2): Broader context or thematic expansion.
-	6. Contextual: Search for the likely environment (app, site, or situation).
-	7. Thematic: Search for the overarching project or topic.
-	
-	Return strict JSON: {"source_mode": "memory"|"web"|"hybrid", "queries": ["query 1", "query 2", "query 3", "query 4", "query 5", "query 6", "query 7"]}
-	
-	User Query: "${baseText.replace(/"/g, '\\"')}"
-	`;
+    
+    Use Intent Decomposition and Semantic Expansion for queries:
+    1. Literal: The cleaned user query.
+    2. Decomposed (Sub-intent 1): A specific sub-task or entity mentioned.
+    3. Decomposed (Sub-intent 2): Another specific sub-task or entity.
+    4. Expanded (Semantic 1): Using synonyms or related concepts.
+    5. Expanded (Semantic 2): Broader context or thematic expansion.
+    6. Contextual: Search for the likely environment (app, site, or situation).
+    7. Thematic: Search for the overarching project or topic.
+    
+    Return strict JSON: {"source_mode": "memory"|"web"|"hybrid", "queries": ["query 1", "query 2", "query 3", "query 4", "query 5", "query 6", "query 7"]}
+    
+    User Query: "${baseText.replace(/"/g, '\\"')}"
+    `;
     try {
       const result = await callLLM(prompt, apiKey, 0.3);
       if (result && Array.isArray(result.queries)) {
@@ -1002,8 +1002,8 @@ async function buildRetrievalThought({
       attempted: false,
       widened: false
     },
-    seed_limit: mode === 'suggestion' ? 4 : 5,
-    hop_limit: 2,
+    seed_limit: 10,
+    hop_limit: 4,
     context_budget_tokens: mode === 'suggestion' ? 550 : 800,
     search_queries: semanticQueries,
     search_queries_messages: messageQueries,

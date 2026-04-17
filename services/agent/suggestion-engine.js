@@ -556,8 +556,8 @@ async function generateTopTodosFromMemoryQuery(llmConfig, options = {}) {
       mode: 'suggestion',
       strategy: 'spiral'
     },
-    seedLimit: 8,
-    hopLimit: 2
+    seedLimit: 12,
+    hopLimit: 4
   }).catch(() => null);
 
   const mergedEvidence = [];
