@@ -1003,8 +1003,8 @@ async function buildRetrievalThought({
       widened: false
     },
     seed_limit: 20,
-    hop_limit: 8,
-    context_budget_tokens: mode === 'suggestion' ? 1000 : 1500,
+    hop_limit: 10,
+    context_budget_tokens: mode === 'suggestion' ? 1200 : 2000,
     search_queries: semanticQueries,
     search_queries_messages: messageQueries,
     web_queries: webQueries,
