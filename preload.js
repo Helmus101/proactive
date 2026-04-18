@@ -95,6 +95,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── Memory Graph Integration ────────────────────────────────────────────
   getMemoryGraphStatus: () => ipcRenderer.invoke('get-memory-graph-status'),
+  getFullMemoryGraph: () => ipcRenderer.invoke('get-full-memory-graph'),
   searchMemoryGraph: (query, options) => ipcRenderer.invoke('search-memory-graph', query, options),
   getRelatedNodes: (nodeId, relationType) => ipcRenderer.invoke('get-related-nodes', nodeId, relationType),
   getCoreMemory: () => ipcRenderer.invoke('get-core-memory'),

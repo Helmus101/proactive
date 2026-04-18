@@ -3871,3 +3871,160 @@ body.compact-mode .suggestion-card {
     0%, 100% { transform: scale(1); opacity: 1; }
     50% { transform: scale(1.1); opacity: 0.7; }
 }
+
+/* ─── GRAPH EXPLORER ───────────────────────────────────────────── */
+.graph-explorer-container {
+    width: 100%;
+    height: 400px;
+    background: rgba(0, 0, 0, 0.05);
+    border-radius: var(--radius-card);
+    overflow: hidden;
+    position: relative;
+    border: 1px solid var(--glass-border);
+}
+
+.graph-placeholder {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: var(--text-tertiary);
+}
+
+.graph-node {
+    cursor: pointer;
+    transition: filter var(--t);
+}
+
+.graph-node:hover {
+    filter: brightness(1.2);
+}
+
+.graph-link {
+    stroke: var(--glass-border);
+    stroke-opacity: 0.6;
+}
+
+.graph-label {
+    font-size: 10px;
+    fill: var(--text-secondary);
+    pointer-events: none;
+    text-shadow: 0 1px 2px rgba(255,255,255,0.8);
+}
+
+/* ─── LIBRARY VIEW ─────────────────────────────────────────────── */
+.library-container {
+    padding: 80px 24px 100px;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+.library-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 32px;
+}
+
+.library-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 20px;
+}
+
+.library-card {
+    background: var(--glass-bg);
+    backdrop-filter: var(--blur);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-card);
+    padding: 20px;
+    transition: all var(--t);
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.library-card:hover {
+    transform: translateY(-4px);
+    box-shadow: var(--glass-shadow-hover);
+    background: var(--glass-strong);
+}
+
+.library-card-layer {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--accent-blue);
+    font-weight: 600;
+}
+
+.library-card-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.library-card-summary {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.library-card-footer {
+    margin-top: auto;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    color: var(--text-tertiary);
+}
+
+/* ─── SEARCH ANIMATIONS ────────────────────────────────────────── */
+@keyframes scanning {
+    0% { transform: translateY(-100%); opacity: 0; }
+    50% { opacity: 0.5; }
+    100% { transform: translateY(100%); opacity: 0; }
+}
+
+.searching .chat-messages::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 100%;
+    background: linear-gradient(to bottom, transparent, var(--accent-blue-subtle), transparent);
+    animation: scanning 2s linear infinite;
+    pointer-events: none;
+    z-index: 10;
+}
+
+.thinking-step {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    border-radius: var(--radius-item);
+    background: var(--accent-blue-subtle);
+    margin-bottom: 8px;
+    animation: fadeIn var(--t);
+}
+
+@keyframes pulse-dot {
+    0% { transform: scale(0.8); opacity: 0.5; }
+    50% { transform: scale(1.2); opacity: 1; }
+    100% { transform: scale(0.8); opacity: 0.5; }
+}
+
+.pulse-dot {
+    width: 6px;
+    height: 6px;
+    background: var(--accent-blue);
+    border-radius: 50%;
+    animation: pulse-dot 1.5s infinite ease-in-out;
+}
