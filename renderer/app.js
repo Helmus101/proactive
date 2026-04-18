@@ -726,7 +726,9 @@ class WeaveApp {
         layer.textContent = `${String(todo.category || 'task').toUpperCase()} • TASK`;
         title.textContent = todo.title || 'Task';
         time.textContent = todo.createdAt ? new Date(todo.createdAt).toLocaleString() : 'No timestamp';
-        narrative.textContent = narrativeParts.join('\n\n') || 'No additional information available.';
+        narrative.textContent = narrativeParts.join('
+
+') || 'No additional information available.';
         raw.textContent = JSON.stringify(todo, null, 2);
 
         modal.classList.remove('hidden');
@@ -916,7 +918,9 @@ class WeaveApp {
 
         let i = 0;
         const maxChars = 2600;
-        const bounded = content.length > maxChars ? `${content.slice(0, maxChars)}\n\nWould you like me to continue with more detail?` : content;
+        const bounded = content.length > maxChars ? `${content.slice(0, maxChars)}
+
+Would you like me to continue with more detail?` : content;
         const chunkSize = bounded.length > 900 ? 10 : 4;
         const frameDelay = bounded.length > 900 ? 6 : 12;
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -2842,7 +2846,9 @@ class WeaveApp {
             console.error("Graph render error:", err);
             this.settingsGraphContainer.innerHTML = '<div class="graph-placeholder">Failed to load graph.</div>';
         }
-    }\n\n    async openMemoryDetailById(nodeId) {
+    }
+
+    async openMemoryDetailById(nodeId) {
         try {
             const { nodes } = await window.electronAPI.getFullMemoryGraph();
             const node = nodes.find(n => n.id === nodeId);
