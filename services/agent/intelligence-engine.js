@@ -630,6 +630,8 @@ const CORE_NODE_ID = 'core_living_doc';
 
 async function runLivingCoreJob(apiKey) {
   try {
+    const coreNode = await db.get(`SELECT * FROM memory_nodes WHERE id = '${CORE_NODE_ID}'`).catch(() => null);
+    
     const insightRows = await db.allQuery(
       `SELECT id, subtype, title, summary, canonical_text, confidence, source_refs, metadata
        FROM memory_nodes
@@ -638,7 +640,7 @@ async function runLivingCoreJob(apiKey) {
        LIMIT 50`
     ).catch(() => []);
 
-    if (!insightRows.length) return [];
+    if (!insightRows.length && !coreNode) return [];
 
     const highConfidenceInsights = insightRows.map(row => ({
       ...row,
@@ -648,7 +650,15 @@ async function runLivingCoreJob(apiKey) {
 
     const prompt = `
 You are synthesizing the "Living Core" of a user's memory. This is a single, evolving document that represents durable, long-term knowledge, core beliefs, and fundamental context.
-Given a list of high-confidence insights and the current core document (if any), update the core document to incorporate new knowledge.
+Given a list of high-confidence insights and the current core document (if any), update the core document to incorporate new knowledge. 
+If there is an existing core document, maintain its structure but integrate the new insights seamlessly.
+
+Existing Core Document:
+${coreNode ? JSON.stringify({ title: coreNode.title, summary: coreNode.summary, canonical_text: coreNode.canonical_text }) : 'None'}
+
+New High-Confidence Insights:
+${JSON.stringify(highConfidenceInsights.map(i => ({ id: i.id, title: i.title, summary: i.summary })))}
+
 Return strict JSON:
 {
   "title": "Living Core Memory",
@@ -656,9 +666,6 @@ Return strict JSON:
   "canonical_text": "...",
   "supporting_insight_ids": ["id1", "id2"]
 }
-
-Insights:
-${JSON.stringify(highConfidenceInsights.map(i => ({ id: i.id, title: i.title, summary: i.summary })))}
 `;
 
     const payload = await callLLM(prompt, normalizeLLMConfig(apiKey || process.env.DEEPSEEK_API_KEY || null), 0.2);

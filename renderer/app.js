@@ -2749,8 +2749,7 @@ class WeaveApp {
                     .attr("x2", width - 40)
                     .attr("y2", y)
                     .attr("stroke", "var(--glass-border)")
-                    .attr("stroke-width", 1)
-                    .attr("stroke-dasharray", "4,4");
+                    .attr("stroke-width", 1);
 
                 svg.append("line")
                     .attr("x1", 40)
@@ -2776,8 +2775,6 @@ class WeaveApp {
                     .attr("font-size", "10px")
                     .attr("font-weight", "600")
                     .attr("style", "text-transform: uppercase; letter-spacing: 0.05em;")
-                    .text(layer);
-            });
                     .text(layer);
             });
 
