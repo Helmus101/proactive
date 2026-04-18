@@ -25,9 +25,8 @@ function getEmbedding(row) {
 }
 
 const LAYER_RANKS = {
-  'core': 5,
-  'insight': 4,
-  'cloud': 3,
+  'core': 4,
+  'insight': 3,
   'semantic': 2,
   'episode': 1,
   'raw': 0,
@@ -534,7 +533,6 @@ function expansionScore(layer, subtype) {
   if (layer === 'episode') return 6;
   if (layer === 'raw' || layer === 'event') return 5;
   if (layer === 'semantic' && subtype === 'link') return 4;
-  if (layer === 'cloud') return 3;
   return 1;
 }
 
@@ -818,7 +816,7 @@ async function buildHybridGraphRetrieval({
   let finalFilters = retrievalPlan.filters;
 
   if (passiveOnly) {
-    const passiveLayers = ['core', 'insight', 'cloud'];
+    const passiveLayers = ['core', 'insight'];
     finalNodeRows = nodeRows.filter(r => passiveLayers.includes(r.layer));
     finalFilters = { ...finalFilters, passive_only: true };
   }

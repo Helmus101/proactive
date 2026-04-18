@@ -525,7 +525,7 @@ function buildCloudCandidates(episodes) {
   return { personMentions, taskMentions, topicMentions };
 }
 
-function deriveClouds(episodes) {
+function deriveInsights(episodes) {
   const out = [];
   const { personMentions, taskMentions, topicMentions } = buildCloudCandidates(episodes);
 
@@ -538,17 +538,17 @@ function deriveClouds(episodes) {
     confidence = applyTimeDecay(confidence, isoFromTs(latest));
     if (confidence < 0.35) continue;
     out.push({
-      id: `cld_${stableHash(`reengage|${item.label}`)}`,
-      layer: 'cloud',
-      subtype: 'relationship_hypothesis',
+      id: `ins_${stableHash(`reengage|${item.label}`)}`,
+      layer: 'insight',
+      subtype: 'relationship_pattern',
       title: `Re-engage ${item.label}`,
       summary: `${item.label} appears across ${item.episodes.length} episodes and may need follow-up.`,
       canonical_text: `${item.label} repeated relationship context follow up`,
       confidence,
-      status: 'open',
+      status: 'active',
       source_refs: uniq(item.episodes.flatMap((ep) => ep.source_refs), 32),
       metadata: {
-        hypothesis_type: 'relationship_reengage',
+        pattern_type: 'relationship_reengage',
         label: item.label,
         anchor_at: isoFromTs(anchor),
         anchor_date: isoFromTs(anchor)?.slice(0, 10) || null,
@@ -570,17 +570,17 @@ function deriveClouds(episodes) {
     if (confidence < 0.35) continue;
     
     out.push({
-      id: `cld_${stableHash(`open_loop|${item.label}`)}`,
-      layer: 'cloud',
-      subtype: 'open_loop',
+      id: `ins_${stableHash(`open_loop|${item.label}`)}`,
+      layer: 'insight',
+      subtype: 'open_loop_pattern',
       title: `Open loop: ${item.label}`,
       summary: `This action signal repeats across ${item.episodes.length} episodes and still looks unresolved.`,
       canonical_text: `${item.label} repeated open loop task`,
       confidence,
-      status: 'open',
+      status: 'active',
       source_refs: uniq(item.episodes.flatMap((ep) => ep.source_refs), 32),
       metadata: {
-        hypothesis_type: 'open_loop',
+        pattern_type: 'open_loop',
         label: item.label,
         anchor_at: isoFromTs(anchor),
         anchor_date: isoFromTs(anchor)?.slice(0, 10) || null,
@@ -597,17 +597,17 @@ function deriveClouds(episodes) {
     const latest = Math.max(...item.episodes.map((ep) => parseTs(ep.latest_activity_at || ep.end)));
     const anchor = Math.min(...item.episodes.map((ep) => parseTs(ep.anchor_at || ep.start)));
     out.push({
-      id: `cld_${stableHash(`topic_pattern|${item.label}`)}`,
-      layer: 'cloud',
+      id: `ins_${stableHash(`topic_pattern|${item.label}`)}`,
+      layer: 'insight',
       subtype: 'topic_pattern',
       title: `Recurring topic: ${item.label}`,
       summary: `${item.label} recurs across ${item.episodes.length} episodes and may be becoming a durable pattern.`,
       canonical_text: `${item.label} recurring topic pattern`,
       confidence: applyTimeDecay(Math.min(0.84, 0.55 + Math.min(0.22, item.episodes.length * 0.07)), isoFromTs(latest)),
-      status: 'open',
+      status: 'active',
       source_refs: uniq(item.episodes.flatMap((ep) => ep.source_refs), 32),
       metadata: {
-        hypothesis_type: 'topic_pattern',
+        pattern_type: 'topic_pattern',
         label: item.label,
         anchor_at: isoFromTs(anchor),
         anchor_date: isoFromTs(anchor)?.slice(0, 10) || null,
@@ -670,30 +670,6 @@ function deriveSemanticGroups(episodes) {
   }
 
   return nodes.slice(0, 80);
-}
-
-function deriveInsights(clouds) {
-  return clouds
-    .filter((cloud) => Number(cloud.confidence || 0) >= 0.8 && Number(cloud.metadata?.repeated_count || 0) >= 3)
-    .map((cloud) => ({
-      id: `ins_${stableHash(`insight|${cloud.id}`)}`,
-      layer: 'insight',
-      subtype: cloud.subtype,
-      title: cloud.title,
-      summary: cloud.summary,
-      canonical_text: cloud.canonical_text,
-      confidence: Math.min(0.95, Number(cloud.confidence || 0) + 0.08),
-      status: 'promoted',
-      source_refs: cloud.source_refs,
-      metadata: {
-        promoted_from_cloud_id: cloud.id,
-        anchor_at: cloud.metadata?.anchor_at || null,
-        anchor_date: cloud.metadata?.anchor_date || null,
-        latest_activity_at: cloud.metadata?.latest_activity_at || null,
-        supporting_episode_ids: cloud.metadata?.supporting_episode_ids || [],
-        repeated_count: cloud.metadata?.repeated_count || 0
-      }
-    }));
 }
 
 async function embedText(text) {
@@ -1074,32 +1050,6 @@ async function writeHigherLayerNode(node, version) {
   return { ...node, embedding };
 }
 
-async function semanticSimilarityLinking(newNode, allNodes, limit = 3, threshold = 0.82) {
-  if (!newNode.embedding || !Array.isArray(allNodes) || allNodes.length < 1) return;
-  
-  const scores = allNodes
-    .filter(n => n.id !== newNode.id && n.embedding)
-    .map(n => ({
-      node: n,
-      sim: cosineSimilarity(newNode.embedding, n.embedding)
-    }))
-    .filter(item => item.sim > threshold)
-    .sort((a, b) => b.sim - a.sim)
-    .slice(0, limit);
-
-  for (const item of scores) {
-    await upsertMemoryEdge({
-      fromNodeId: newNode.id,
-      toNodeId: item.node.id,
-      edgeType: 'RELATED_TO',
-      weight: Number(item.sim.toFixed(4)),
-      traceLabel: `Semantic similarity link (${item.sim.toFixed(3)})`,
-      evidenceCount: 1,
-      metadata: { auto_derived: true, similarity: item.sim }
-    });
-  }
-}
-
 async function addSimilarityEdges(nodes, threshold = 0.88) {
   if (!Array.isArray(nodes) || nodes.length < 2) return;
   
@@ -1153,7 +1103,7 @@ async function deriveGraphFromEvents({ eventIds = null, since = null, limit = 80
     }
   }
 
-  const clouds = deriveClouds(episodes);
+  const insights = deriveInsights(episodes);
   const semanticGroups = deriveSemanticGroups(episodes);
 
   for (const semanticGroup of semanticGroups) {
@@ -1174,52 +1124,35 @@ async function deriveGraphFromEvents({ eventIds = null, since = null, limit = 80
     }
   }
 
-  for (const cloud of clouds) {
-    const node = await writeHigherLayerNode(cloud, version);
-    allCreatedNodes.push(node);
-    for (const episodeId of cloud.metadata?.supporting_episode_ids || []) {
-      await upsertMemoryEdge({
-        fromNodeId: episodeId,
-        toNodeId: cloud.id,
-        edgeType: 'HYPOTHESIZES_FROM',
-        weight: cloud.confidence,
-        traceLabel: cloud.title,
-        evidenceCount: Number(cloud.metadata?.repeated_count || 1),
-        metadata: {
-          layer: 'cloud'
-        }
-      });
-    }
-    for (const semId of cloud.metadata?.supporting_semantic_ids || []) {
-      await upsertMemoryEdge({
-        fromNodeId: semId,
-        toNodeId: cloud.id,
-        edgeType: 'ABSTRACTED_TO',
-        weight: cloud.confidence,
-        traceLabel: 'Semantic node abstracted to recurring cloud pattern',
-        evidenceCount: 1,
-        metadata: {
-          layer: 'cloud'
-        }
-      });
-    }
-  }
-
-  const insights = deriveInsights(clouds);
   for (const insight of insights) {
     const node = await writeHigherLayerNode(insight, version);
     allCreatedNodes.push(node);
-    await upsertMemoryEdge({
-      fromNodeId: insight.metadata?.promoted_from_cloud_id,
-      toNodeId: insight.id,
-      edgeType: 'PROMOTED_FROM',
-      weight: insight.confidence,
-      traceLabel: 'Promoted into durable insight',
-      evidenceCount: Number(insight.metadata?.repeated_count || 1),
-      metadata: {
-        layer: 'insight'
-      }
-    });
+    for (const episodeId of insight.metadata?.supporting_episode_ids || []) {
+      await upsertMemoryEdge({
+        fromNodeId: episodeId,
+        toNodeId: insight.id,
+        edgeType: 'ABSTRACTED_TO',
+        weight: insight.confidence,
+        traceLabel: insight.title,
+        evidenceCount: Number(insight.metadata?.repeated_count || 1),
+        metadata: {
+          layer: 'insight'
+        }
+      });
+    }
+    for (const semId of insight.metadata?.supporting_semantic_ids || []) {
+      await upsertMemoryEdge({
+        fromNodeId: semId,
+        toNodeId: insight.id,
+        edgeType: 'ABSTRACTED_TO',
+        weight: insight.confidence,
+        traceLabel: 'Semantic node abstracted to recurring insight pattern',
+        evidenceCount: 1,
+        metadata: {
+          layer: 'insight'
+        }
+      });
+    }
   }
 
   // Dense connection pass
@@ -1228,7 +1161,6 @@ async function deriveGraphFromEvents({ eventIds = null, since = null, limit = 80
   await logGraphVersion(version, 'completed', {
     envelope_count: envelopes.length,
     episode_count: episodes.length,
-    cloud_count: clouds.length,
     insight_count: insights.length
   });
 
@@ -1283,7 +1215,6 @@ async function deriveGraphFromEvents({ eventIds = null, since = null, limit = 80
     version,
     envelopeCount: envelopes.length,
     episodeIds: episodes.map((episode) => episode.id),
-    cloudIds: clouds.map((cloud) => cloud.id),
     insightIds: insights.map((insight) => insight.id)
   };
 }

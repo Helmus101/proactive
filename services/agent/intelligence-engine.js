@@ -253,7 +253,7 @@ async function runEnrichmentJob(apiKey) {
     versionSeed: 'current'
   });
   
-  const layersToEnrich = ['raw', 'episode', 'semantic', 'cloud', 'insight', 'core'];
+  const layersToEnrich = ['raw', 'episode', 'semantic', 'insight', 'core'];
   const placeholders = layersToEnrich.map(() => '?').join(',');
   
   const nodesToEnrich = await db.allQuery(
@@ -295,16 +295,16 @@ async function runEpisodeJob() {
 }
 
 async function runWeeklyInsightJob(apiKey) {
-  const cloudRows = await db.allQuery(
+  const insightRows = await db.allQuery(
     `SELECT id, subtype, title, summary, canonical_text, confidence, source_refs, metadata
      FROM memory_nodes
-     WHERE layer = 'cloud' AND status = 'open'
+     WHERE layer = 'insight' AND status = 'active'
      ORDER BY confidence DESC
      LIMIT 32`
   ).catch(() => []);
-  if (!cloudRows.length) return [];
+  if (!insightRows.length) return [];
 
-  const strongClouds = cloudRows
+  const strongInsights = insightRows
     .map((row) => ({
       ...row,
       metadata: (() => {
@@ -324,22 +324,23 @@ async function runWeeklyInsightJob(apiKey) {
     }))
     .filter((row) => Number(row.confidence || 0) >= 0.78);
 
-  if (!strongClouds.length) return [];
+  if (!strongInsights.length) return [];
 
   const prompt = `
-You are promoting durable insights from repeated memory clouds.
+You are promoting durable context from recurring memory insights.
 Return strict JSON:
 [
   {
-    "cloud_id": "...",
+    "insight_id": "...",
     "title": "...",
     "summary": "...",
-    "confidence": 0.0
+    "confidence": 0.0,
+    "promote_to_core": true/false
   }
 ]
 
-Clouds:
-${JSON.stringify(strongClouds.map((row) => ({
+Insights:
+${JSON.stringify(strongInsights.map((row) => ({
     id: row.id,
     subtype: row.subtype,
     title: row.title,
@@ -354,56 +355,44 @@ ${JSON.stringify(strongClouds.map((row) => ({
   const created = [];
 
   for (const item of rows) {
-    const cloud = strongClouds.find((row) => row.id === item?.cloud_id);
-    if (!cloud) continue;
-    const insightId = `ins_${crypto.createHash('sha1').update(`${cloud.id}|${item.title || cloud.title}`).digest('hex').slice(0, 16)}`;
-    const title = String(item.title || cloud.title).trim().slice(0, 180);
-    const summary = String(item.summary || cloud.summary).trim().slice(0, 320);
-    const confidence = Math.max(Number(cloud.confidence || 0), Math.min(0.96, Number(item.confidence || 0.82)));
-    await upsertMemoryNode({
-      id: insightId,
-      layer: 'insight',
-      subtype: cloud.subtype,
-      title,
-      summary,
-      canonicalText: `${title}\n${summary}`,
-      confidence,
-      status: 'promoted',
-      sourceRefs: cloud.source_refs,
-      metadata: {
-        promoted_from_cloud_id: cloud.id,
-        anchor_at: cloud.metadata?.anchor_at || null,
-        anchor_date: cloud.metadata?.anchor_date || null,
-        latest_activity_at: cloud.metadata?.latest_activity_at || null,
-        supporting_episode_ids: cloud.metadata?.supporting_episode_ids || []
-      },
-      graphVersion: 'zero_base_memory_v1:current'
-    });
-    await upsertMemoryEdge({
-      fromNodeId: cloud.id,
-      toNodeId: insightId,
-      edgeType: 'PROMOTED_FROM',
-      weight: confidence,
-      traceLabel: 'LLM-promoted durable insight',
-      evidenceCount: Number(cloud.metadata?.repeated_count || 1),
-      metadata: {}
-    });
-    await upsertRetrievalDoc({
-      docId: `node:${insightId}`,
-      sourceType: 'node',
-      nodeId: insightId,
-      timestamp: cloud.metadata?.anchor_at || cloud.metadata?.latest_activity_at || new Date().toISOString(),
-      text: `${title}\n${summary}`,
-      metadata: {
-        layer: 'insight',
-        subtype: cloud.subtype,
-        source_refs: cloud.source_refs,
-        anchor_at: cloud.metadata?.anchor_at || null,
-        anchor_date: cloud.metadata?.anchor_date || null,
-        latest_activity_at: cloud.metadata?.latest_activity_at || null
-      }
-    });
-    created.push(insightId);
+    const insight = strongInsights.find((row) => row.id === item?.insight_id);
+    if (!insight) continue;
+    
+    if (item.promote_to_core) {
+      const coreId = `core_${crypto.createHash('sha1').update(`${insight.id}|${item.title || insight.title}`).digest('hex').slice(0, 16)}`;
+      const title = String(item.title || insight.title).trim().slice(0, 180);
+      const summary = String(item.summary || insight.summary).trim().slice(0, 320);
+      const confidence = Math.max(Number(insight.confidence || 0), Math.min(0.98, Number(item.confidence || 0.9)));
+      
+      await upsertMemoryNode({
+        id: coreId,
+        layer: 'core',
+        title,
+        summary,
+        canonicalText: `${title}\n${summary}`,
+        confidence,
+        status: 'active',
+        sourceRefs: insight.source_refs,
+        metadata: {
+          promoted_from_insight_id: insight.id,
+          anchor_at: insight.metadata?.anchor_at || null,
+          anchor_date: insight.metadata?.anchor_date || null
+        },
+        graphVersion: 'zero_base_memory_v1:current'
+      });
+      
+      await upsertMemoryEdge({
+        fromNodeId: insight.id,
+        toNodeId: coreId,
+        edgeType: 'ABSTRACTED_TO',
+        weight: confidence,
+        traceLabel: 'LLM-promoted to Living Core',
+        evidenceCount: Number(insight.metadata?.repeated_count || 1),
+        metadata: {}
+      });
+      
+      created.push(coreId);
+    }
   }
 
   return created;
@@ -497,7 +486,7 @@ ${JSON.stringify(blob)}`;
         summary,
         canonicalText: `${title}\n${summary}`,
         confidence,
-        status: 'open',
+        status: 'active',
         sourceRefs: blob.map((event) => event.id).filter(Boolean).slice(0, 160),
         metadata: {
           window_ms: windowMs,
@@ -552,70 +541,67 @@ ${JSON.stringify(blob)}`;
   }
 }
 
-// Daily insights runner that can promote multiple insights based on recent clouds/semantics.
+// Daily insights runner that can promote multiple insights based on recent semantic groups.
 async function runDailyInsights(apiKey) {
   try {
-    // Reuse weekly logic but operate on recent day and allow multiple promotions.
-    // Select candidate clouds from last 48 hours
     const since = new Date(Date.now() - (48 * 60 * 60 * 1000)).toISOString();
-    const cloudRows = await db.allQuery(
+    const semanticRows = await db.allQuery(
       `SELECT id, subtype, title, summary, canonical_text, confidence, source_refs, metadata
        FROM memory_nodes
-       WHERE layer = 'cloud' AND status = 'open' AND COALESCE(metadata, '') != '' AND json_extract(metadata, '$.latest_activity_at') >= ?
+       WHERE layer = 'semantic' AND status = 'active' AND COALESCE(metadata, '') != '' AND json_extract(metadata, '$.latest_activity_at') >= ?
        ORDER BY confidence DESC
        LIMIT 48`,
       [since]
     ).catch(() => []);
-    if (!cloudRows.length) return [];
+    if (!semanticRows.length) return [];
 
-    // Keep strong clouds
-    const strongClouds = cloudRows.map((row) => ({
+    const strongSemantics = semanticRows.map((row) => ({
       ...row,
       metadata: (() => { try { return JSON.parse(row.metadata || '{}'); } catch (_) { return {}; } })(),
       source_refs: (() => { try { return JSON.parse(row.source_refs || '[]'); } catch (_) { return []; } })()
     })).filter(r => Number(r.confidence || 0) >= 0.6);
-    if (!strongClouds.length) return [];
+    if (!strongSemantics.length) return [];
 
-    const prompt = `Promote 1-5 high-quality insights from these memory clouds. Return strict JSON array of {cloud_id, title, summary, confidence}.\nClouds:\n${JSON.stringify(strongClouds.map(c=>({id:c.id, title:c.title, summary:c.summary, confidence:c.confidence, repeated_count:c.metadata?.repeated_count||0})))} `;
+    const prompt = `Promote 1-5 high-quality insights from these semantic patterns. Return strict JSON array of {semantic_id, title, summary, confidence}.\nSemantics:\n${JSON.stringify(strongSemantics.map(s=>({id:s.id, title:s.title, summary:s.summary, confidence:s.confidence, repeated_count:s.metadata?.repeated_count||0})))} `;
     const payload = await callLLM(prompt, normalizeLLMConfig(apiKey || process.env.DEEPSEEK_API_KEY || null), 0.2);
     const rows = Array.isArray(payload) ? payload : [];
     const created = [];
     for (const item of rows) {
-      const cloud = strongClouds.find((c) => c.id === item?.cloud_id);
-      if (!cloud) continue;
-      const insightId = `ins_${crypto.createHash('sha1').update(`${cloud.id}|${item.title || cloud.title}`).digest('hex').slice(0, 16)}`;
-      const title = String(item.title || cloud.title).trim().slice(0, 180);
-      const summary = String(item.summary || cloud.summary).trim().slice(0, 320);
-      const confidence = Math.max(Number(cloud.confidence || 0), Math.min(0.96, Number(item.confidence || 0.82)));
+      const semantic = strongSemantics.find((s) => s.id === item?.semantic_id);
+      if (!semantic) continue;
+      const insightId = `ins_${crypto.createHash('sha1').update(`${semantic.id}|${item.title || semantic.title}`).digest('hex').slice(0, 16)}`;
+      const title = String(item.title || semantic.title).trim().slice(0, 180);
+      const summary = String(item.summary || semantic.summary).trim().slice(0, 320);
+      const confidence = Math.max(Number(semantic.confidence || 0), Math.min(0.96, Number(item.confidence || 0.82)));
       await upsertMemoryNode({
         id: insightId,
         layer: 'insight',
-        subtype: cloud.subtype,
+        subtype: semantic.subtype,
         title,
         summary,
         canonicalText: `${title}\n${summary}`,
         confidence,
-        status: 'promoted',
-        sourceRefs: cloud.source_refs,
-        metadata: { promoted_from_cloud_id: cloud.id, anchor_at: cloud.metadata?.anchor_at || null },
+        status: 'active',
+        sourceRefs: semantic.source_refs,
+        metadata: { promoted_from_semantic_id: semantic.id, anchor_at: semantic.metadata?.anchor_at || null },
         graphVersion: 'daily_insights_v1'
       });
       await upsertMemoryEdge({
-        fromNodeId: cloud.id,
+        fromNodeId: semantic.id,
         toNodeId: insightId,
-        edgeType: 'PROMOTED_FROM',
+        edgeType: 'ABSTRACTED_TO',
         weight: confidence,
-        traceLabel: 'Daily LLM-promoted insight',
-        evidenceCount: Number(cloud.metadata?.repeated_count || 1),
+        traceLabel: 'Daily LLM-promoted insight from semantic pattern',
+        evidenceCount: Number(semantic.metadata?.repeated_count || 1),
         metadata: {}
       });
       await upsertRetrievalDoc({
         docId: `node:${insightId}`,
         sourceType: 'node',
         nodeId: insightId,
-        timestamp: cloud.metadata?.anchor_at || cloud.metadata?.latest_activity_at || new Date().toISOString(),
+        timestamp: semantic.metadata?.anchor_at || semantic.metadata?.latest_activity_at || new Date().toISOString(),
         text: `${title}\n${summary}`,
-        metadata: { layer: 'insight', subtype: cloud.subtype }
+        metadata: { layer: 'insight', subtype: semantic.subtype }
       });
       created.push(insightId);
     }
@@ -631,7 +617,7 @@ async function runLivingCoreJob(apiKey) {
     const insightRows = await db.allQuery(
       `SELECT id, subtype, title, summary, canonical_text, confidence, source_refs, metadata
        FROM memory_nodes
-       WHERE layer = 'insight' AND confidence > 0.9
+       WHERE layer = 'insight' AND confidence > 0.85
        ORDER BY confidence DESC
        LIMIT 50`
     ).catch(() => []);

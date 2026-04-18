@@ -43,7 +43,6 @@ const MEMORY_LAYERS = {
   RAW: 'raw',
   EPISODE: 'episode',
   SEMANTIC: 'semantic',
-  CLOUD: 'cloud',
   INSIGHT: 'insight',
   CORE: 'core'
 };
