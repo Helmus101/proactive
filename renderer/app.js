@@ -2823,7 +2823,9 @@ class WeaveApp {
             console.error("Graph render error:", err);
             this.settingsGraphContainer.innerHTML = '<div class="graph-placeholder">Failed to load graph.</div>';
         }
-    }\n\n    async openMemoryDetailById(nodeId) {
+    }
+
+    async openMemoryDetailById(nodeId) {
         try {
             const { nodes } = await window.electronAPI.getFullMemoryGraph();
             const node = nodes.find(n => n.id === nodeId);

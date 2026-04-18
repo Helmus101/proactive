@@ -1,6 +1,11 @@
 /* ─── RESET & BASE ─────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* Make interactive controls opt-out of draggable app-region so they remain clickable in Electron */
+button, a, input, textarea, select, label, [role="button"], .pill-btn, .ghost-button, .nav-pill, .icon-btn, .send-button {
+    -webkit-app-region: no-drag;
+}
+
 :root {
     /* Liquid Glass Minimalism Design System */
     
