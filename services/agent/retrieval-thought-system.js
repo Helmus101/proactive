@@ -214,6 +214,17 @@ function inferTemporalWindow(query, now = new Date()) {
     });
   }
 
+  if (/\bthis week\b/.test(lower)) {
+    const currentWeekStart = startOfDay(now);
+    currentWeekStart.setDate(now.getDate() - ((now.getDay() + 6) % 7));
+    return buildTemporalRange({
+      label: 'this_week',
+      start: currentWeekStart,
+      end: endOfDay(now),
+      granularity: 'week'
+    });
+  }
+
   if (/\blast week\b/.test(lower)) {
     const currentWeekStart = startOfDay(now);
     currentWeekStart.setDate(now.getDate() - ((now.getDay() + 6) % 7));
@@ -226,6 +237,16 @@ function inferTemporalWindow(query, now = new Date()) {
       start,
       end,
       granularity: 'week'
+    });
+  }
+
+  if (/\bthis month\b/.test(lower)) {
+    const start = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+    return buildTemporalRange({
+      label: 'this_month',
+      start,
+      end: endOfDay(now),
+      granularity: 'month'
     });
   }
 
