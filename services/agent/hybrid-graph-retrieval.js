@@ -590,18 +590,30 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
     for (const edge of edges) {
       const neighborId = edge.from_node_id === current.id ? edge.to_node_id : edge.from_node_id;
       if (!neighborId || seen.has(neighborId)) continue;
-      const node = await db.getQuery(
-        `SELECT id, layer, subtype, title, summary, metadata, source_refs, embedding, created_at, updated_at
-         FROM memory_nodes
-         WHERE id = ?`,
-        [neighborId]
-      ).catch(() => null);
+      
+      let node = poolMap.get(neighborId);
+      if (!node) {
+        // Fallback for nodes not in candidate pool (e.g. if filters excluded them)
+        // but we still allow core/insight expansion if they exist
+        node = await db.getQuery(
+          `SELECT id, layer, subtype, title, summary, metadata, source_refs, embedding, created_at, updated_at
+           FROM memory_nodes
+           WHERE id = ?`,
+          [neighborId]
+        ).catch(() => null);
+        
+        if (node) {
+          node.metadata = asObj(node.metadata);
+          node.source_refs = parseSourceRefs(node.source_refs);
+        }
+      }
+      
       if (!node) continue;
 
       // Restrict traversal: only higher or equal rank to lower/equal rank
       if ((LAYER_RANKS[node.layer] || 0) > (LAYER_RANKS[current.layer] || 0)) continue;
 
-      const metadata = asObj(node.metadata);
+      const metadata = node.metadata || {};
       neighbors.push({
         id: node.id,
         layer: node.layer,
@@ -814,6 +826,7 @@ async function buildHybridGraphRetrieval({
   const lexicalRanking = [];
   const rawEventLexicalRanking = [];
   
+  emit('search_stage', 'started', { label: 'Search', detail: 'Finding primary memory seeds...' });
   emit('vector_search_started', 'started', { query_count: (retrievalPlan.search_queries || []).length });
   const semanticRankings = retrievalPlan.mode === 'queryless'
     ? []
@@ -822,6 +835,9 @@ async function buildHybridGraphRetrieval({
   const semanticSeeds = [].concat(...semanticRankings).filter(r => r.base_score > 0.7);
   emit('seeds_identified', 'completed', { count: semanticSeeds.length });
 
+  emit('search_stage', 'completed', { label: 'Search', detail: `Found ${semanticSeeds.length} primary memory seeds.` });
+
+  emit('expansion_stage', 'started', { label: 'Expand', detail: 'Traversing graph for supporting evidence...' });
   emit('traversal_started', 'started', { mode: retrievalPlan.entry_mode || 'hybrid' });
   const coreRanking = await coreDownRanking(finalNodeRows, retrievalPlan, 80, semanticSeeds);
   const coreToRawRanking = (options.strategy === 'core_to_raw' || retrievalPlan.strategy === 'core_to_raw')
@@ -840,6 +856,7 @@ async function buildHybridGraphRetrieval({
 
   // Recursive Retrieval Pass
   if (recursionDepth > 0 && !passiveOnly) {
+    emit('deep_search', 'started', { label: 'Deep search', detail: 'Expanding from anchor nodes...' });
     const anchorNodes = fused
       .filter(row => (row.layer === 'core' || row.layer === 'insight') && row.fused_score > 0.6)
       .slice(0, 3);
@@ -855,6 +872,7 @@ async function buildHybridGraphRetrieval({
         );
       }
     }
+    emit('deep_search', 'completed');
   }
 
   const reranked = rerankFusedResults(fused, retrievalPlan);
@@ -875,7 +893,7 @@ async function buildHybridGraphRetrieval({
       const targetNodes = suggestedIndices.map(idx => seeds[idx]).filter(Boolean);
       
       if (targetNodes.length > 0) {
-        emit('edge_traversal', 'started', { detail: `Traversing edges from ${targetNodes.length} nodes to find more context...` });
+        emit('agentic_traversal', 'started', { label: 'Guided expansion', detail: `Traversing edges based on LLM suggestion...` });
         const expandedResults = await expandGraph(targetNodes, 2, 50, finalNodeRows);
         
         // Add expanded nodes to seeds
@@ -889,7 +907,7 @@ async function buildHybridGraphRetrieval({
         }));
         
         seeds = [...seeds, ...newSeeds];
-        emit('edge_traversed', 'completed', { count: newSeeds.length });
+        emit('agentic_traversal', 'completed', { count: newSeeds.length });
       }
     } else {
       emit('agentic_review', 'completed', { detail: 'Context is sufficient.' });
@@ -906,6 +924,7 @@ async function buildHybridGraphRetrieval({
     .map(r => ({ ...r, node_id: r.id }));
     
   const graph = await expandGraph([...seeds, ...coreNodesForExpansion], retrievalPlan.hop_limit, MAX_EXPANDED, finalNodeRows);
+  emit('expansion_stage', 'completed', { label: 'Expand', detail: `Expanded to ${graph.expandedNodes.length} connected nodes.` });
   const primaryNodes = seeds.map((seed) => ({
     id: seed.node_id || seed.event_id || seed.key,
     node_id: seed.node_id || null,

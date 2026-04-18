@@ -845,11 +845,6 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   };
 
   if ((baseThought.source_mode || baseThought.strategy_mode) !== 'web_only') {
-    emitStage('memory_search', 'started', {
-      label: 'Memory search',
-      detail: 'Searching memory graph for primary nodes and supporting context.'
-    });
-
     // Passive-First Heuristic: attempt retrieval from Core, Insight, Cloud layers first
     retrieval = await executeParallelRetrieval(retrievalQuery, baseThought, {
       mode: 'chat',
@@ -955,42 +950,6 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       query_sets: retrieval.query_sets || retrieval.generated_queries || baseThought.query_sets || null
     };
 
-    emitStage('memory_search', 'completed', {
-      label: 'Memory search',
-      detail: formatStageDetail([
-        `Found ${retrieval.seed_results?.length || 0} candidate seeds and ${retrieval.evidence_count || 0} evidence items.`,
-        retrieval.date_filter_status === 'widened' ? 'Widened the search filters because the first pass was sparse.' : ''
-      ], 'Completed memory retrieval.'),
-      counts: {
-        seeds: Number(retrieval.seed_results?.length || 0),
-        evidence: Number(retrieval.evidence_count || 0)
-      },
-      preview_items: (retrieval.seed_results || []).slice(0, 3).map((item) => item.title || item.id)
-    });
-    emitStage('seed_selection', 'completed', {
-      label: 'Node retrieval',
-      detail: `Selected ${retrieval.primary_nodes?.length || retrieval.seed_nodes?.length || 0} primary nodes to anchor retrieval.`,
-      counts: {
-        primary_nodes: Number(retrieval.primary_nodes?.length || retrieval.seed_nodes?.length || 0)
-      },
-      preview_items: (retrieval.primary_nodes || retrieval.seed_nodes || []).slice(0, 3).map((item) => item.title || item.id)
-    });
-    emitStage('edge_expansion', 'completed', {
-      label: 'Edge expansion',
-      detail: (() => {
-        const jumpCount = (retrieval.edge_paths || []).filter(e => e.trace_label === 'semantic_jump').length;
-        return `Expanded downward through ${retrieval.edge_paths?.length || 0} edge paths to gather lower-chain support.${jumpCount > 0 ? ` Included ${jumpCount} similarity-based semantic jumps.` : ''}`;
-      })(),
-      counts: {
-        support_nodes: Number(retrieval.support_nodes?.length || 0),
-        evidence_nodes: Number(retrieval.evidence_nodes?.length || 0),
-        expanded_nodes: Number(retrieval.expanded_nodes?.length || 0)
-      },
-      preview_items: [
-        ...(retrieval.support_nodes || []).slice(0, 2).map((item) => item.title || item.id),
-        ...(retrieval.evidence_nodes || []).slice(0, 2).map((item) => item.title || item.id)
-      ]
-    });
     emitStage('ranking', 'completed', {
       label: 'Ranking and packing',
       detail: `Packed ${retrieval.evidence_count || 0} evidence items from primary nodes, support nodes, and downward evidence.`,
