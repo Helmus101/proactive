@@ -2742,13 +2742,16 @@ class WeaveApp {
             // Add background brackets and labels
             layers.forEach((layer) => {
                 const y = layerY(layer);
+                
                 svg.append("line")
                     .attr("x1", 40)
                     .attr("y1", y)
                     .attr("x2", width - 40)
                     .attr("y2", y)
                     .attr("stroke", "var(--glass-border)")
-                // Left bracket tick
+                    .attr("stroke-width", 1)
+                    .attr("stroke-dasharray", "4,4");
+
                 svg.append("line")
                     .attr("x1", 40)
                     .attr("y1", y - 5)
@@ -2756,8 +2759,7 @@ class WeaveApp {
                     .attr("y2", y + 5)
                     .attr("stroke", "var(--glass-border)")
                     .attr("stroke-width", 1);
-                
-                // Right bracket tick
+
                 svg.append("line")
                     .attr("x1", width - 40)
                     .attr("y1", y - 5)
@@ -2765,8 +2767,6 @@ class WeaveApp {
                     .attr("y2", y + 5)
                     .attr("stroke", "var(--glass-border)")
                     .attr("stroke-width", 1);
-                    .attr("stroke-width", 1)
-                    .attr("stroke-dasharray", "4,4");
                 
                 svg.append("text")
                     .attr("x", 10)
@@ -2776,6 +2776,8 @@ class WeaveApp {
                     .attr("font-size", "10px")
                     .attr("font-weight", "600")
                     .attr("style", "text-transform: uppercase; letter-spacing: 0.05em;")
+                    .text(layer);
+            });
                     .text(layer);
             });
 
