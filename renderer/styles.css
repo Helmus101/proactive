@@ -4029,6 +4029,10 @@ body.compact-mode .suggestion-card {
     color: var(--text-tertiary);
 }
 
+.library-card-date {
+    font-weight: 500;
+}
+
 /* ─── SEARCH ANIMATIONS ────────────────────────────────────────── */
 @keyframes scanning {
     0% { transform: translateY(-100%); opacity: 0; }

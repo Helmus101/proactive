@@ -377,7 +377,8 @@ ${JSON.stringify(strongClouds.map((row) => ({
         latest_activity_at: cloud.metadata?.latest_activity_at || null,
         supporting_episode_ids: cloud.metadata?.supporting_episode_ids || []
       },
-      graphVersion: 'zero_base_memory_v1:current'
+      graphVersion: 'zero_base_memory_v1:current',
+      anchorDate: cloud.metadata?.anchor_date || null
     });
     await upsertMemoryEdge({
       fromNodeId: cloud.id,
@@ -507,9 +508,12 @@ ${JSON.stringify(blob)}`;
           cluster_count: groups.length,
           cluster_anchor_at: new Date(group.startTs).toISOString(),
           cluster_latest_at: new Date(group.latestTs).toISOString(),
+          anchor_at: new Date(group.latestTs || group.startTs || Date.now()).toISOString(),
+          anchor_date: new Date(group.latestTs || group.startTs || Date.now()).toISOString().slice(0, 10),
           source_type_group: group.typeGroup
         },
-        graphVersion: 'semantic_window_v2'
+        graphVersion: 'semantic_window_v2',
+        anchorDate: new Date(group.latestTs || group.startTs || Date.now()).toISOString().slice(0, 10)
       });
 
       for (const ev of blob.slice(0, 120)) {
@@ -597,8 +601,13 @@ async function runDailyInsights(apiKey) {
         confidence,
         status: 'promoted',
         sourceRefs: cloud.source_refs,
-        metadata: { promoted_from_cloud_id: cloud.id, anchor_at: cloud.metadata?.anchor_at || null },
-        graphVersion: 'daily_insights_v1'
+        metadata: { 
+          promoted_from_cloud_id: cloud.id, 
+          anchor_at: cloud.metadata?.anchor_at || null,
+          anchor_date: cloud.metadata?.anchor_date || (cloud.metadata?.anchor_at ? cloud.metadata.anchor_at.slice(0, 10) : null)
+        },
+        graphVersion: 'daily_insights_v1',
+        anchorDate: cloud.metadata?.anchor_date || (cloud.metadata?.anchor_at ? cloud.metadata.anchor_at.slice(0, 10) : null)
       });
       await upsertMemoryEdge({
         fromNodeId: cloud.id,
@@ -686,9 +695,12 @@ Return strict JSON:
       sourceRefs: payload.supporting_insight_ids || [],
       metadata: {
         supporting_insight_ids: payload.supporting_insight_ids || [],
-        last_synthesis_at: new Date().toISOString()
+        last_synthesis_at: new Date().toISOString(),
+        anchor_at: new Date().toISOString(),
+        anchor_date: new Date().toISOString().slice(0, 10)
       },
-      graphVersion: 'living_core_v2'
+      graphVersion: 'living_core_v2',
+      anchorDate: new Date().toISOString().slice(0, 10)
     });
 
     if (Array.isArray(payload.supporting_insight_ids)) {
