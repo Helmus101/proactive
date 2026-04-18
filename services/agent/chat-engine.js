@@ -508,6 +508,20 @@ function buildThinkingResultsSummary(retrieval, drilldownEvidence = []) {
   if (Array.isArray(retrieval?.seed_results) && retrieval.seed_results.length) {
     details.push(`Initial seed search found ${retrieval.seed_results.length} ranked seed results before graph expansion.`);
   }
+  
+  // Add iterative flow details if available in stageTrace
+  const stageTrace = retrieval?.stage_trace || [];
+  const primarySearchEvents = stageTrace.filter(s => s.step === 'primary_search_results');
+  if (primarySearchEvents.length) {
+    const totalSeeds = primarySearchEvents.reduce((sum, s) => sum + (s.count || 0), 0);
+    details.push(`Iterative flow: identified ${totalSeeds} top-tier seeds via RRF consolidation.`);
+  }
+  const iterativeExpansionEvents = stageTrace.filter(s => s.step === 'iterative_expansion');
+  if (iterativeExpansionEvents.length) {
+    const totalExpanded = iterativeExpansionEvents.reduce((sum, s) => sum + (s.count || 0), 0);
+    details.push(`Hierarchical expansion: added ${totalExpanded} neighbors from top seeds.`);
+  }
+
   if (Array.isArray(retrieval?.graph_expansion_results) && retrieval.graph_expansion_results.length) {
     details.push(`Graph expansion added ${retrieval.graph_expansion_results.length} connected nodes (${supportCount} support, ${evidenceNodeCount} evidence).`);
   }
@@ -743,8 +757,16 @@ async function executeParallelRetrieval(baseQuery, baseThought, options, onProgr
 }
 
 async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
-  const emit = (data) => { try { onStep?.(data); } catch (_) {} };
   const stageTrace = [];
+  const emit = (data) => {
+    try {
+      if (data && (data.step === 'primary_search_results' || data.step === 'iterative_expansion')) {
+        stageTrace.push(buildStageEvent(data.step, data.status || 'completed', data));
+      }
+      onStep?.(data);
+    } catch (_) {}
+  };
+  
   // Normalize API key: prefer explicit param, then environment, then options; treat empty string as absent
   if (!apiKey) {
     apiKey = process.env.DEEPSEEK_API_KEY || options?.apiKey || null;
@@ -853,7 +875,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       source_types: options?.source_types,
       retrieval_thought: baseThought,
       passiveOnly: true
-    }, onStep);
+    }, emit);
 
     const passiveMaxScore = retrieval.evidence?.length ? Math.max(...retrieval.evidence.map((e) => e.score || 0)) : 0;
     const isPassiveSufficient = (retrieval.evidence_count >= 3 && passiveMaxScore > 0.75) || (passiveMaxScore > 0.9);
@@ -866,7 +888,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
         source_types: options?.source_types,
         retrieval_thought: baseThought,
         passiveOnly: false
-      }, onStep);
+      }, emit);
     }
 
     const canWiden = Boolean(baseThought?.initial_date_range || baseThought?.filters?.app) && !baseThought?.fallback_policy?.attempted;
@@ -927,7 +949,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
         mode: 'chat',
         recursionDepth: 1,
         passiveOnly: false
-      }, onStep);
+      }, emit);
       if ((deepRetrieval.evidence_count || 0) > (retrieval.evidence_count || 0)) {
          retrieval = {
            ...deepRetrieval,

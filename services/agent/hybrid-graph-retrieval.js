@@ -34,6 +34,8 @@ const LAYER_RANKS = {
   'event': 0
 };
 
+const HIERARCHY_SEQUENCE = ['core', 'insight', 'semantic', 'episode', 'raw'];
+
 const EDGE_WEIGHTS = {
   'PROMOTED_FROM': 1.2,
   'ABSTRACTED_TO': 1.2,
@@ -429,6 +431,7 @@ async function vectorSearchNodes(nodeRows, semanticQueries = []) {
           event_id: null,
           layer: row.layer,
           subtype: row.subtype,
+          title: row.title,
           anchor_at: row.anchor_at || row.timestamp,
           latest_activity_at: row.latest_activity_at || row.timestamp,
           timestamp: row.timestamp,
@@ -556,6 +559,95 @@ function findSemanticNeighbors(targetNode, pool, threshold = 0.85, limit = 5) {
       similarity: item.similarity,
       isSemanticJump: true
     }));
+}
+
+async function expandGraphHierarchical(seedNodes = [], pool = []) {
+  const seedIds = seedNodes.map(s => s.node_id || s.id).filter(Boolean);
+  const seen = new Set(seedIds);
+  const expanded = [];
+  const edgePaths = [];
+  const poolMap = new Map(pool.map(n => [n.id, n]));
+
+  for (const seed of seedNodes) {
+    const seedId = seed.node_id || seed.id;
+    if (!seedId) continue;
+
+    let currentLayer = String(seed.layer || 'raw').toLowerCase();
+    if (currentLayer === 'event') currentLayer = 'raw';
+    const currentIdx = HIERARCHY_SEQUENCE.indexOf(currentLayer);
+    
+    // Valid target layers are same layer or exactly one layer below
+    const validLayers = [currentLayer];
+    if (currentIdx !== -1 && currentIdx < HIERARCHY_SEQUENCE.length - 1) {
+      validLayers.push(HIERARCHY_SEQUENCE[currentIdx + 1]);
+    }
+
+    const edges = await db.allQuery(
+      `SELECT id, from_node_id, to_node_id, edge_type, weight, trace_label, evidence_count
+       FROM memory_edges
+       WHERE from_node_id = ? OR to_node_id = ?
+       LIMIT 100`,
+      [seedId, seedId]
+    ).catch(() => []);
+
+    for (const edge of edges) {
+      const neighborId = edge.from_node_id === seedId ? edge.to_node_id : edge.from_node_id;
+      if (!neighborId || seen.has(neighborId)) continue;
+
+      let node = poolMap.get(neighborId);
+      if (!node) {
+        node = await db.getQuery(
+          `SELECT id, layer, subtype, title, summary, canonical_text, metadata, source_refs, embedding, updated_at, created_at
+           FROM memory_nodes
+           WHERE id = ?`,
+          [neighborId]
+        ).catch(() => null);
+        if (node) {
+          node.metadata = asObj(node.metadata);
+          node.source_refs = parseSourceRefs(node.source_refs);
+        }
+      }
+
+      if (!node) continue;
+
+      let neighborLayer = String(node.layer || 'raw').toLowerCase();
+      if (neighborLayer === 'event') neighborLayer = 'raw';
+      
+      // Strict rule: same layer or exactly one layer below
+      if (!validLayers.includes(neighborLayer)) continue;
+
+      seen.add(neighborId);
+      const metadata = node.metadata || {};
+      const expandedNode = {
+        id: node.id,
+        layer: node.layer,
+        type: node.layer,
+        subtype: node.subtype || null,
+        title: node.title || metadata.name || metadata.fact || node.id,
+        summary: node.summary || metadata.summary || '',
+        text: [node.title, node.summary, node.canonical_text].filter(Boolean).join('\n'),
+        source_refs: parseSourceRefs(node.source_refs),
+        timestamp: metadata.end || metadata.start || node.updated_at || node.created_at || null,
+        depth: 1,
+        match_reason: `hierarchical_expansion:${seedId}`
+      };
+
+      expanded.push(expandedNode);
+      edgePaths.push({
+        from: seedId,
+        to: node.id,
+        relation: edge.edge_type,
+        trace_label: edge.trace_label || 'hierarchical_expansion',
+        weight: Number(edge.weight || 1),
+        depth: 1
+      });
+    }
+  }
+
+  return {
+    expandedNodes: expanded,
+    edgePaths
+  };
 }
 
 async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpanded = MAX_EXPANDED, pool = []) {
@@ -832,6 +924,21 @@ async function buildHybridGraphRetrieval({
     ? []
     : await vectorSearchNodes(finalNodeRows, retrievalPlan.semantic_queries || retrievalPlan.search_queries || []);
   
+  // Consolidate and rank all search results picking the top 5
+  const consolidatedSeeds = reciprocalRankFusion(semanticRankings);
+  const primarySeeds = consolidatedSeeds.slice(0, 5);
+  
+  emit('primary_search_results', 'completed', {
+    count: primarySeeds.length,
+    preview_items: primarySeeds.map(s => `${s.text?.split('\n')[0] || s.node_id} (Score: ${s.fused_score})`)
+  });
+
+  const hierarchicalExpansion = await expandGraphHierarchical(primarySeeds, finalNodeRows);
+  emit('iterative_expansion', 'completed', {
+    count: hierarchicalExpansion.expandedNodes.length,
+    detail: `Expanded graph from top 5 seeds following hierarchical sequence.`
+  });
+
   const semanticSeeds = [].concat(...semanticRankings).filter(r => r.base_score > 0.7);
   emit('seeds_identified', 'completed', { count: semanticSeeds.length });
 
@@ -1064,6 +1171,20 @@ async function buildHybridGraphRetrieval({
     prioritizedSeen.add(identity);
     prioritizedEvidenceRows.push(row);
   };
+
+  // Prioritize primary seeds and their hierarchical expansion
+  primarySeeds.forEach((row) => pushEvidenceRow(row));
+  hierarchicalExpansion.expandedNodes.forEach((node) => pushEvidenceRow({
+    key: `node:${node.id}`,
+    node_id: node.id,
+    layer: node.layer,
+    subtype: node.subtype,
+    text: node.text || [node.title, node.summary].filter(Boolean).join('\n'),
+    timestamp: node.timestamp,
+    base_score: 0.95,
+    match_reason: node.match_reason || 'hierarchical_expansion'
+  }));
+
   seeds.forEach((row) => pushEvidenceRow(row));
   evidenceNodes.forEach((node) => pushEvidenceRow({
     key: node.layer === 'event' ? `event:${node.id}` : `node:${node.id}`,
@@ -1121,6 +1242,12 @@ async function buildHybridGraphRetrieval({
   ];
 
   const contextSections = [];
+  if (primarySeeds.length) {
+    contextSections.push(`PRIMARY SEARCH SEEDS:\n${primarySeeds.map((seed) => `- [${seed.layer || 'node'}] ${seed.title || seed.node_id}: ${String(seed.text || '').slice(0, 1000)}`).join('\n')}`);
+  }
+  if (hierarchicalExpansion.expandedNodes.length) {
+    contextSections.push(`HIERARCHICAL EXPANSION:\n${hierarchicalExpansion.expandedNodes.map((node) => `- [${node.layer}] ${node.title}: ${String(node.text || node.summary || '').slice(0, 1000)}`).join('\n')}`);
+  }
   if (seeds.length) {
     contextSections.push(`SEED NODES:\n${seeds.map((seed) => `- [${seed.layer || 'node'}] ${String(seed.text || '').slice(0, 180)}`).join('\n')}`);
   }
