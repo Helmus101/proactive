@@ -151,7 +151,7 @@ function rerankFusedResults(rows, retrievalPlan) {
     .map((row) => {
       // Increased weight/bonus for nodes that were directly matched via semantic search queries.
       const semanticBonus = String(row.match_reason || '').startsWith('semantic:') ? 0.22 : 0;
-      const coreWalkBonus = String(row.match_reason || '').startsWith('core_walk') ? 0.11 : 0;
+      const coreWalkBonus = String(row.match_reason || '').startsWith('core_walk') ? 0.16 : 0;
       const episodeBonus = row.layer === 'episode' ? (summaryVsRaw === 'summary' ? 0.09 : 0.03) : 0;
       const rawEvidenceBonus = summaryVsRaw === 'raw' && (row.source_type === 'event' || row.layer === 'event') ? 0.08 : 0;
       
@@ -184,7 +184,7 @@ function rerankFusedResults(rows, retrievalPlan) {
     });
 }
 
-async function coreDownRanking(nodeRows = [], retrievalPlan = {}, limit = 80) {
+async function coreDownRanking(nodeRows = [], retrievalPlan = {}, limit = 80, semanticSeeds = []) {
   if (!Array.isArray(nodeRows) || !nodeRows.length) return [];
   const mapById = new Map(nodeRows.map((row) => [row.id, row]));
   
@@ -201,18 +201,30 @@ async function coreDownRanking(nodeRows = [], retrievalPlan = {}, limit = 80) {
     .map((row) => row.id)
     .slice(0, 10);
 
-  let frontier = Array.from(new Set([...coreFrontier, ...seedFrontier]));
+  // Add semantic search hits to the frontier for targeted traversal
+  let semanticHitIds = (semanticSeeds || [])
+    .map(s => s.node_id)
+    .filter(id => id && mapById.has(id));
+
+  let frontier = Array.from(new Set([...coreFrontier, ...seedFrontier, ...semanticHitIds]));
   if (!frontier.length) return [];
 
   const visited = new Set(frontier);
-  const scoreById = new Map(frontier.map((id) => {
+  const scoreById = new Map();
+  
+  // Initialize scores
+  for (const id of frontier) {
     const row = mapById.get(id);
     let base = 0.8;
     if (id === 'global_core') base = 1.6;
     else if (row?.layer === 'core') base = 1.3;
     else if (row?.layer === 'insight') base = 1.1;
-    return [id, base];
-  }));
+    
+    // Give extra weight to semantic hit seeds
+    if (semanticHitIds.includes(id)) base += 0.4;
+    
+    scoreById.set(id, base);
+  }
 
   for (let depth = 1; depth <= 10 && frontier.length; depth++) {
     const placeholders = frontier.map(() => '?').join(',');
@@ -716,8 +728,15 @@ async function buildHybridGraphRetrieval({
   seedLimit = DEFAULT_SEED_LIMIT,
   hopLimit = DEFAULT_HOP_LIMIT,
   recursionDepth = 0,
-  passiveOnly = false
+  passiveOnly = false,
+  onProgress = null
 } = {}) {
+  const emit = (step, status, overrides = {}) => {
+    if (onProgress) {
+      onProgress({ step, status, label: overrides.label || step.replace(/_/g, ' '), ...overrides });
+    }
+  };
+
   const oldestCapture = await db.getQuery(`SELECT occurred_at FROM events WHERE type = 'ScreenCapture' ORDER BY occurred_at ASC LIMIT 1`).catch(() => null);
   let prioritizeScreenCapture = false;
   if (oldestCapture && oldestCapture.occurred_at) {
@@ -759,6 +778,7 @@ async function buildHybridGraphRetrieval({
   };
 
   const nodeRows = await loadMemoryNodeCandidates(retrievalPlan.filters);
+  emit('candidates_loaded', 'completed', { count: nodeRows.length });
   
   let finalNodeRows = nodeRows;
   let finalFilters = retrievalPlan.filters;
@@ -771,10 +791,17 @@ async function buildHybridGraphRetrieval({
 
   const lexicalRanking = [];
   const rawEventLexicalRanking = [];
+  
+  emit('vector_search_started', 'started', { query_count: (retrievalPlan.search_queries || []).length });
   const semanticRankings = retrievalPlan.mode === 'queryless'
     ? []
     : await vectorSearchNodes(finalNodeRows, retrievalPlan.semantic_queries || retrievalPlan.search_queries || []);
-  const coreRanking = await coreDownRanking(finalNodeRows, retrievalPlan, 80);
+  
+  const semanticSeeds = [].concat(...semanticRankings).filter(r => r.base_score > 0.7);
+  emit('seeds_identified', 'completed', { count: semanticSeeds.length });
+
+  emit('traversal_started', 'started', { mode: retrievalPlan.entry_mode || 'hybrid' });
+  const coreRanking = await coreDownRanking(finalNodeRows, retrievalPlan, 80, semanticSeeds);
   const coreToRawRanking = (options.strategy === 'core_to_raw' || retrievalPlan.strategy === 'core_to_raw')
     ? await recursiveDownTraversal(finalNodeRows, retrievalPlan, 60)
     : [];

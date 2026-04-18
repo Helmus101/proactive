@@ -38,6 +38,7 @@ class WeaveApp {
         this.setupSuggestions();
         await this.setupChat();
         this.setupSettings();
+        this.setupLibrary();
         window.electronAPI.onProactiveSuggestions?.((suggestions) => {
             const normalized = this.normalizeTodos(suggestions || []);
             this.todos = normalized.filter((todo) => !todo.completed);
@@ -106,6 +107,9 @@ class WeaveApp {
         this.suggestionProviderStatus = document.getElementById('suggestion-llm-status');
         this.discoveryOrbitContainer = document.getElementById('discovery-orbit-container');
         this.discoveryOrbitLabel = document.getElementById('discovery-orbit-label');
+        this.libraryList = document.getElementById("library-list");
+        this.libraryFilters = Array.from(document.querySelectorAll("[data-lib-filter]"));
+        this.settingsGraphContainer = document.getElementById("settings-graph-container");
     }
 
     async loadInitialData() {
@@ -156,8 +160,12 @@ class WeaveApp {
             button.classList.toggle('active', button.dataset.view === viewId);
         });
 
+        if (viewId === "library-view") {
+            this.renderLibrary("all");
+        }
         if (viewId === 'chat-view') {
             this.chatInput?.focus();
+            this.renderFullMemoryGraph();
             this.scrollChatToBottom();
         }
 
@@ -843,6 +851,7 @@ class WeaveApp {
         this.chatInput.style.height = '44px';
 
         const thinkingPanel = this.appendThinkingPanel();
+        this.triggerSearchAnimation(true);
 
         const handleChatStep = (data) => {
             this.updateThinkingPanel(thinkingPanel, data);
@@ -857,10 +866,12 @@ class WeaveApp {
                 chat_history: contextWindow
             });
             if (window.electronAPI?.offChatStep) window.electronAPI.offChatStep();
+            this.triggerSearchAnimation(false);
             this.finalizeThinkingPanel(thinkingPanel, response);
             await this.typeAssistantResponse(response, { includeThinkingTrace: false });
         } catch (error) {
             console.error('Chat failed:', error);
+            this.triggerSearchAnimation(false);
             if (window.electronAPI?.offChatStep) window.electronAPI.offChatStep();
             this.finalizeThinkingPanel(thinkingPanel, {
                 thinking_trace: {
@@ -2655,8 +2666,136 @@ class WeaveApp {
             }
         } catch (e) { }
     }
-}
 
+
+    setupLibrary() {
+        this.libraryFilters.forEach(chip => {
+            chip.addEventListener('click', () => {
+                this.libraryFilters.forEach(c => c.classList.remove('active'));
+                chip.classList.add('active');
+                this.renderLibrary(chip.dataset.libFilter);
+            });
+        });
+    }
+
+    async renderLibrary(filter = "all") {
+        if (!this.libraryList) return;
+        this.libraryList.innerHTML = '<div class="graph-placeholder">Loading library...</div>';
+        try {
+            const { nodes } = await window.electronAPI.getFullMemoryGraph();
+            const filtered = nodes.filter(n => filter === "all" || n.layer === filter);
+            if (!filtered.length) {
+                this.libraryList.innerHTML = '<div class="empty-state">No items found in this category.</div>';
+                return;
+            }
+            this.libraryList.innerHTML = filtered.map(node => `
+                <div class="library-card" onclick="app.openMemoryDetailById('${node.id}')">
+                    <div class="library-card-layer">${node.layer}</div>
+                    <div class="library-card-title">${this.escapeHtml(node.title)}</div>
+                    <div class="library-card-summary">${this.escapeHtml(node.summary || "")}</div>
+                    <div class="library-card-footer">
+                        <span>${node.subtype || ""}</span>
+                    </div>
+                </div>
+            `).join("");
+        } catch (err) {
+            console.error("Library load error:", err);
+            this.libraryList.innerHTML = '<div class="empty-state">Failed to load library.</div>';
+        }
+    }
+
+    async renderFullMemoryGraph() {
+        if (!this.settingsGraphContainer) return;
+        this.settingsGraphContainer.innerHTML = '<div class="graph-placeholder">Initializing graph...</div>';
+        try {
+            const { nodes, edges } = await window.electronAPI.getFullMemoryGraph();
+            if (!nodes || !nodes.length) {
+                this.settingsGraphContainer.innerHTML = '<div class="graph-placeholder">No memory nodes yet.</div>';
+                return;
+            }
+            this.settingsGraphContainer.innerHTML = "";
+            const width = this.settingsGraphContainer.clientWidth || 800;
+            const height = 400;
+            const svg = d3.select(this.settingsGraphContainer)
+                .append("svg")
+                .attr("width", width)
+                .attr("height", height);
+            const simulation = d3.forceSimulation(nodes)
+                .force("link", d3.forceLink(edges).id(d => d.id).distance(50))
+                .force("charge", d3.forceManyBody().strength(-100))
+                .force("center", d3.forceCenter(width / 2, height / 2));
+            const link = svg.append("g")
+                .selectAll("line")
+                .data(edges)
+                .enter().append("line")
+                .attr("class", "graph-link")
+                .attr("stroke", "#cbd5e1")
+                .attr("stroke-opacity", 0.6)
+                .attr("stroke-width", d => Math.sqrt(d.weight || 1));
+            const node = svg.append("g")
+                .selectAll("circle")
+                .data(nodes)
+                .enter().append("circle")
+                .attr("class", "graph-node")
+                .attr("r", d => d.layer === "core" ? 8 : 5)
+                .attr("fill", d => {
+                    if (d.layer === "core") return "#ff6b6b";
+                    if (d.layer === "insight") return "#fb923c";
+                    if (d.layer === "cloud") return "#34d399";
+                    if (d.layer === "semantic") return "#7bb6ff";
+                    return "#94a3b8";
+                })
+                .call(d3.drag()
+                    .on("start", (event) => {
+                        if (!event.active) simulation.alphaTarget(0.3).restart();
+                        event.subject.fx = event.subject.x;
+                        event.subject.fy = event.subject.y;
+                    })
+                    .on("drag", (event) => {
+                        event.subject.fx = event.x;
+                        event.subject.fy = event.y;
+                    })
+                    .on("end", (event) => {
+                        if (!event.active) simulation.alphaTarget(0);
+                        event.subject.fx = null;
+                        event.subject.fy = null;
+                    }))
+                .on("click", (event, d) => this.openMemoryDetailById(d.id));
+            node.append("title").text(d => d.title);
+            simulation.on("tick", () => {
+                link.attr("x1", d => d.source.x)
+                    .attr("y1", d => d.source.y)
+                    .attr("x2", d => d.target.x)
+                    .attr("y2", d => d.target.y);
+                node.attr("cx", d => d.x)
+                    .attr("cy", d => d.y);
+            });
+        } catch (err) {
+            console.error("Graph render error:", err);
+            this.settingsGraphContainer.innerHTML = '<div class="graph-placeholder">Failed to load graph.</div>';
+        }
+    }
+
+    async openMemoryDetailById(nodeId) {
+        try {
+            const { nodes } = await window.electronAPI.getFullMemoryGraph();
+            const node = nodes.find(n => n.id === nodeId);
+            if (node) {
+                this.memorySearchResults = [node];
+                this.openMemoryModal(0);
+            }
+        } catch (err) {
+            console.error("Failed to open memory detail:", err);
+        }
+    }
+
+    triggerSearchAnimation(active) {
+        const chatPanel = document.querySelector(".chat-panel");
+        if (chatPanel) {
+            chatPanel.classList.toggle("searching", active);
+        }
+    }
+}
 document.addEventListener('DOMContentLoaded', () => {
     window.app = new WeaveApp();
 });
