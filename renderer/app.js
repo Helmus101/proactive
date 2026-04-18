@@ -2696,7 +2696,7 @@ Would you like me to continue with more detail?` : content;
                     <div class="library-card-title">${this.escapeHtml(node.title)}</div>
                     <div class="library-card-summary">${this.escapeHtml(node.summary || "")}</div>
                     <div class="library-card-footer">
-                        <span>${node.subtype || ""}</span>
+                        <span>${node.subtype || ""}</span><span class="library-card-date">${node.anchor_date || ""}</span>
                     </div>
                 </div>
             `).join("");

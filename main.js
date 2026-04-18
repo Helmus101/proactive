@@ -6897,7 +6897,7 @@ setInterval(() => {
 // Full Memory Graph for Settings Explorer
 ipcMain.handle("get-full-memory-graph", async () => {
   try {
-    const nodes = await db.allQuery(`SELECT id, layer, subtype, title, summary, metadata FROM memory_nodes LIMIT 2000`).catch(() => []);
+    const nodes = await db.allQuery(`SELECT id, layer, subtype, title, summary, metadata, anchor_date FROM memory_nodes LIMIT 2000`).catch(() => []);
     const edges = await db.allQuery(`SELECT from_node_id AS source, to_node_id AS target, edge_type, weight, trace_label FROM memory_edges LIMIT 5000`).catch(() => []);
     return { nodes, edges };
   } catch (err) {
