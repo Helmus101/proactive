@@ -294,9 +294,11 @@ function widenTemporalWindow(dateRange, now = new Date()) {
   const spanMs = Math.max(1, end.getTime() - start.getTime());
   const dayMs = 24 * 60 * 60 * 1000;
 
+  // Multi-step widening logic
   if (spanMs <= 6 * 60 * 60 * 1000) {
+    // Widening from a few hours to a full day
     return buildTemporalRange({
-      label: 'widened_same_day',
+      label: 'widened_to_full_day',
       start: startOfDay(start),
       end: endOfDay(end),
       granularity: 'day',
@@ -304,6 +306,7 @@ function widenTemporalWindow(dateRange, now = new Date()) {
     });
   }
   if (spanMs <= dayMs * 1.1) {
+    // Widening from 1 day to 3 days
     const widenedStart = startOfDay(new Date(end.getFullYear(), end.getMonth(), end.getDate() - 2));
     return buildTemporalRange({
       label: 'widened_to_3_days',
@@ -314,6 +317,7 @@ function widenTemporalWindow(dateRange, now = new Date()) {
     });
   }
   if (spanMs <= dayMs * 3.2) {
+    // Widening from 3 days to 7 days
     const widenedStart = startOfDay(new Date(end.getFullYear(), end.getMonth(), end.getDate() - 6));
     return buildTemporalRange({
       label: 'widened_to_7_days',
@@ -323,10 +327,34 @@ function widenTemporalWindow(dateRange, now = new Date()) {
       source: 'widened'
     });
   }
+  if (spanMs <= dayMs * 7.2) {
+    // Widening from 7 days to 14 days
+    const widenedStart = startOfDay(new Date(end.getFullYear(), end.getMonth(), end.getDate() - 13));
+    return buildTemporalRange({
+      label: 'widened_to_14_days',
+      start: widenedStart,
+      end: endOfDay(end),
+      granularity: 'range',
+      source: 'widened'
+    });
+  }
+  if (spanMs <= dayMs * 14.2) {
+    // Widening from 14 days to 30 days
+    const widenedStart = startOfDay(new Date(end.getFullYear(), end.getMonth(), end.getDate() - 29));
+    return buildTemporalRange({
+      label: 'widened_to_30_days',
+      start: widenedStart,
+      end: endOfDay(end),
+      granularity: 'range',
+      source: 'widened'
+    });
+  }
 
-  const widenedStart = startOfDay(new Date(end.getFullYear(), end.getMonth(), end.getDate() - 13));
+  // Fallback: double the window, capped at 90 days
+  const extraSpan = Math.min(spanMs, dayMs * 90);
+  const widenedStart = new Date(start.getTime() - extraSpan);
   return buildTemporalRange({
-    label: 'widened_to_14_days',
+    label: 'widened_double_span',
     start: widenedStart,
     end: endOfDay(end > now ? now : end),
     granularity: 'range',
@@ -371,16 +399,19 @@ function stripQuestionFormatting(text) {
 function inferApps(text) {
   const lower = safeText(text).toLowerCase();
   const apps = [];
-  if (/\bgmail|email|inbox|thread\b/.test(lower)) apps.push('Gmail');
-  if (/\bmessages|imessage|sms|text message|pap\b/.test(lower)) apps.push('Messages');
-  if (/\bslack\b/.test(lower)) apps.push('Slack');
-  if (/\bchrome|browser|extension\b/.test(lower)) apps.push('Chrome');
-  if (/\bgithub|pull request|pr\b/.test(lower)) apps.push('GitHub');
-  if (/\bdocs|document|doc|slides|deck\b/.test(lower)) apps.push('Google Docs');
-  if (/\bcalendar|meeting|agenda\b/.test(lower)) apps.push('Calendar');
-  if (/\bnotion\b/.test(lower)) apps.push('Notion');
-  if (/\bcursor|vscode|code editor\b/.test(lower)) apps.push('Cursor');
-  return apps.slice(0, 3);
+  if (/\bgmail|email|inbox|thread|correspondence|mail\b/.test(lower)) apps.push('Gmail');
+  if (/\bmessages|imessage|sms|text message|pap|whatsapp|signal|telegram\b/.test(lower)) apps.push('Messages');
+  if (/\bslack|channel|dm|direct message\b/.test(lower)) apps.push('Slack');
+  if (/\bchrome|browser|extension|website|url|webpage|visited\b/.test(lower)) apps.push('Chrome');
+  if (/\bgithub|pull request|pr|repo|repository|commit|issue\b/.test(lower)) apps.push('GitHub');
+  if (/\bdocs|document|doc|slides|deck|spreadsheet|sheets\b/.test(lower)) apps.push('Google Docs');
+  if (/\bcalendar|meeting|agenda|invite|event|sync\b/.test(lower)) apps.push('Calendar');
+  if (/\bnotion|page|workspace|database\b/.test(lower)) apps.push('Notion');
+  if (/\bcursor|vscode|code editor|coding|ide|editor\b/.test(lower)) apps.push('Cursor');
+  if (/\bxcode|ios dev|swift\b/.test(lower)) apps.push('Xcode');
+  if (/\bfigma|design|prototype\b/.test(lower)) apps.push('Figma');
+  if (/\bzoom|teams|video call\b/.test(lower)) apps.push('Video');
+  return apps.slice(0, 4);
 }
 
 function inferSurfaceFamilies(text, candidateType = '', appScope = [], sourceScope = []) {
@@ -420,12 +451,14 @@ function inferActionStateTerms(text, candidateType = '') {
 function inferConceptualTerms(text, candidateType = '') {
   const lower = `${safeText(text)} ${safeText(candidateType)}`.toLowerCase();
   const hints = [];
-  if (/\bwaitlist|signup|sign up|form\b/.test(lower)) hints.push('user signups', 'conversion funnel', 'landing page');
-  if (/\brelationship|contact|follow up|follow-up|person\b/.test(lower)) hints.push('relationship health', 'next best action', 'recent interactions');
-  if (/\bmeeting|calendar|event\b/.test(lower)) hints.push('meeting prep', 'attendee context', 'calendar plan');
-  if (/\berror|bug|issue|extension\b/.test(lower)) hints.push('runtime failure', 'implementation context', 'debugging flow');
-  if (/\bproposal|doc|deck|report\b/.test(lower)) hints.push('document review', 'comments', 'share decision');
-  return safeUnique(hints, 4);
+  if (/\bwaitlist|signup|sign up|form\b/.test(lower)) hints.push('user signups', 'conversion funnel', 'landing page', 'database schema');
+  if (/\brelationship|contact|follow up|follow-up|person\b/.test(lower)) hints.push('relationship health', 'next best action', 'recent interactions', 'personal history');
+  if (/\bmeeting|calendar|event\b/.test(lower)) hints.push('meeting prep', 'attendee context', 'calendar plan', 'previous syncs');
+  if (/\berror|bug|issue|extension\b/.test(lower)) hints.push('runtime failure', 'implementation context', 'debugging flow', 'stack trace analysis');
+  if (/\bproposal|doc|deck|report\b/.test(lower)) hints.push('document review', 'comments', 'share decision', 'v1 draft');
+  if (/\bcoding|implementation|feature|fix\b/.test(lower)) hints.push('code architecture', 'pull request context', 'logic flow', 'component structure');
+  if (/\bmarketing|growth|metrics|data\b/.test(lower)) hints.push('performance metrics', 'growth strategy', 'user engagement', 'conversion rate');
+  return safeUnique(hints, 6);
 }
 
 function inferOutcomeTerms(text, candidateType = '') {
@@ -585,22 +618,31 @@ async function buildMultiAngleQueryBundle(baseText, {
 function inferTechnicalHints(text) {
   const lower = safeText(text).toLowerCase();
   const hints = [];
-  if (/\bextension|manifest|background\.js|service worker|native messaging\b/.test(lower)) {
-    hints.push('manifest.json', 'background script', 'native messaging');
+  if (/\bextension|manifest|background\.js|service worker|native messaging|content script\b/.test(lower)) {
+    hints.push('manifest.json', 'background script', 'native messaging', 'content script', 'chrome extension');
   }
-  if (/\bbug|error|exception|fail|issue|crash\b/.test(lower)) {
-    hints.push('stack trace', 'runtime error', 'debugging');
+  if (/\bbug|error|exception|fail|issue|crash|failing|failed\b/.test(lower)) {
+    hints.push('stack trace', 'runtime error', 'debugging', 'error logs', 'exception details');
   }
-  if (/\bemail|thread|reply\b/.test(lower)) {
-    hints.push('subject line', 'reply needed', 'email thread');
+  if (/\bemail|thread|reply|message|gmail|slack\b/.test(lower)) {
+    hints.push('subject line', 'reply needed', 'email thread', 'message history', 'sender info');
   }
-  if (/\bmeeting|calendar|event\b/.test(lower)) {
-    hints.push('agenda', 'attendees', 'calendar event');
+  if (/\bmeeting|calendar|event|sync|call\b/.test(lower)) {
+    hints.push('agenda', 'attendees', 'calendar event', 'meeting notes', 'invite details');
   }
-  if (/\bproposal|doc|draft|slide|deck|report\b/.test(lower)) {
-    hints.push('draft', 'comments', 'document');
+  if (/\bproposal|doc|draft|slide|deck|report|spec|brief\b/.test(lower)) {
+    hints.push('draft', 'comments', 'document', 'v1 version', 'review feedback');
   }
-  return Array.from(new Set(hints)).slice(0, 4);
+  if (/\bdatabase|schema|sql|query|table|migration\b/.test(lower)) {
+    hints.push('schema definition', 'database migration', 'sql query', 'row count', 'table structure');
+  }
+  if (/\bapi|endpoint|request|response|handler|webhook\b/.test(lower)) {
+    hints.push('api endpoint', 'request payload', 'handler function', 'webhook trigger', 'json response');
+  }
+  if (/\bui|component|react|style|css|html|layout\b/.test(lower)) {
+    hints.push('react component', 'ui layout', 'css styles', 'frontend logic', 'view structure');
+  }
+  return Array.from(new Set(hints)).slice(0, 8);
 }
 
 function inferCoOccurringTerms(text, candidateType = '') {
@@ -710,10 +752,15 @@ function inferEntryMode(text, intent = '', mode = 'chat') {
 
 function inferPreferredSourceTypes(text, candidateType = '') {
   const lower = `${safeText(text)} ${safeText(candidateType)}`.toLowerCase();
-  if (/\bemail|gmail|thread|reply|message|inbox\b/.test(lower)) return ['communication'];
-  if (/\bmeeting|calendar|agenda|attendees|event\b/.test(lower)) return ['calendar'];
-  if (/\bwhat was i doing|what happened|extension|chrome|cursor|screen|desktop\b/.test(lower)) return ['desktop', 'communication', 'calendar'];
-  return [];
+  const preferred = [];
+  if (/\bemail|gmail|thread|reply|message|inbox|correspondence\b/.test(lower)) preferred.push('communication');
+  if (/\bmeeting|calendar|agenda|attendees|event|sync\b/.test(lower)) preferred.push('calendar');
+  if (/\bwhat was i doing|what happened|extension|chrome|cursor|screen|desktop|activity|visited\b/.test(lower)) preferred.push('desktop', 'communication', 'calendar');
+  if (/\bdecision|decided|choice|resolution\b/.test(lower)) preferred.push('decision');
+  if (/\bfact|detail|specific|verbatim|quote\b/.test(lower)) preferred.push('fact');
+  if (/\btask|todo|action|plan|next steps\b/.test(lower)) preferred.push('task');
+  if (/\bperson|who is|contact|relationship\b/.test(lower)) preferred.push('person');
+  return safeUnique(preferred, 5);
 }
 
 function inferHardSourceTypes(text, candidateType = '') {
@@ -1101,5 +1148,6 @@ module.exports = {
   buildMessageQueries,
   buildMultiAngleQueryBundle,
   isMessageLikeRow,
+  inferSurfaceFamilies,
   buildSpeculativePrefetchPlan
 };

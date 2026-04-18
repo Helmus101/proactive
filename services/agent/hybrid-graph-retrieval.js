@@ -13,6 +13,16 @@ const DEFAULT_SEED_LIMIT = 10;
 const DEFAULT_HOP_LIMIT = 10;
 const MAX_EXPANDED = 300;
 
+function getEmbedding(row) {
+  if (!row) return [];
+  if (Array.isArray(row.embedding)) return row.embedding;
+  try {
+    return JSON.parse(row.embedding || '[]');
+  } catch (_) {
+    return [];
+  }
+}
+
 const LAYER_RANKS = {
   'core': 5,
   'insight': 4,
@@ -63,7 +73,7 @@ function parseSourceRefs(value) {
 }
 
 function rowMatchesFilters(row, filters = {}) {
-  if (row.id === 'global_core' || row.layer === 'core') return true;
+  if (row.id === 'global_core' || row.layer === 'core' || row.layer === 'insight') return true;
 
   if (filters.prioritize_screen_capture) {
     const isBrowserHistory = String(row.app || '').toLowerCase().includes('browser') || 
@@ -229,7 +239,10 @@ async function coreDownRanking(nodeRows = [], retrievalPlan = {}, limit = 80) {
       if ((LAYER_RANKS[neighbor.layer] || 0) > (LAYER_RANKS[current.layer] || 0)) continue;
 
       const edgeWeightMultiplier = EDGE_WEIGHTS[edge.edge_type] || 1.0;
-      const base = (Math.max(0.2, 0.95 - (depth * 0.18)) + (Number(edge.weight || 0) * 0.06) + (Number(edge.evidence_count || 0) * 0.02)) * edgeWeightMultiplier;
+      const similarity = cosineSimilarity(getEmbedding(current), getEmbedding(neighbor));
+      const simMultiplier = similarity > 0 ? (1.0 + (similarity * 0.4)) : 1.0;
+
+      const base = (Math.max(0.2, 0.95 - (depth * 0.18)) + (Number(edge.weight || 0) * 0.06) + (Number(edge.evidence_count || 0) * 0.02)) * edgeWeightMultiplier * simMultiplier;
       const prev = Number(scoreById.get(neighborId) || 0);
       scoreById.set(neighborId, Math.max(prev, Number(base.toFixed(6))));
       if (!visited.has(neighborId)) {
@@ -345,7 +358,7 @@ async function loadMemoryNodeCandidates(filters = {}) {
   if (dateRange) {
     const startDate = dateRange.start.toISOString().slice(0, 10);
     const endDate = dateRange.end.toISOString().slice(0, 10);
-    sql += ` AND (anchor_date IS NULL OR (anchor_date >= ? AND anchor_date <= ?))`;
+    sql += ` AND (layer IN ('core', 'insight') OR anchor_date IS NULL OR (anchor_date >= ? AND anchor_date <= ?))`;
     params.push(startDate, endDate);
   }
 
@@ -511,7 +524,27 @@ function expansionScore(layer, subtype) {
   return 1;
 }
 
-async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpanded = MAX_EXPANDED) {
+function findSemanticNeighbors(targetNode, pool, threshold = 0.85, limit = 5) {
+  const targetEmbedding = getEmbedding(targetNode);
+  if (!targetEmbedding || !targetEmbedding.length) return [];
+
+  return pool
+    .filter(node => node.id !== targetNode.id)
+    .map(node => ({
+      node,
+      similarity: cosineSimilarity(targetEmbedding, getEmbedding(node))
+    }))
+    .filter(item => item.similarity > threshold)
+    .sort((a, b) => b.similarity - a.similarity)
+    .slice(0, limit)
+    .map(item => ({
+      ...item.node,
+      similarity: item.similarity,
+      isSemanticJump: true
+    }));
+}
+
+async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpanded = MAX_EXPANDED, pool = []) {
   const seedIds = seedNodes.map(s => s.node_id || s.id).filter(Boolean);
   const seen = new Set(seedIds);
   const queue = seedNodes
@@ -522,11 +555,15 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
   const evidenceNodes = [];
   const edgePaths = [];
 
+  const poolMap = new Map(pool.map(n => [n.id, n]));
+
   const effectiveHopLimit = Math.min(10, Math.max(1, hopLimit || DEFAULT_HOP_LIMIT));
 
   while (queue.length && expanded.length < maxExpanded) {
     const current = queue.shift();
     if (current.depth >= effectiveHopLimit) continue;
+    
+    // 1. Explicit Edge Expansion
     const edges = await db.allQuery(
       `SELECT id, from_node_id, to_node_id, edge_type, weight, trace_label, evidence_count, metadata
        FROM memory_edges
@@ -540,7 +577,7 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
       const neighborId = edge.from_node_id === current.id ? edge.to_node_id : edge.from_node_id;
       if (!neighborId || seen.has(neighborId)) continue;
       const node = await db.getQuery(
-        `SELECT id, layer, subtype, title, summary, metadata, source_refs, created_at, updated_at
+        `SELECT id, layer, subtype, title, summary, metadata, source_refs, embedding, created_at, updated_at
          FROM memory_nodes
          WHERE id = ?`,
         [neighborId]
@@ -558,6 +595,7 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
         title: node.title || metadata.name || metadata.fact || node.id,
         summary: node.summary || metadata.summary || '',
         source_refs: parseSourceRefs(node.source_refs),
+        embedding: node.embedding,
         anchor_at: metadata.anchor_at || metadata.start || null,
         latest_activity_at: metadata.latest_activity_at || metadata.end || node.updated_at || node.created_at || null,
         timestamp: metadata.end || metadata.start || metadata.latest_interaction_at || node.updated_at || node.created_at || null,
@@ -573,6 +611,43 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
           depth: current.depth + 1
         }
       });
+    }
+
+    // 2. Semantic Jump Expansion (Similarity-Based Traversal)
+    const currentNodeData = poolMap.get(current.id);
+    if (currentNodeData && pool.length > 0) {
+      const jumps = findSemanticNeighbors(currentNodeData, pool, 0.88, 3);
+      for (const jump of jumps) {
+        if (seen.has(jump.id)) continue;
+        
+        // Restrict traversal: only higher or equal rank to lower/equal rank
+        if ((LAYER_RANKS[jump.layer] || 0) > (LAYER_RANKS[current.layer] || 0)) continue;
+
+        const metadata = asObj(jump.metadata);
+        neighbors.push({
+          id: jump.id,
+          layer: jump.layer,
+          subtype: jump.subtype || null,
+          title: jump.title || metadata.name || metadata.fact || jump.id,
+          summary: jump.summary || metadata.summary || '',
+          source_refs: parseSourceRefs(jump.source_refs),
+          embedding: jump.embedding,
+          anchor_at: jump.anchor_at || jump.metadata?.anchor_at || null,
+          latest_activity_at: jump.latest_activity_at || jump.metadata?.latest_activity_at || jump.updated_at || jump.created_at || null,
+          timestamp: jump.timestamp || jump.metadata?.end || jump.updated_at || null,
+          depth: current.depth + 1,
+          sort_score: expansionScore(jump.layer, jump.subtype) * jump.similarity,
+          edge: {
+            from: current.id,
+            to: jump.id,
+            relation: 'SIMILAR_TO',
+            trace_label: 'semantic_jump',
+            weight: jump.similarity,
+            evidence_count: 1,
+            depth: current.depth + 1
+          }
+        });
+      }
     }
 
     neighbors
@@ -741,7 +816,7 @@ async function buildHybridGraphRetrieval({
     .slice(0, 6)
     .map(r => ({ ...r, node_id: r.id }));
     
-  const graph = await expandGraph([...seeds, ...coreNodesForExpansion], retrievalPlan.hop_limit, MAX_EXPANDED);
+  const graph = await expandGraph([...seeds, ...coreNodesForExpansion], retrievalPlan.hop_limit, MAX_EXPANDED, finalNodeRows);
   const primaryNodes = seeds.map((seed) => ({
     id: seed.node_id || seed.event_id || seed.key,
     node_id: seed.node_id || null,
