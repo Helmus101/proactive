@@ -514,7 +514,10 @@ function buildThinkingResultsSummary(retrieval, drilldownEvidence = []) {
   const primarySearchEvents = stageTrace.filter(s => s.step === 'primary_search_results');
   if (primarySearchEvents.length) {
     const totalSeeds = primarySearchEvents.reduce((sum, s) => sum + (s.count || 0), 0);
-    details.push(`Iterative flow: identified ${totalSeeds} top-tier seeds via RRF consolidation.`);
+    const allSeeds = primarySearchEvents.flatMap(e => e.preview_items || []);
+    const uniqueSeeds = Array.from(new Set(allSeeds.map(i => String(i).split(' (Score:')[0]))).slice(0, 3);
+    const topSeeds = uniqueSeeds.join(', ');
+    details.push(`Iterative flow: identified ${totalSeeds} top-tier seeds via RRF consolidation${topSeeds ? ` (${topSeeds})` : ''}.`);
   }
   const iterativeExpansionEvents = stageTrace.filter(s => s.step === 'iterative_expansion');
   if (iterativeExpansionEvents.length) {
