@@ -110,6 +110,7 @@ class WeaveApp {
         this.libraryList = document.getElementById("library-list");
         this.libraryFilters = Array.from(document.querySelectorAll("[data-lib-filter]"));
         this.settingsGraphContainer = document.getElementById("settings-graph-container");
+    this.deleteAllDataButton = document.getElementById('delete-all-data-btn');
     }
 
     async loadInitialData() {
@@ -1478,6 +1479,32 @@ Would you like me to continue with more detail?` : content;
             this.captureToggle.classList.toggle("active");
             const enabled = this.captureToggle.classList.contains("active");
             await this.setDesktopCaptureEnabled(enabled);
+        });
+
+        // Delete all data button (factory reset)
+        this.deleteAllDataButton?.addEventListener('click', async () => {
+            try {
+                const ok = confirm('Delete all local data and reset the app? This will relaunch the app.');
+                if (!ok) return;
+                this.deleteAllDataButton.disabled = true;
+                this.deleteAllDataButton.textContent = 'Deleting...';
+                if (window.electronAPI?.deleteAllSettings) {
+                    await window.electronAPI.deleteAllSettings();
+                    // main process will relaunch/exit; if it returns, notify user
+                    this.showToast('All data deleted; app will relaunch');
+                } else {
+                    // Fallback: clear local storage and persist empty suggestions
+                    try { localStorage.clear(); } catch (_) {}
+                    try { await window.electronAPI?.clearSuggestions?.(); } catch (_) {}
+                    this.showToast('Local data cleared (fallback)');
+                    setTimeout(() => location.reload(), 800);
+                }
+            } catch (error) {
+                console.error('Delete all data failed:', error);
+                this.showToast('Delete failed');
+            } finally {
+                try { this.deleteAllDataButton.disabled = false; this.deleteAllDataButton.textContent = 'Delete all data'; } catch (_) {}
+            }
         });
     }
 
