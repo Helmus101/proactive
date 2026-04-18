@@ -114,7 +114,9 @@ function initDB() {
           graph_version TEXT,
           created_at TEXT,
           updated_at TEXT,
-          embedding TEXT
+          embedding TEXT,
+          anchor_date TEXT,
+          anchor_at TEXT
         )`);
 
         db.run(`CREATE TABLE IF NOT EXISTS memory_edges (
@@ -283,7 +285,11 @@ async function ensureSchemaMigrations() {
         if (!memoryExisting.has('anchor_date')) {
           await runStatement(`ALTER TABLE memory_nodes ADD COLUMN anchor_date TEXT`).catch(() => {});
         }
+        if (!memoryExisting.has('anchor_at')) {
+          await runStatement(`ALTER TABLE memory_nodes ADD COLUMN anchor_at TEXT`).catch(() => {});
+        }
         await runStatement(`CREATE INDEX IF NOT EXISTS idx_memory_nodes_anchor_date ON memory_nodes(anchor_date)`).catch(() => {});
+        await runStatement(`CREATE INDEX IF NOT EXISTS idx_memory_nodes_anchor_at ON memory_nodes(anchor_at)`).catch(() => {});
         return;
       }
 

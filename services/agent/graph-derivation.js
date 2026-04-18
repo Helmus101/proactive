@@ -13,7 +13,7 @@ const {
 } = require('./graph-store');
 
 const GRAPH_VERSION_PREFIX = 'zero_base_memory_v1';
-const EPISODE_WINDOW_MS = 90 * 60 * 1000;
+const EPISODE_WINDOW_MS = 30 * 60 * 1000;
 
 function parseTs(value) {
   if (!value && value !== 0) return 0;
@@ -196,30 +196,31 @@ function assignEpisode(groups, envelope) {
     const sameApp = envelopeApp && group.apps.has(envelopeApp);
     const sameSourceRef = envelope.source_ref && group.sourceRefs.has(envelope.source_ref);
     const sameCommunicationFlow = group.typeGroup === 'communication' && envelope.type_group === 'communication';
-    const MAX_EPISODE_SPAN = 4 * 60 * 60 * 1000; // soft ceiling of 4 hours
+    const MAX_EPISODE_SPAN = 2 * 60 * 60 * 1000; // soft ceiling of 2 hours for discrete events
 
-    if (Math.abs(ts - group.startTs) > MAX_EPISODE_SPAN || gapMs > 2 * 60 * 60 * 1000) continue;
+    if (Math.abs(ts - group.startTs) > MAX_EPISODE_SPAN || gapMs > 30 * 60 * 1000) continue;
 
-    // Hard boundary for parallel but unrelated contexts happening in the same half-hour window.
-    const contextDisjointShortGap = gapMs <= 45 * 60 * 1000
+    // Hard boundary for parallel but unrelated contexts happening in the same window.
+    // Use 5-minute gap as a stricter boundary for session-like grouping.
+    const contextDisjointShortGap = gapMs <= 5 * 60 * 1000
       && !sameSourceRef
       && !sameDomain
       && !sameApp
       && participantHits === 0
-      && topicHits < 3;
+      && topicHits < 2;
     if (contextDisjointShortGap) continue;
 
-    const hasStrongSemanticBridge = participantHits >= 1 || topicHits >= 4;
-    if (gapMs > 15 * 60 * 1000 && !sameSourceRef && !sameDomain && !hasStrongSemanticBridge) continue;
+    const hasStrongSemanticBridge = participantHits >= 1 || topicHits >= 3;
+    if (gapMs > 5 * 60 * 1000 && !sameSourceRef && !sameDomain && !hasStrongSemanticBridge) continue;
 
     const eligible =
       sameSourceRef ||
-      (sameDomain && gapMs <= 3 * 60 * 60 * 1000) ||
-      (sameApp && topicHits >= 2 && gapMs <= 90 * 60 * 1000) ||
-      (participantHits >= 1 && gapMs <= 2 * 60 * 60 * 1000) ||
-      (topicHits >= 3 && gapMs <= 90 * 60 * 1000) ||
-      (sameCommunicationFlow && participantHits >= 1 && gapMs <= 4 * 60 * 60 * 1000) ||
-      (group.typeGroup === envelope.type_group && topicHits >= 2 && gapMs <= 75 * 60 * 1000);
+      (sameDomain && gapMs <= 15 * 60 * 1000) ||
+      (sameApp && topicHits >= 1 && gapMs <= 5 * 60 * 1000) ||
+      (participantHits >= 1 && gapMs <= 30 * 60 * 1000) ||
+      (topicHits >= 3 && gapMs <= 10 * 60 * 1000) ||
+      (sameCommunicationFlow && participantHits >= 1 && gapMs <= 60 * 60 * 1000) ||
+      (group.typeGroup === envelope.type_group && topicHits >= 2 && gapMs <= 5 * 60 * 1000);
 
     if (!eligible) continue;
 
@@ -289,13 +290,17 @@ function clusterEnvelopes(envelopes) {
 }
 
 function summarizeEpisode(group) {
+  const activitySummaries = uniq(group.events.map((event) => event.metadata?.activity_summary).filter(Boolean), 6);
   const titles = uniq(group.events.map((event) => event.title).filter(Boolean), 6);
   const participants = uniq(group.events.flatMap((event) => event.participants || []), 8);
   const domains = uniq(group.events.map((event) => event.domain).filter(Boolean), 4);
   const topics = uniq(group.events.flatMap((event) => event.topics || []), 10);
   const apps = uniq(group.events.map((event) => event.app).filter(Boolean), 4);
+
+  const mainTitle = activitySummaries[0] || titles[0] || `${groupForTypeGroup(group.typeGroup)} episode`;
+
   const summary = [
-    titles.slice(0, 2).join(' | '),
+    activitySummaries.length > 1 ? activitySummaries.join(' | ') : mainTitle,
     participants.length ? `People: ${participants.join(', ')}` : '',
     domains.length ? `Domains: ${domains.join(', ')}` : '',
     apps.length ? `Apps: ${apps.join(', ')}` : '',
@@ -303,7 +308,7 @@ function summarizeEpisode(group) {
   ].filter(Boolean).join(' • ');
 
   return {
-    title: titles[0] || `${groupForTypeGroup(group.typeGroup)} episode`,
+    title: mainTitle,
     summary,
     participants,
     domains,
@@ -840,7 +845,8 @@ async function writeEpisodeGroup(group, version) {
     metadata: episodeData,
     graphVersion: version,
     embedding,
-    anchorDate: episodeData.anchor_date || null
+    anchorDate: episodeData.anchor_date || null,
+    anchorAt: episodeData.anchor_at || null
   });
 
   await upsertRetrievalDoc({
@@ -907,7 +913,8 @@ async function writeEpisodeGroup(group, version) {
       },
       graphVersion: version,
       embedding: rawEmbedding,
-      anchorDate: String(rawTs || '').slice(0, 10) || null
+      anchorDate: String(rawTs || '').slice(0, 10) || null,
+      anchorAt: rawTs || null
     });
 
     await upsertMemoryEdge({
@@ -964,7 +971,8 @@ async function writeEpisodeGroup(group, version) {
       metadata: node.metadata,
       graphVersion: version,
       embedding: nodeEmbedding,
-      anchorDate: node.metadata?.anchor_date || null
+      anchorDate: node.metadata?.anchor_date || null,
+      anchorAt: node.metadata?.anchor_at || null
     });
     await upsertMemoryEdge({
       fromNodeId: group.id,
@@ -1047,7 +1055,8 @@ async function writeHigherLayerNode(node, version) {
     metadata: node.metadata,
     graphVersion: version,
     embedding,
-    anchorDate: node.metadata?.anchor_date || null
+    anchorDate: node.metadata?.anchor_date || null,
+    anchorAt: node.metadata?.anchor_at || null
   });
   await upsertRetrievalDoc({
     docId: `node:${node.id}`,

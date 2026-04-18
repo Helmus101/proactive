@@ -1197,7 +1197,9 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       summary: correctionText,
       canonicalText: correctionText,
       confidence: 1.0,
-      metadata: { source: 'chat_engine', updated_from_chat: true }
+      metadata: { source: 'chat_engine', updated_from_chat: true },
+      anchorAt: new Date().toISOString(),
+      anchorDate: new Date().toISOString().slice(0, 10)
     }).catch(e => console.error('Failed to write core memory correction:', e));
   }
 

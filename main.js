@@ -72,7 +72,7 @@ const MAX_PRACTICAL_SUGGESTIONS = 10;
 const CAPTURE_TRIGGER_MIN_INTERVAL_MS = 15 * 60 * 1000;
 const SUGGESTION_REFRESH_INTERVAL_MINUTES = 30;
 const LOW_POWER_OCR_MIN_INTERVAL_MS = 5 * 60 * 1000;
-const LOW_POWER_HEAVY_JOB_MIN_GAP_MS = 90 * 60 * 1000;
+const LOW_POWER_HEAVY_JOB_MIN_GAP_MS = 30 * 60 * 1000;
 let lastLowPowerOCRAt = 0;
 let lastEpisodeHeavyRunAt = 0;
 let lastSuggestionHeavyRunAt = 0;
@@ -1804,16 +1804,16 @@ function startMemoryGraphProcessing() {
     // schedule first aligned run, then set repeating intervals
     setTimeout(() => {
       runEpisodeGeneration().catch((e) => console.warn('[MemoryGraph] Aligned episode generation failed:', e?.message || e));
-      try { episodeGenerationTimer = setInterval(runEpisodeGeneration, 90 * 60 * 1000); } catch (_) {}
+      try { episodeGenerationTimer = setInterval(runEpisodeGeneration, 30 * 60 * 1000); } catch (_) {}
       // also kick off semantic window at same boundary
       runSemanticWindowGeneration().catch((e) => console.warn('[MemoryGraph] Aligned semantic window failed:', e?.message || e));
       try { semanticsTimer = setInterval(runSemanticWindowGeneration, halfHourMs); } catch (_) {}
     }, delay);
-    console.log('[MemoryGraph] Aligned episode (90m) & semantic (30m) scheduling, first run in', Math.round(delay / 1000), 's');
+    console.log('[MemoryGraph] Aligned episode (30m) & semantic (30m) scheduling, first run in', Math.round(delay / 1000), 's');
   } catch (e) {
     console.warn('[MemoryGraph] Failed to schedule aligned half-hour jobs, falling back to interval timers:', e?.message || e);
     if (episodeGenerationTimer) clearInterval(episodeGenerationTimer);
-    episodeGenerationTimer = setInterval(runEpisodeGeneration, 90 * 60 * 1000);
+    episodeGenerationTimer = setInterval(runEpisodeGeneration, 30 * 60 * 1000);
     if (semanticsTimer) clearInterval(semanticsTimer);
     semanticsTimer = setInterval(runSemanticWindowGeneration, 30 * 60 * 1000);
   }
