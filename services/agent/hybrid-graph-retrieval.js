@@ -149,7 +149,8 @@ function rerankFusedResults(rows, retrievalPlan) {
   const entryMode = String(retrievalPlan?.entry_mode || 'hybrid');
   return (rows || [])
     .map((row) => {
-      const semanticBonus = String(row.match_reason || '').startsWith('semantic:') ? 0.08 : 0;
+      // Increased weight/bonus for nodes that were directly matched via semantic search queries.
+      const semanticBonus = String(row.match_reason || '').startsWith('semantic:') ? 0.22 : 0;
       const coreWalkBonus = String(row.match_reason || '').startsWith('core_walk') ? 0.11 : 0;
       const episodeBonus = row.layer === 'episode' ? (summaryVsRaw === 'summary' ? 0.09 : 0.03) : 0;
       const rawEvidenceBonus = summaryVsRaw === 'raw' && (row.source_type === 'event' || row.layer === 'event') ? 0.08 : 0;
@@ -172,8 +173,8 @@ function rerankFusedResults(rows, retrievalPlan) {
     const entryModeBonus = entryMode === 'core_first'
       ? (coreWalkBonus + (semanticBonus * 0.6))
       : (entryMode === 'query_first'
-        ? (semanticBonus * 0.9 + (coreWalkBonus * 0.25))
-        : ((coreWalkBonus * 0.7) + (semanticBonus * 0.7)));
+        ? (semanticBonus * 1.1 + (coreWalkBonus * 0.25))
+        : ((coreWalkBonus * 0.7) + (semanticBonus * 0.9)));
     const rerankScore = Number(((row.fused_score || row.base_score || 0) + semanticBonus + coreWalkBonus + entryModeBonus + episodeBonus + rawEvidenceBonus + sourceBonus + dateBonus + passiveBoost).toFixed(6));
     return { ...row, rerank_score: rerankScore };
   })
@@ -615,7 +616,9 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
 
     // 2. Semantic Jump Expansion (Similarity-Based Traversal)
     const currentNodeData = poolMap.get(current.id);
-    if (currentNodeData && pool.length > 0) {
+    // Add jump if node is isolated or is a primary search hit (depth 0)
+    const shouldJump = (neighbors.length < 2) || (current.depth === 0);
+    if (currentNodeData && pool.length > 0 && shouldJump) {
       const jumps = findSemanticNeighbors(currentNodeData, pool, 0.88, 3);
       for (const jump of jumps) {
         if (seen.has(jump.id)) continue;
