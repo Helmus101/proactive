@@ -4073,3 +4073,33 @@ body.compact-mode .suggestion-card {
     border-radius: 50%;
     animation: pulse-dot 1.5s infinite ease-in-out;
 }
+
+/* ─── MEMORY GRAPH ENHANCEMENTS ────────────────────────────────── */
+.graph-edge-label {
+    paint-order: stroke;
+    stroke: var(--glass-bg);
+    stroke-width: 2px;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    font-weight: 500;
+    pointer-events: none;
+    opacity: 0.7;
+}
+
+.graph-node:hover {
+    filter: brightness(1.2);
+    cursor: pointer;
+}
+
+.graph-link {
+    transition: stroke-opacity var(--t);
+}
+
+.graph-link-container:hover .graph-link {
+    stroke-opacity: 0.6;
+}
+
+.graph-link-container:hover .graph-edge-label {
+    opacity: 1;
+    font-weight: 700;
+}

@@ -626,6 +626,8 @@ async function runDailyInsights(apiKey) {
   }
 }
 
+const CORE_NODE_ID = 'core_living_doc';
+
 async function runLivingCoreJob(apiKey) {
   try {
     const insightRows = await db.allQuery(
@@ -645,71 +647,67 @@ async function runLivingCoreJob(apiKey) {
     }));
 
     const prompt = `
-You are synthesizing the "Living Core" of a user's memory. These represent durable, long-term knowledge, core beliefs, and fundamental context.
-Given a list of high-confidence insights, group related ones and synthesize them into 1-3 core nodes.
-Return strict JSON array:
-[
-  {
-    "title": "...",
-    "summary": "...",
-    "supporting_insight_ids": ["id1", "id2"]
-  }
-]
+You are synthesizing the "Living Core" of a user's memory. This is a single, evolving document that represents durable, long-term knowledge, core beliefs, and fundamental context.
+Given a list of high-confidence insights and the current core document (if any), update the core document to incorporate new knowledge.
+Return strict JSON:
+{
+  "title": "Living Core Memory",
+  "summary": "...",
+  "canonical_text": "...",
+  "supporting_insight_ids": ["id1", "id2"]
+}
 
 Insights:
 ${JSON.stringify(highConfidenceInsights.map(i => ({ id: i.id, title: i.title, summary: i.summary })))}
 `;
 
     const payload = await callLLM(prompt, normalizeLLMConfig(apiKey || process.env.DEEPSEEK_API_KEY || null), 0.2);
-    const coreSyntheses = Array.isArray(payload) ? payload : [];
-    const created = [];
+    if (!payload || !payload.title) return [];
 
-    for (const synthesis of coreSyntheses) {
-      const coreId = `core_${crypto.createHash('sha1').update(synthesis.title).digest('hex').slice(0, 16)}`;
-      const title = String(synthesis.title).trim().slice(0, 180);
-      const summary = String(synthesis.summary).trim().slice(0, 500);
-      
-      await upsertMemoryNode({
-        id: coreId,
-        layer: 'core',
-        title,
-        summary,
-        canonicalText: `${title}\n${summary}`,
-        confidence: 0.98,
-        status: 'active',
-        sourceRefs: synthesis.supporting_insight_ids || [],
-        metadata: {
-          supporting_insight_ids: synthesis.supporting_insight_ids || []
-        },
-        graphVersion: 'living_core_v1'
-      });
+    const title = String(payload.title).trim().slice(0, 180);
+    const summary = String(payload.summary).trim().slice(0, 500);
+    const canonicalText = String(payload.canonical_text || `${title}\n${summary}`).trim();
+    
+    await upsertMemoryNode({
+      id: CORE_NODE_ID,
+      layer: 'core',
+      title,
+      summary,
+      canonicalText,
+      confidence: 0.99,
+      status: 'active',
+      sourceRefs: payload.supporting_insight_ids || [],
+      metadata: {
+        supporting_insight_ids: payload.supporting_insight_ids || [],
+        last_synthesis_at: new Date().toISOString()
+      },
+      graphVersion: 'living_core_v2'
+    });
 
-      if (Array.isArray(synthesis.supporting_insight_ids)) {
-        for (const insId of synthesis.supporting_insight_ids) {
-          await upsertMemoryEdge({
-            fromNodeId: insId,
-            toNodeId: coreId,
-            edgeType: 'ABSTRACTED_TO',
-            weight: 0.95,
-            traceLabel: 'Insight abstracted to Living Core',
-            evidenceCount: 1,
-            metadata: {}
-          });
-        }
+    if (Array.isArray(payload.supporting_insight_ids)) {
+      for (const insId of payload.supporting_insight_ids) {
+        await upsertMemoryEdge({
+          fromNodeId: insId,
+          toNodeId: CORE_NODE_ID,
+          edgeType: 'ABSTRACTED_TO',
+          weight: 0.95,
+          traceLabel: 'Insight abstracted to Living Core',
+          evidenceCount: 1,
+          metadata: {}
+        });
       }
-
-      await upsertRetrievalDoc({
-        docId: `node:${coreId}`,
-        sourceType: 'node',
-        nodeId: coreId,
-        timestamp: new Date().toISOString(),
-        text: `${title}\n${summary}`,
-        metadata: { layer: 'core' }
-      });
-      
-      created.push(coreId);
     }
-    return created;
+
+    await upsertRetrievalDoc({
+      docId: `node:${CORE_NODE_ID}`,
+      sourceType: 'node',
+      nodeId: CORE_NODE_ID,
+      timestamp: new Date().toISOString(),
+      text: `${title}\n${summary}\n${canonicalText}`,
+      metadata: { layer: 'core' }
+    });
+    
+    return [CORE_NODE_ID];
   } catch (e) {
     console.warn('[runLivingCoreJob] failed:', e?.message || e);
     return [];

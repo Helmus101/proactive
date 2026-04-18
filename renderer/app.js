@@ -2715,7 +2715,8 @@ class WeaveApp {
             }
 
             // Filter out orphaned edges
-            const nodeIds = new Set(nodes.map(n => n.id));
+            const filteredNodes = nodes.filter(n => n.layer !== "cloud");
+            const nodeIds = new Set(filteredNodes.map(n => n.id));
             const filteredEdges = (edges || []).filter(e => {
                 const s = typeof e.source === 'object' ? e.source.id : e.source;
                 const t = typeof e.target === 'object' ? e.target.id : e.target;
@@ -2724,13 +2725,13 @@ class WeaveApp {
 
             this.settingsGraphContainer.innerHTML = "";
             const width = this.settingsGraphContainer.clientWidth || 800;
-            const height = 400;
+            const height = 600;
 
-            const layers = ['core', 'insight', 'cloud', 'semantic', 'episode', 'event'];
-            const layerX = (layer) => {
-                const index = layers.indexOf(layer);
+            const layers = ['core', 'insight', 'semantic', 'episode', 'raw'];
+            const layerY = (layer) => {
+                const index = layers.indexOf(layer === 'event' ? 'raw' : layer);
                 if (index === -1) return width / 2;
-                return (width / (layers.length + 1)) * (index + 1);
+                return (height / (layers.length + 1)) * (index + 1);
             };
 
             const svg = d3.select(this.settingsGraphContainer)
@@ -2740,20 +2741,37 @@ class WeaveApp {
 
             // Add background brackets and labels
             layers.forEach((layer) => {
-                const x = layerX(layer);
+                const y = layerY(layer);
                 svg.append("line")
-                    .attr("x1", x)
-                    .attr("y1", 30)
-                    .attr("x2", x)
-                    .attr("y2", height - 30)
+                    .attr("x1", 40)
+                    .attr("y1", y)
+                    .attr("x2", width - 40)
+                    .attr("y2", y)
                     .attr("stroke", "var(--glass-border)")
+                // Left bracket tick
+                svg.append("line")
+                    .attr("x1", 40)
+                    .attr("y1", y - 5)
+                    .attr("x2", 40)
+                    .attr("y2", y + 5)
+                    .attr("stroke", "var(--glass-border)")
+                    .attr("stroke-width", 1);
+                
+                // Right bracket tick
+                svg.append("line")
+                    .attr("x1", width - 40)
+                    .attr("y1", y - 5)
+                    .attr("x2", width - 40)
+                    .attr("y2", y + 5)
+                    .attr("stroke", "var(--glass-border)")
+                    .attr("stroke-width", 1);
                     .attr("stroke-width", 1)
                     .attr("stroke-dasharray", "4,4");
                 
                 svg.append("text")
-                    .attr("x", x)
-                    .attr("y", 20)
-                    .attr("text-anchor", "middle")
+                    .attr("x", 10)
+                    .attr("y", y + 4)
+                    .attr("text-anchor", "start")
                     .attr("fill", "var(--text-tertiary)")
                     .attr("font-size", "10px")
                     .attr("font-weight", "600")
@@ -2761,32 +2779,28 @@ class WeaveApp {
                     .text(layer);
             });
 
-            const simulation = d3.forceSimulation(nodes)
-                .force("link", d3.forceLink(filteredEdges).id(d => d.id).distance(60))
-                .force("charge", d3.forceManyBody().strength(-80))
+            const simulation = d3.forceSimulation(filteredNodes)
+                .force("link", d3.forceLink(filteredEdges).id(d => d.id).distance(80))
+                .force("charge", d3.forceManyBody().strength(-120))
                 .force("center", d3.forceCenter(width / 2, height / 2))
-                .force("x", d3.forceX(d => layerX(d.layer)).strength(1.2))
-                .force("y", d3.forceY(height / 2).strength(0.15));
-
-            const link = svg.append("g")
-                .selectAll("line")
-                .data(filteredEdges)
-                .enter().append("line")
-                .attr("class", "graph-link")
-                .attr("stroke", "var(--accent-blue)")
-                .attr("stroke-opacity", 0.25)
-                .attr("stroke-width", d => Math.sqrt(d.weight || 1));
+                .force("x", d3.forceX(width / 2).strength(0.2))
+                .force("y", d3.forceY(d => layerY(d.layer)).strength(1.5))
+                .force("collide", d3.forceCollide(25));
+            const linkGroup = svg.append("g");
+            const link = linkGroup.selectAll(".graph-link-container").data(filteredEdges).enter().append("g").attr("class", "graph-link-container");
+            link.append("line").attr("class", "graph-link").attr("stroke", "var(--accent-blue)").attr("stroke-opacity", 0.25).attr("stroke-width", d => Math.sqrt(d.weight || 1));
+            link.append("text").attr("class", "graph-edge-label").attr("text-anchor", "middle").attr("font-size", "8px").attr("fill", "var(--text-tertiary)").text(d => d.edge_type || d.trace_label || "");
 
             const node = svg.append("g")
                 .selectAll("circle")
-                .data(nodes)
+                .data(filteredNodes)
                 .enter().append("circle")
                 .attr("class", "graph-node")
-                .attr("r", d => d.layer === "core" ? 7 : 4)
+                .attr("r", d => d.layer === "core" ? 9 : 5)
                 .attr("fill", d => {
                     if (d.layer === "core") return "var(--accent-coral)";
                     if (d.layer === "insight") return "var(--accent-amber)";
-                    if (d.layer === "cloud") return "var(--accent-teal)";
+                    if (d.layer === "episode") return "var(--accent-teal)";
                     if (d.layer === "semantic") return "var(--accent-blue)";
                     return "var(--text-tertiary)";
                 })
@@ -2812,10 +2826,16 @@ class WeaveApp {
             node.append("title").text(d => `${d.title}\n(${d.layer})`);
 
             simulation.on("tick", () => {
-                link.attr("x1", d => d.source.x)
+                link.select("line")
+                    .attr("x1", d => d.source.x)
                     .attr("y1", d => d.source.y)
                     .attr("x2", d => d.target.x)
                     .attr("y2", d => d.target.y);
+                
+                link.select("text")
+                    .attr("x", d => (d.source.x + d.target.x) / 2)
+                    .attr("y", d => (d.source.y + d.target.y) / 2);
+
                 node.attr("cx", d => d.x)
                     .attr("cy", d => d.y);
             });
