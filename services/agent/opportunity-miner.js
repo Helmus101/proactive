@@ -246,9 +246,9 @@ async function detectDormantContacts(rows, now) {
   return out;
 }
 
-async function detectWeakStudyConcept(cloudRows, now) {
+async function detectWeakStudyConcept(insightRows, now) {
   const out = [];
-  for (const row of cloudRows || []) {
+  for (const row of insightRows || []) {
     const text = `${row.title || ''} ${row.summary || ''}`;
     if (!isStudyText(text)) continue;
     const metadata = asObj(row.metadata);
@@ -331,7 +331,7 @@ function dedupeCandidates(candidates = []) {
 
 async function mineProactiveOpportunities(now = Date.now(), options = {}) {
   const semanticRows = await fetchMemoryRows('semantic', `AND status != 'archived'`);
-  const cloudRows = await fetchMemoryRows('cloud', `AND status = 'open'`);
+  const insightRows = await fetchMemoryRows('insight', `AND status = 'active'`);
   const episodeRows = await fetchMemoryRows('episode', `AND status != 'archived'`);
   const recentEvents = await fetchRecentEvents(now, 120);
 
@@ -340,7 +340,7 @@ async function mineProactiveOpportunities(now = Date.now(), options = {}) {
   candidates.push(...await detectUnfinishedLoops(semanticRows, now));
   candidates.push(...await detectDeadlineRisk([...semanticRows, ...episodeRows], now));
   candidates.push(...await detectDormantContacts(semanticRows, now));
-  candidates.push(...await detectWeakStudyConcept(cloudRows, now));
+  candidates.push(...await detectWeakStudyConcept(insightRows, now));
 
   const recalled = enrichWithRecentRecall(candidates, recentEvents);
   const deduped = dedupeCandidates(recalled);

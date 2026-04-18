@@ -1150,8 +1150,8 @@ class WeaveApp {
         const stageTrace = Array.isArray(trace?.stage_trace) ? trace.stage_trace : (Array.isArray(retrieval?.stage_trace) ? retrieval.stage_trace : []);
         const strategy = trace?.strategy || {};
         const layers = Array.isArray(trace?.layers) ? trace.layers : [];
-        const maxDepth = layers.includes("raw") || layers.includes("event") ? 3 : (layers.includes("episode") ? 2 : (layers.includes("insight") || layers.includes("semantic") ? 1 : 0));
-        const depthLabels = ["Core", "Insight", "Episode", "Raw"];
+        const maxDepth = layers.includes("raw") || layers.includes("event") ? 4 : (layers.includes("episode") ? 3 : (layers.includes("semantic") ? 2 : (layers.includes("insight") ? 1 : 0)));
+        const depthLabels = ["Core", "Insight", "Semantic", "Episode", "Raw"];
         const penetrationHtml = `
             <div class="penetration-breadcrumb">
                 ${depthLabels.map((label, idx) => {
@@ -2726,9 +2726,9 @@ class WeaveApp {
             const width = this.settingsGraphContainer.clientWidth || 800;
             const height = 400;
 
-            const layers = ['core', 'insight', 'cloud', 'semantic', 'episode', 'event'];
+            const layers = ['core', 'insight', 'semantic', 'episode', 'raw'];
             const layerX = (layer) => {
-                const index = layers.indexOf(layer);
+                const index = layers.indexOf(layer === 'event' ? 'raw' : layer);
                 if (index === -1) return width / 2;
                 return (width / (layers.length + 1)) * (index + 1);
             };
@@ -2786,7 +2786,7 @@ class WeaveApp {
                 .attr("fill", d => {
                     if (d.layer === "core") return "var(--accent-coral)";
                     if (d.layer === "insight") return "var(--accent-amber)";
-                    if (d.layer === "cloud") return "var(--accent-teal)";
+                    
                     if (d.layer === "semantic") return "var(--accent-blue)";
                     return "var(--text-tertiary)";
                 })

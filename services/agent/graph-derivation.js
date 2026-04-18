@@ -483,7 +483,7 @@ function deriveSemanticNodes(group, episodeData) {
   return nodes;
 }
 
-function buildCloudCandidates(episodes) {
+function buildInsightCandidates(episodes) {
   const personMentions = new Map();
   const taskMentions = new Map();
   const topicMentions = new Map();
@@ -527,7 +527,7 @@ function buildCloudCandidates(episodes) {
 
 function deriveInsights(episodes) {
   const out = [];
-  const { personMentions, taskMentions, topicMentions } = buildCloudCandidates(episodes);
+  const { personMentions, taskMentions, topicMentions } = buildInsightCandidates(episodes);
 
   for (const item of personMentions.values()) {
     if (item.episodes.length < 2) continue;

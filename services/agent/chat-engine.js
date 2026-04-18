@@ -227,7 +227,7 @@ function buildConnectionCandidates(retrieval) {
           ? `${node.subtype} connected through an explicit path in the same storyline`
           : `${node.subtype} connected through the current episode graph`
       });
-    } else if (node.layer === 'cloud' || node.layer === 'insight') {
+    } else if (node.layer === 'insight') {
       seen.add(key);
       candidates.push({
         label: node.title || node.id,

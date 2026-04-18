@@ -79,7 +79,7 @@ async function testDormantContactDetector() {
 
 async function testWeakConceptDetector() {
   const rows = [{
-    id: 'cloud_weak_1',
+    id: 'insight_weak_1',
     title: 'Chinese study vocab',
     summary: 'repeated weak signal',
     source_refs: JSON.stringify([]),

@@ -44,11 +44,9 @@ Episode Generation (30min) → AI Summarization → Episode Nodes
     ↓  
 Semantic Extraction → People/Facts/Tasks Nodes
     ↓
-Memory Cloud Hypotheses → Patterns/Relationships → Cloud Nodes
+Recurring Patterns → High-Confidence Insights → Insight Nodes
     ↓
-Weekly Insights (Sunday) → Pattern Analysis → Insight Nodes
-    ↓
-Global Core Memory → User Context Updates
+Living Core Memory → User Context Updates
     ↓
 Suggestion Engine (20min) → Proactive Actions → UI
 ```

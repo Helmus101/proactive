@@ -217,7 +217,6 @@ function layerWeight(layer = '', subtype = '') {
   if (l === 'semantic' && s === 'task') return 1.24;
   if (l === 'semantic') return 1.15;
   if (l === 'insight') return 1.1;
-  if (l === 'cloud') return 1.0;
   if (l === 'episode') return 0.95;
   return 0.82;
 }
@@ -364,7 +363,6 @@ async function ensureMemoryLayersReady(apiKey) {
   const episodeCount = Number(counts.episode || 0);
   const semanticCount = Number(counts.semantic || 0);
   const insightCount = Number(counts.insight || 0);
-  const cloudCount = Number(counts.cloud || 0);
 
   const now = Date.now();
   const lastHydrationAt = Number(store.get('memoryLayerHydrationAt') || 0);
@@ -379,7 +377,7 @@ async function ensureMemoryLayersReady(apiKey) {
   }
 
   const lastInsightAt = Number(store.get('memoryInsightHydrationAt') || 0);
-  const shouldHydrateInsights = apiKey && insightCount < 2 && (cloudCount > 0 || semanticCount > 10) && (now - lastInsightAt > (6 * 60 * 60 * 1000));
+  const shouldHydrateInsights = apiKey && insightCount < 2 && (semanticCount > 10) && (now - lastInsightAt > (6 * 60 * 60 * 1000));
   if (shouldHydrateInsights) {
     try {
       const { runWeeklyInsightJob } = require('./intelligence-engine');
@@ -495,10 +493,9 @@ async function retrieveCoreToFactsContext(query = '', maxNodes = 100) {
     core: 2,
     semantic: 12,
     insight: 8,
-    cloud: 5,
     episode: 12
   };
-  const used = { core: 0, semantic: 0, insight: 0, cloud: 0, episode: 0 };
+  const used = { core: 0, semantic: 0, insight: 0, episode: 0 };
   const chosen = [];
   for (const row of scored) {
     const layer = String(row.layer || '').toLowerCase();

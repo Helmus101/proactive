@@ -14,7 +14,6 @@ async function testEpisodeSeedSourceRefs() {
   db.allQuery = async (sql, params = []) => {
     const layer = params[0];
     if (layer === 'semantic') return [];
-    if (layer === 'cloud') return [];
     if (layer === 'episode') {
       return [{
         id: 'ep_1',

@@ -524,7 +524,7 @@ function buildSeedRetrievalIntent({ title = '', type = '', category = '', trigge
   if (type === 'decision_followthrough') {
     return `${base} follow through next action decision status owner open loop`;
   }
-  if (type === 'cloud_hypothesis') {
+  if (type === 'insight_pattern') {
     return `${base} repeated pattern supporting evidence next best action shared topic context`;
   }
   if (type === 'recent_episode') {
@@ -596,7 +596,7 @@ function isImportantActionSeed(seed = {}) {
   const trigger = String(seed.trigger_summary || '').toLowerCase();
   if (type === 'task_execution' || type === 'decision_followthrough') return true;
   if (looksStudyOpportunity(seed)) return true;
-  if (type === 'cloud_hypothesis' && /open loop|unresolved|repeated/.test(trigger)) return true;
+  if (type === 'insight_pattern' && /open loop|unresolved|repeated/.test(trigger)) return true;
   if (/\bdeadline|due|urgent|priority|follow through|unresolved|action\b/.test(`${title} ${trigger}`)) return true;
   return false;
 }
