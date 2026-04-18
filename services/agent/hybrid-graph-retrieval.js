@@ -1243,10 +1243,10 @@ async function buildHybridGraphRetrieval({
 
   const contextSections = [];
   if (primarySeeds.length) {
-    contextSections.push(`PRIMARY SEARCH SEEDS:\n${primarySeeds.map((seed) => `- [${seed.layer || 'node'}] ${seed.title || seed.node_id}: ${String(seed.text || '').slice(0, 1000)}`).join('\n')}`);
+    contextSections.push(`PRIMARY SEARCH SEEDS:\n${primarySeeds.map((seed) => `- [${seed.layer || 'node'}] ${seed.title || seed.node_id}: ${String(seed.text || '').slice(0, 4000)}`).join('\n')}`);
   }
   if (hierarchicalExpansion.expandedNodes.length) {
-    contextSections.push(`HIERARCHICAL EXPANSION:\n${hierarchicalExpansion.expandedNodes.map((node) => `- [${node.layer}] ${node.title}: ${String(node.text || node.summary || '').slice(0, 1000)}`).join('\n')}`);
+    contextSections.push(`HIERARCHICAL EXPANSION:\n${hierarchicalExpansion.expandedNodes.map((node) => `- [${node.layer}] ${node.title}: ${String(node.text || node.summary || '').slice(0, 4000)}`).join('\n')}`);
   }
   if (seeds.length) {
     contextSections.push(`SEED NODES:\n${seeds.map((seed) => `- [${seed.layer || 'node'}] ${String(seed.text || '').slice(0, 180)}`).join('\n')}`);
