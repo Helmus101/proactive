@@ -47,6 +47,9 @@
         <button class="nav-pill" id="nav-chat" data-view="chat-view" title="Chat">
             <span class="material-symbols-outlined">forum</span>
         </button>
+        <button class="nav-pill" id="nav-library" data-view="library-view" title="Library">
+            <span class="material-symbols-outlined">library_books</span>
+        </button>
         <button class="nav-pill" id="nav-settings" data-view="settings-view" title="Settings">
             <span class="material-symbols-outlined">settings</span>
         </button>
@@ -129,6 +132,31 @@
                                 <div class="toggle-switch" id="capture-toggle"></div>
                             </div>
                         </div>
+                    </div>
+
+                    <div class="settings-card" style="margin-top: 24px;">
+                        <div class="settings-label" style="margin-bottom: 12px;">Interactive Memory Graph</div>
+                        <div id="settings-graph-container" class="graph-explorer-container">
+                            <div class="graph-placeholder">Loading memory graph...</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ───── LIBRARY VIEW ───── -->
+            <section id="library-view" class="view hidden">
+                <div class="library-container">
+                    <div class="library-header">
+                        <h2 class="section-title">Memory Library</h2>
+                        <div class="library-filters">
+                            <button class="context-chip active" data-lib-filter="all">All</button>
+                            <button class="context-chip" data-lib-filter="episode">Episodes</button>
+                            <button class="context-chip" data-lib-filter="semantic">Concepts</button>
+                            <button class="context-chip" data-lib-filter="insight">Insights</button>
+                        </div>
+                    </div>
+                    <div id="library-list" class="library-grid">
+                        <!-- Library items will be rendered here -->
                     </div>
                 </div>
             </section>
@@ -270,6 +298,7 @@
             </div>
         </div>
 
+    <script src="https://d3js.org/d3.v7.min.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

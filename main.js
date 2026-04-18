@@ -6894,6 +6894,18 @@ setInterval(() => {
   try { scheduleDailyChatSave(); } catch (e) { /* ignore */ }
 }, 60 * 60 * 1000);
 
+// Full Memory Graph for Settings Explorer
+ipcMain.handle("get-full-memory-graph", async () => {
+  try {
+    const nodes = await db.allQuery(`SELECT id, layer, subtype, title, summary, metadata FROM memory_nodes LIMIT 2000`).catch(() => []);
+    const edges = await db.allQuery(`SELECT from_node_id, to_node_id, edge_type, weight FROM memory_edges LIMIT 5000`).catch(() => []);
+    return { nodes, edges };
+  } catch (err) {
+    console.error("Failed to fetch full memory graph:", err);
+    return { nodes: [], edges: [] };
+  }
+});
+
 // AI Assistant Chat Logic
 ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
   try {

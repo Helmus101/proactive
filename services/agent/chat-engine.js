@@ -668,7 +668,7 @@ function retrievalLooksSparse(retrieval) {
   return seedCount < 2 || evidenceCount < 3;
 }
 
-async function executeParallelRetrieval(baseQuery, baseThought, options) {
+async function executeParallelRetrieval(baseQuery, baseThought, options, onProgress = null) {
   const bundle = [
     String(baseQuery || '').trim(),
     ...((baseThought.semantic_queries || []).map((item) => String(item || '').trim())),
@@ -690,7 +690,8 @@ async function executeParallelRetrieval(baseQuery, baseThought, options) {
     seedLimit: Math.max(5, Math.floor(20 / queries.length)),
     hopLimit: 8,
     recursionDepth,
-    passiveOnly: options.passiveOnly || false
+    passiveOnly: options.passiveOnly || false,
+    onProgress
   })));
 
   const successfulResults = results
@@ -857,7 +858,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       source_types: options?.source_types,
       retrieval_thought: baseThought,
       passiveOnly: true
-    });
+    }, onStep);
 
     const passiveMaxScore = retrieval.evidence?.length ? Math.max(...retrieval.evidence.map((e) => e.score || 0)) : 0;
     const isPassiveSufficient = (retrieval.evidence_count >= 3 && passiveMaxScore > 0.75) || (passiveMaxScore > 0.9);
@@ -870,7 +871,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
         source_types: options?.source_types,
         retrieval_thought: baseThought,
         passiveOnly: false
-      });
+      }, onStep);
     }
 
     const canWiden = Boolean(baseThought?.initial_date_range || baseThought?.filters?.app) && !baseThought?.fallback_policy?.attempted;
@@ -914,7 +915,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
           date_range: widenedRange || baseThought.applied_date_range,
           source_types: options?.source_types,
           retrieval_thought: widenedThought
-        });
+        }, onStep);
         retrieval = {
           ...widenedRetrieval,
           initial_date_range: baseThought.initial_date_range,
@@ -931,7 +932,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
         mode: 'chat',
         recursionDepth: 1,
         passiveOnly: false
-      });
+      }, onStep);
       if ((deepRetrieval.evidence_count || 0) > (retrieval.evidence_count || 0)) {
          retrieval = {
            ...deepRetrieval,

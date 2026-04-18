@@ -240,14 +240,15 @@ function assignEpisode(groups, envelope) {
   const bestCandidate = candidates[0];
 
   if (bestCandidate && bestCandidate.score >= 2.5) {
-    const targets = [bestCandidate];
-    // Also assign to other high-scoring groups to increase density/overlap
-    for (let i = 1; i < candidates.length; i++) {
-      const c = candidates[i];
-      if (c.score > 5.0 && c.score >= bestCandidate.score * 0.85) {
-        targets.push(c);
-      }
+  const targets = [bestCandidate];
+  // Also assign to other high-scoring groups to increase density/overlap
+  for (let i = 1; i < candidates.length; i++) {
+    const c = candidates[i];
+    // Many-to-many mapping: link if score is above threshold
+    if (c.score >= 4.0 || c.score >= bestCandidate.score * 0.75) {
+      targets.push(c);
     }
+  }
 
     for (const { group } of targets) {
       group.events.push(envelope);
@@ -1071,6 +1072,32 @@ async function writeHigherLayerNode(node, version) {
     }
   });
   return { ...node, embedding };
+}
+
+async function semanticSimilarityLinking(newNode, allNodes, limit = 3, threshold = 0.82) {
+  if (!newNode.embedding || !Array.isArray(allNodes) || allNodes.length < 1) return;
+  
+  const scores = allNodes
+    .filter(n => n.id !== newNode.id && n.embedding)
+    .map(n => ({
+      node: n,
+      sim: cosineSimilarity(newNode.embedding, n.embedding)
+    }))
+    .filter(item => item.sim > threshold)
+    .sort((a, b) => b.sim - a.sim)
+    .slice(0, limit);
+
+  for (const item of scores) {
+    await upsertMemoryEdge({
+      fromNodeId: newNode.id,
+      toNodeId: item.node.id,
+      edgeType: 'RELATED_TO',
+      weight: Number(item.sim.toFixed(4)),
+      traceLabel: `Semantic similarity link (${item.sim.toFixed(3)})`,
+      evidenceCount: 1,
+      metadata: { auto_derived: true, similarity: item.sim }
+    });
+  }
 }
 
 async function addSimilarityEdges(nodes, threshold = 0.88) {
