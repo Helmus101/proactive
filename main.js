@@ -6539,7 +6539,7 @@ ipcMain.handle('search-graph', async (event, query, filters = {}) => {
 
     // Check database state
     const nodeCount = await db.getQuery(`SELECT COUNT(*) as count FROM nodes`);
-    const eventCount = await db.getQuery(`SELECT COUNT(*) as count FROM events`);
+    const eventCount = await db.getQuery(`SELECT COUNT(*) as count FROM events`).catch(() => ({ count: 0 }));
     console.log('[search-graph] Database state:', { nodes: nodeCount.count, events: eventCount.count });
 
     let results = [];
@@ -9110,14 +9110,14 @@ ipcMain.handle('get-memory-graph-status', async () => {
   try {
     const db = require('./services/db');
     
-    const eventCount = await db.getQuery(`SELECT COUNT(*) as count FROM events`);
-    const nodeCounts = await db.allQuery(`SELECT layer, COUNT(*) as count FROM memory_nodes GROUP BY layer`);
-    const edgeCount = await db.getQuery(`SELECT COUNT(*) as count FROM memory_edges`);
-    const sourceCounts = await db.allQuery(`SELECT COALESCE(source_type, type) as source_type, COUNT(*) as count FROM events GROUP BY COALESCE(source_type, type)`);
+    const eventCount = await db.getQuery(`SELECT COUNT(*) as count FROM events`).catch(() => ({ count: 0 }));
+    const nodeCounts = await db.allQuery(`SELECT layer, COUNT(*) as count FROM memory_nodes GROUP BY layer`).catch(() => []);
+    const edgeCount = await db.getQuery(`SELECT COUNT(*) as count FROM memory_edges`).catch(() => ({ count: 0 }));
+    const sourceCounts = await db.allQuery(`SELECT source as source_type, COUNT(*) as count FROM events GROUP BY source`).catch(() => []);
     const typedRawCounts = await db.allQuery(
-      `SELECT COALESCE(source_type, type) as source_type, COUNT(*) as count, MAX(COALESCE(occurred_at, timestamp)) as latest
+      `SELECT source as source_type, COUNT(*) as count, MAX(timestamp) as latest
        FROM events
-       GROUP BY COALESCE(source_type, type)`
+       GROUP BY source`
     ).catch(() => []);
     const retrievalDocCount = await db.getQuery(`SELECT COUNT(*) as count FROM retrieval_docs`).catch(() => ({ count: 0 }));
     const suggestionCount = await db.getQuery(`SELECT COUNT(*) as count FROM suggestion_artifacts`).catch(() => ({ count: 0 }));

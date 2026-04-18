@@ -8,6 +8,7 @@ const {
   asObj,
   logRetrievalRun
 } = require('./graph-store');
+const { callLLM } = require('./intelligence-engine');
 
 const DEFAULT_SEED_LIMIT = 10;
 const DEFAULT_HOP_LIMIT = 10;
@@ -722,6 +723,25 @@ function alphaBlendedSearch(lexicalRanking, semanticRankings, alpha = 0.45) {
     .sort((a, b) => b.fused_score - a.fused_score);
 }
 
+async function agenticReviewContext(query, nodes, apiKey) {
+  if (!apiKey || !nodes.length) return { sufficient: true };
+  
+  const nodeContext = nodes.map((n, i) => `[${i}] ${n.title}: ${String(n.text || n.summary || '').slice(0, 300)}`).join('\n');
+  const prompt = `
+You are evaluating if the retrieved memory context is sufficient to answer the user's query.
+User Query: "${query}"
+
+Retrieved Context:
+${nodeContext}
+
+Is this context sufficient to provide a detailed and accurate answer?
+Respond with strict JSON: {"sufficient": true/false, "missing_info": "description of what is missing", "suggested_node_indices": [index of nodes that might have relevant edges]}
+`;
+
+  const result = await callLLM(prompt, apiKey, 0.1);
+  return result || { sufficient: true };
+}
+
 async function buildHybridGraphRetrieval({
   query,
   options = {},
@@ -736,6 +756,8 @@ async function buildHybridGraphRetrieval({
       onProgress({ step, status, label: overrides.label || step.replace(/_/g, ' '), ...overrides });
     }
   };
+
+  emit('query_generated', 'completed', { query });
 
   const oldestCapture = await db.getQuery(`SELECT occurred_at FROM events WHERE type = 'ScreenCapture' ORDER BY occurred_at ASC LIMIT 1`).catch(() => null);
   let prioritizeScreenCapture = false;
@@ -836,7 +858,44 @@ async function buildHybridGraphRetrieval({
   }
 
   const reranked = rerankFusedResults(fused, retrievalPlan);
-  const seeds = reranked.slice(0, retrievalPlan.seed_limit);
+  let seeds = reranked.slice(0, retrievalPlan.seed_limit);
+  
+  emit('node_found', 'completed', { count: seeds.length, preview_items: seeds.slice(0, 3).map(s => s.text?.split('\n')[0] || s.node_id) });
+
+  // Agentic Review Loop
+  const apiKey = process.env.DEEPSEEK_API_KEY || options.apiKey;
+  if (apiKey && seeds.length > 0) {
+    emit('agentic_review', 'started', { detail: 'Reviewing retrieved context for sufficiency...' });
+    const review = await agenticReviewContext(query, seeds.slice(0, 5), apiKey);
+    
+    if (!review.sufficient) {
+      emit('context_insufficient', 'completed', { detail: review.missing_info });
+      
+      const suggestedIndices = Array.isArray(review.suggested_node_indices) ? review.suggested_node_indices : [0];
+      const targetNodes = suggestedIndices.map(idx => seeds[idx]).filter(Boolean);
+      
+      if (targetNodes.length > 0) {
+        emit('edge_traversal', 'started', { detail: `Traversing edges from ${targetNodes.length} nodes to find more context...` });
+        const expandedResults = await expandGraph(targetNodes, 2, 50, finalNodeRows);
+        
+        // Add expanded nodes to seeds
+        const newSeeds = expandedResults.expandedNodes.map(n => ({
+          key: `node:${n.id}`,
+          node_id: n.id,
+          layer: n.layer,
+          text: n.summary || n.title,
+          base_score: 0.8,
+          match_reason: 'agentic_traversal'
+        }));
+        
+        seeds = [...seeds, ...newSeeds];
+        emit('edge_traversed', 'completed', { count: newSeeds.length });
+      }
+    } else {
+      emit('agentic_review', 'completed', { detail: 'Context is sufficient.' });
+    }
+  }
+
   // canonical list of seed node ids/keys used for tracing and logging
   const seedNodeIds = Array.from(new Set(seeds.map((s) => (s.node_id || s.event_id || s.key)).filter(Boolean))).slice(0, retrievalPlan.seed_limit);
   

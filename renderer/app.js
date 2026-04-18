@@ -2790,6 +2790,8 @@ class WeaveApp {
     }
 
     triggerSearchAnimation(active) {
+        const scanningIndicator = document.getElementById("scanning-indicator");
+        if (scanningIndicator) scanningIndicator.classList.toggle("active", active);
         const chatPanel = document.querySelector(".chat-panel");
         if (chatPanel) {
             chatPanel.classList.toggle("searching", active);
