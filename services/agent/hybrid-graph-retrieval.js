@@ -456,13 +456,20 @@ async function vectorSearchNodes(nodeRows, semanticQueries = []) {
 }
 
 async function querylessRecentDocs(filters = {}, limit = 24) {
-  const rows = await db.allQuery(
-    `SELECT doc_id, source_type, node_id, event_id, app, timestamp, text, metadata
-     FROM retrieval_docs
-     ORDER BY timestamp DESC
-     LIMIT ?`,
-    [Math.max(60, limit * 4)]
-  ).catch(() => []);
+  const dateRange = normalizeDateRange(filters.date_range);
+  let sql = `SELECT doc_id, source_type, node_id, event_id, app, timestamp, text, metadata
+     FROM retrieval_docs`;
+  const params = [];
+  
+  if (dateRange) {
+    sql += ` WHERE timestamp >= ? AND timestamp <= ?`;
+    params.push(dateRange.start.toISOString(), dateRange.end.toISOString());
+  }
+  
+  sql += ` ORDER BY timestamp DESC LIMIT ?`;
+  params.push(Math.max(60, limit * 4));
+
+  const rows = await db.allQuery(sql, params).catch(() => []);
 
   return rows
     .map((row, index) => {
