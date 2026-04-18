@@ -726,9 +726,7 @@ class WeaveApp {
         layer.textContent = `${String(todo.category || 'task').toUpperCase()} • TASK`;
         title.textContent = todo.title || 'Task';
         time.textContent = todo.createdAt ? new Date(todo.createdAt).toLocaleString() : 'No timestamp';
-        narrative.textContent = narrativeParts.join('
-
-') || 'No additional information available.';
+        narrative.textContent = narrativeParts.join("\n") || "No additional information available.";
         raw.textContent = JSON.stringify(todo, null, 2);
 
         modal.classList.remove('hidden');
