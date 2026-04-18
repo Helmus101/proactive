@@ -6898,7 +6898,7 @@ setInterval(() => {
 ipcMain.handle("get-full-memory-graph", async () => {
   try {
     const nodes = await db.allQuery(`SELECT id, layer, subtype, title, summary, metadata FROM memory_nodes LIMIT 2000`).catch(() => []);
-    const edges = await db.allQuery(`SELECT from_node_id AS source, to_node_id AS target, edge_type, weight FROM memory_edges LIMIT 5000`).catch(() => []);
+    const edges = await db.allQuery(`SELECT from_node_id AS source, to_node_id AS target, edge_type, weight, trace_label FROM memory_edges LIMIT 5000`).catch(() => []);
     return { nodes, edges };
   } catch (err) {
     console.error("Failed to fetch full memory graph:", err);
@@ -9404,6 +9404,7 @@ ipcMain.handle('get-related-nodes', async (event, nodeId, relationType = null) =
 ipcMain.handle('get-core-memory', async () => {
   try {
     const db = require('./services/db');
+    const coreNode = await db.get(`SELECT * FROM memory_nodes WHERE id = 'core_living_doc'`).catch(() => null);
     const rows = await db.allQuery(
       `SELECT title, summary, confidence
        FROM memory_nodes
@@ -9412,6 +9413,7 @@ ipcMain.handle('get-core-memory', async () => {
        LIMIT 6`
     ).catch(() => []);
     return {
+      core: coreNode ? { title: coreNode.title, summary: coreNode.summary, canonical_text: coreNode.canonical_text, updated_at: coreNode.updated_at } : null,
       top_insights: rows.map((row) => ({
         title: row.title,
         summary: row.summary,
