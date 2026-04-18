@@ -1,7 +1,7 @@
 const db = require('../db');
 const { ingestRawEvent } = require('../ingestion');
 const { buildHybridGraphRetrieval } = require('./hybrid-graph-retrieval');
-const { buildRetrievalThought, widenTemporalWindow } = require('./retrieval-thought-system');
+const { buildRetrievalThought, widenTemporalWindow, inferSurfaceFamilies } = require('./retrieval-thought-system');
 
 function safeJsonParse(value, fallback) {
   try {
@@ -668,28 +668,6 @@ function retrievalLooksSparse(retrieval) {
   return seedCount < 2 || evidenceCount < 3;
 }
 
-function withTemporalFallback(thought, widenedRange) {
-  return {
-    ...thought,
-    filters: {
-      ...(thought?.filters || {}),
-      date_range: widenedRange
-    },
-    applied_date_range: widenedRange,
-    widened_date_range: widenedRange,
-    date_filter_status: 'widened',
-    temporal_reasoning: [
-      ...(thought?.temporal_reasoning || []),
-      `Initial time window looked sparse, so retrieval widened once to ${widenedRange.start} -> ${widenedRange.end}.`
-    ],
-    fallback_policy: {
-      ...(thought?.fallback_policy || { mode: 'widen_once' }),
-      attempted: true,
-      widened: true
-    }
-  };
-}
-
 async function executeParallelRetrieval(baseQuery, baseThought, options) {
   const bundle = [
     String(baseQuery || '').trim(),
@@ -895,15 +873,45 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       });
     }
 
-    const canWiden = Boolean(baseThought?.initial_date_range) && !baseThought?.fallback_policy?.attempted;
+    const canWiden = Boolean(baseThought?.initial_date_range || baseThought?.filters?.app) && !baseThought?.fallback_policy?.attempted;
     if (canWiden && retrievalLooksSparse(retrieval)) {
-      const widenedRange = widenTemporalWindow(baseThought.initial_date_range);
-      if (widenedRange) {
-        const widenedThought = withTemporalFallback(baseThought, widenedRange);
+      const widenedRange = baseThought.initial_date_range ? widenTemporalWindow(baseThought.initial_date_range) : null;
+      let widenedApps = null;
+      if (baseThought.filters?.app) {
+        const families = inferSurfaceFamilies(retrievalQuery, '', baseThought.filters.app);
+        if (families.includes('communication')) widenedApps = ['Gmail', 'Slack', 'Messages', 'WhatsApp', 'Signal'];
+        else if (families.includes('coding')) widenedApps = ['GitHub', 'Cursor', 'Xcode', 'VSCode'];
+        else if (families.includes('browser')) widenedApps = ['Chrome', 'Safari', 'Arc'];
+      }
+
+      if (widenedRange || widenedApps) {
+        const widenedFilters = {
+          ...(baseThought.filters || {}),
+          date_range: widenedRange || baseThought.filters?.date_range,
+          app: widenedApps || baseThought.filters?.app
+        };
+        const widenedThought = {
+          ...baseThought,
+          filters: widenedFilters,
+          applied_date_range: widenedRange || baseThought.applied_date_range,
+          widened_date_range: widenedRange,
+          date_filter_status: 'widened',
+          temporal_reasoning: [
+            ...(baseThought.temporal_reasoning || []),
+            widenedRange ? `Initial time window looked sparse, so retrieval widened to ${widenedRange.start} -> ${widenedRange.end}.` : '',
+            widenedApps ? `Initial app filter was too restrictive, so broadened to related apps: ${widenedApps.join(', ')}.` : ''
+          ].filter(Boolean),
+          fallback_policy: {
+            ...(baseThought.fallback_policy || { mode: 'widen_once' }),
+            attempted: true,
+            widened: true
+          }
+        };
+
         const widenedRetrieval = await executeParallelRetrieval(retrievalQuery, widenedThought, {
           mode: 'chat',
-          app: options?.app,
-          date_range: widenedRange,
+          app: widenedApps || options?.app,
+          date_range: widenedRange || baseThought.applied_date_range,
           source_types: options?.source_types,
           retrieval_thought: widenedThought
         });
@@ -950,7 +958,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       label: 'Memory search',
       detail: formatStageDetail([
         `Found ${retrieval.seed_results?.length || 0} candidate seeds and ${retrieval.evidence_count || 0} evidence items.`,
-        retrieval.date_filter_status === 'widened' ? 'Widened the time window once because the first pass was sparse.' : ''
+        retrieval.date_filter_status === 'widened' ? 'Widened the search filters because the first pass was sparse.' : ''
       ], 'Completed memory retrieval.'),
       counts: {
         seeds: Number(retrieval.seed_results?.length || 0),
@@ -968,7 +976,10 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     });
     emitStage('edge_expansion', 'completed', {
       label: 'Edge expansion',
-      detail: `Expanded downward through ${retrieval.edge_paths?.length || 0} edge paths to gather lower-chain support and evidence.`,
+      detail: (() => {
+        const jumpCount = (retrieval.edge_paths || []).filter(e => e.trace_label === 'semantic_jump').length;
+        return `Expanded downward through ${retrieval.edge_paths?.length || 0} edge paths to gather lower-chain support.${jumpCount > 0 ? ` Included ${jumpCount} similarity-based semantic jumps.` : ''}`;
+      })(),
       counts: {
         support_nodes: Number(retrieval.support_nodes?.length || 0),
         evidence_nodes: Number(retrieval.evidence_nodes?.length || 0),
