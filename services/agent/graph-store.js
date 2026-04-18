@@ -87,17 +87,19 @@ async function upsertMemoryNode({
   createdAt = null,
   updatedAt = null,
   embedding = [],
-  anchorDate = null
+  anchorDate = null,
+  anchorAt = null
 }) {
   const now = new Date().toISOString();
   const titleText = String(title || '').trim();
   const summaryText = String(summary || '').trim();
   const canonical = String(canonicalText || titleText || summaryText || '').trim();
-  const resolvedAnchorDate = anchorDate || asObj(metadata).anchor_date || null;
+  const resolvedAnchorAt = anchorAt || asObj(metadata).anchor_at || now;
+  const resolvedAnchorDate = anchorDate || asObj(metadata).anchor_date || (resolvedAnchorAt ? resolvedAnchorAt.slice(0, 10) : now.slice(0, 10));
   await db.runQuery(
     `INSERT OR REPLACE INTO memory_nodes
-     (id, layer, subtype, title, summary, canonical_text, confidence, status, source_refs, metadata, graph_version, created_at, updated_at, embedding, anchor_date)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     (id, layer, subtype, title, summary, canonical_text, confidence, status, source_refs, metadata, graph_version, created_at, updated_at, embedding, anchor_date, anchor_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       layer,
@@ -113,7 +115,8 @@ async function upsertMemoryNode({
       createdAt || now,
       updatedAt || now,
       JSON.stringify(Array.isArray(embedding) ? embedding : []),
-      resolvedAnchorDate
+      resolvedAnchorDate,
+      resolvedAnchorAt
     ]
   );
 
@@ -157,7 +160,8 @@ async function updateMemoryNode(id, updates = {}) {
     createdAt: existing.created_at,
     updatedAt: new Date().toISOString(),
     embedding: updates.embedding || asObj(existing.embedding),
-    anchorDate: updates.anchor_date || existing.anchor_date
+    anchorDate: updates.anchor_date || existing.anchor_date,
+    anchorAt: updates.anchor_at || existing.anchor_at
   };
 
   await upsertMemoryNode(node);

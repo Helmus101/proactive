@@ -513,7 +513,8 @@ ${JSON.stringify(blob)}`;
           source_type_group: group.typeGroup
         },
         graphVersion: 'semantic_window_v2',
-        anchorDate: new Date(group.latestTs || group.startTs || Date.now()).toISOString().slice(0, 10)
+        anchorDate: new Date(group.latestTs || group.startTs || Date.now()).toISOString().slice(0, 10),
+        anchorAt: new Date(group.latestTs || group.startTs || Date.now()).toISOString()
       });
 
       for (const ev of blob.slice(0, 120)) {
@@ -607,7 +608,8 @@ async function runDailyInsights(apiKey) {
           anchor_date: cloud.metadata?.anchor_date || (cloud.metadata?.anchor_at ? cloud.metadata.anchor_at.slice(0, 10) : null)
         },
         graphVersion: 'daily_insights_v1',
-        anchorDate: cloud.metadata?.anchor_date || (cloud.metadata?.anchor_at ? cloud.metadata.anchor_at.slice(0, 10) : null)
+        anchorDate: cloud.metadata?.anchor_date || (cloud.metadata?.anchor_at ? cloud.metadata.anchor_at.slice(0, 10) : null),
+        anchorAt: cloud.metadata?.anchor_at || null
       });
       await upsertMemoryEdge({
         fromNodeId: cloud.id,
@@ -700,7 +702,8 @@ Return strict JSON:
         anchor_date: new Date().toISOString().slice(0, 10)
       },
       graphVersion: 'living_core_v2',
-      anchorDate: new Date().toISOString().slice(0, 10)
+      anchorDate: new Date().toISOString().slice(0, 10),
+      anchorAt: new Date().toISOString()
     });
 
     if (Array.isArray(payload.supporting_insight_ids)) {

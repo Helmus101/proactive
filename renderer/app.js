@@ -109,6 +109,9 @@ class WeaveApp {
         this.discoveryOrbitLabel = document.getElementById('discovery-orbit-label');
         this.libraryList = document.getElementById("library-list");
         this.libraryFilters = Array.from(document.querySelectorAll("[data-lib-filter]"));
+        this.librarySearchInput = document.getElementById("library-search-input");
+        this.librarySearchButton = document.getElementById("library-search-btn");
+        this.librarySearchQueries = document.getElementById("library-search-queries");
         this.settingsGraphContainer = document.getElementById("settings-graph-container");
     this.deleteAllDataButton = document.getElementById('delete-all-data-btn');
     }
@@ -2705,9 +2708,84 @@ Would you like me to continue with more detail?` : content;
                 this.renderLibrary(chip.dataset.libFilter);
             });
         });
+
+        this.librarySearchButton?.addEventListener("click", () => this.handleLibrarySearch());
+        this.librarySearchInput?.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") this.handleLibrarySearch();
+        });
+    }
+
+    async handleLibrarySearch() {
+        const query = this.librarySearchInput?.value.trim();
+        if (!query) {
+            if (this.librarySearchQueries) this.librarySearchQueries.classList.add('hidden');
+            this.renderLibrary();
+            return;
+        }
+
+        if (!this.libraryList) return;
+        this.libraryList.innerHTML = '<div class="graph-placeholder">Searching memory graph...</div>';
+
+        try {
+            const activeFilter = this.libraryFilters.find(f => f.classList.contains('active'))?.dataset.libFilter || 'all';
+            const nodeTypes = activeFilter === 'all' ? [] : [activeFilter];
+
+            const results = await window.electronAPI.searchMemoryGraph(query, {
+                limit: 40,
+                nodeTypes
+            });
+
+            if (this.librarySearchQueries) {
+                this.librarySearchQueries.innerHTML = '';
+                this.librarySearchQueries.classList.remove('hidden');
+                
+                const displayQueries = results.generated_queries?.semantic || [query];
+                displayQueries.forEach(q => {
+                    const chip = document.createElement('div');
+                    chip.className = 'context-chip';
+                    chip.style.fontSize = '10px';
+                    chip.style.padding = '4px 8px';
+                    chip.textContent = q;
+                    this.librarySearchQueries.appendChild(chip);
+                });
+            }
+
+            this.renderLibraryResults(results);
+        } catch (err) {
+            console.error("Library search error:", err);
+            this.libraryList.innerHTML = '<div class="empty-state">Search failed.</div>';
+        }
+    }
+
+    renderLibraryResults(results) {
+        const nodes = Array.isArray(results) ? results : (results.evidence || results.primary_nodes || []);
+        
+        if (!nodes.length) {
+            this.libraryList.innerHTML = '<div class="empty-state">No matching memories found.</div>';
+            return;
+        }
+
+        this.libraryList.innerHTML = nodes.map(node => {
+            const metadata = typeof node.metadata === 'string' ? JSON.parse(node.metadata) : (node.metadata || {});
+            const date = node.anchor_date || metadata.anchor_date || metadata.latest_activity_at?.slice(0, 10) || "";
+            const layer = node.layer || node.type || "memory";
+            
+            return `
+                <div class="library-card" onclick="app.openMemoryDetailById('${node.id}')">
+                    <div class="library-card-layer">${layer}</div>
+                    <div class="library-card-title">${this.escapeHtml(node.title || "")}</div>
+                    <div class="library-card-summary">${this.escapeHtml(node.summary || node.text || "")}</div>
+                    <div class="library-card-footer">
+                        <span>${node.subtype || ""}</span><span class="library-card-date">${date}</span>
+                    </div>
+                </div>
+            `;
+        }).join("");
     }
 
     async renderLibrary(filter = "all") {
+        if (this.librarySearchInput) this.librarySearchInput.value = "";
+        if (this.librarySearchQueries) this.librarySearchQueries.classList.add('hidden');
         if (!this.libraryList) return;
         this.libraryList.innerHTML = '<div class="graph-placeholder">Loading library...</div>';
         try {
@@ -2717,23 +2795,26 @@ Would you like me to continue with more detail?` : content;
                 this.libraryList.innerHTML = '<div class="empty-state">No items found in this category.</div>';
                 return;
             }
-            this.libraryList.innerHTML = filtered.map(node => `
+            this.libraryList.innerHTML = filtered.map(node => {
+                const date = node.anchor_date || (node.metadata ? (typeof node.metadata === 'string' ? JSON.parse(node.metadata).anchor_date : node.metadata.anchor_date) : "");
+                return `
                 <div class="library-card" onclick="app.openMemoryDetailById('${node.id}')">
                     <div class="library-card-layer">${node.layer}</div>
-                    <div class="library-card-title">${this.escapeHtml(node.title)}</div>
+                    <div class="library-card-title">${this.escapeHtml(node.title || "")}</div>
                     <div class="library-card-summary">${this.escapeHtml(node.summary || "")}</div>
                     <div class="library-card-footer">
-                        <span>${node.subtype || ""}</span><span class="library-card-date">${node.anchor_date || ""}</span>
+                        <span>${node.subtype || ""}</span><span class="library-card-date">${date || ""}</span>
                     </div>
                 </div>
-            `).join("");
+            `}).join("");
+    
         } catch (err) {
             console.error("Library load error:", err);
             this.libraryList.innerHTML = '<div class="empty-state">Failed to load library.</div>';
         }
     }
 
-        async renderFullMemoryGraph() {
+    async renderFullMemoryGraph() {
         if (!this.settingsGraphContainer) return;
         this.settingsGraphContainer.innerHTML = '<div class="graph-placeholder">Initializing graph...</div>';
         try {
