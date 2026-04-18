@@ -6898,7 +6898,7 @@ setInterval(() => {
 ipcMain.handle("get-full-memory-graph", async () => {
   try {
     const nodes = await db.allQuery(`SELECT id, layer, subtype, title, summary, metadata FROM memory_nodes LIMIT 2000`).catch(() => []);
-    const edges = await db.allQuery(`SELECT from_node_id, to_node_id, edge_type, weight FROM memory_edges LIMIT 5000`).catch(() => []);
+    const edges = await db.allQuery(`SELECT from_node_id AS source, to_node_id AS target, edge_type, weight FROM memory_edges LIMIT 5000`).catch(() => []);
     return { nodes, edges };
   } catch (err) {
     console.error("Failed to fetch full memory graph:", err);

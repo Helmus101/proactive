@@ -2704,7 +2704,7 @@ class WeaveApp {
         }
     }
 
-    async renderFullMemoryGraph() {
+        async renderFullMemoryGraph() {
         if (!this.settingsGraphContainer) return;
         this.settingsGraphContainer.innerHTML = '<div class="graph-placeholder">Initializing graph...</div>';
         try {
@@ -2713,38 +2713,85 @@ class WeaveApp {
                 this.settingsGraphContainer.innerHTML = '<div class="graph-placeholder">No memory nodes yet.</div>';
                 return;
             }
+
+            // Filter out orphaned edges
+            const nodeIds = new Set(nodes.map(n => n.id));
+            const filteredEdges = (edges || []).filter(e => {
+                const s = typeof e.source === 'object' ? e.source.id : e.source;
+                const t = typeof e.target === 'object' ? e.target.id : e.target;
+                return nodeIds.has(s) && nodeIds.has(t);
+            });
+
             this.settingsGraphContainer.innerHTML = "";
             const width = this.settingsGraphContainer.clientWidth || 800;
             const height = 400;
+
+            const layers = ['core', 'insight', 'cloud', 'semantic', 'episode', 'event'];
+            const layerX = (layer) => {
+                const index = layers.indexOf(layer);
+                if (index === -1) return width / 2;
+                return (width / (layers.length + 1)) * (index + 1);
+            };
+
             const svg = d3.select(this.settingsGraphContainer)
                 .append("svg")
                 .attr("width", width)
                 .attr("height", height);
+
+            // Add background brackets and labels
+            layers.forEach((layer) => {
+                const x = layerX(layer);
+                svg.append("line")
+                    .attr("x1", x)
+                    .attr("y1", 30)
+                    .attr("x2", x)
+                    .attr("y2", height - 30)
+                    .attr("stroke", "var(--glass-border)")
+                    .attr("stroke-width", 1)
+                    .attr("stroke-dasharray", "4,4");
+                
+                svg.append("text")
+                    .attr("x", x)
+                    .attr("y", 20)
+                    .attr("text-anchor", "middle")
+                    .attr("fill", "var(--text-tertiary)")
+                    .attr("font-size", "10px")
+                    .attr("font-weight", "600")
+                    .attr("style", "text-transform: uppercase; letter-spacing: 0.05em;")
+                    .text(layer);
+            });
+
             const simulation = d3.forceSimulation(nodes)
-                .force("link", d3.forceLink(edges).id(d => d.id).distance(50))
-                .force("charge", d3.forceManyBody().strength(-100))
-                .force("center", d3.forceCenter(width / 2, height / 2));
+                .force("link", d3.forceLink(filteredEdges).id(d => d.id).distance(60))
+                .force("charge", d3.forceManyBody().strength(-80))
+                .force("center", d3.forceCenter(width / 2, height / 2))
+                .force("x", d3.forceX(d => layerX(d.layer)).strength(1.2))
+                .force("y", d3.forceY(height / 2).strength(0.15));
+
             const link = svg.append("g")
                 .selectAll("line")
-                .data(edges)
+                .data(filteredEdges)
                 .enter().append("line")
                 .attr("class", "graph-link")
-                .attr("stroke", "#cbd5e1")
-                .attr("stroke-opacity", 0.6)
+                .attr("stroke", "var(--accent-blue)")
+                .attr("stroke-opacity", 0.25)
                 .attr("stroke-width", d => Math.sqrt(d.weight || 1));
+
             const node = svg.append("g")
                 .selectAll("circle")
                 .data(nodes)
                 .enter().append("circle")
                 .attr("class", "graph-node")
-                .attr("r", d => d.layer === "core" ? 8 : 5)
+                .attr("r", d => d.layer === "core" ? 7 : 4)
                 .attr("fill", d => {
-                    if (d.layer === "core") return "#ff6b6b";
-                    if (d.layer === "insight") return "#fb923c";
-                    if (d.layer === "cloud") return "#34d399";
-                    if (d.layer === "semantic") return "#7bb6ff";
-                    return "#94a3b8";
+                    if (d.layer === "core") return "var(--accent-coral)";
+                    if (d.layer === "insight") return "var(--accent-amber)";
+                    if (d.layer === "cloud") return "var(--accent-teal)";
+                    if (d.layer === "semantic") return "var(--accent-blue)";
+                    return "var(--text-tertiary)";
                 })
+                .attr("stroke", "var(--glass-bg)")
+                .attr("stroke-width", 1.5)
                 .call(d3.drag()
                     .on("start", (event) => {
                         if (!event.active) simulation.alphaTarget(0.3).restart();
@@ -2761,7 +2808,9 @@ class WeaveApp {
                         event.subject.fy = null;
                     }))
                 .on("click", (event, d) => this.openMemoryDetailById(d.id));
-            node.append("title").text(d => d.title);
+
+            node.append("title").text(d => `${d.title}\n(${d.layer})`);
+
             simulation.on("tick", () => {
                 link.attr("x1", d => d.source.x)
                     .attr("y1", d => d.source.y)
@@ -2774,9 +2823,7 @@ class WeaveApp {
             console.error("Graph render error:", err);
             this.settingsGraphContainer.innerHTML = '<div class="graph-placeholder">Failed to load graph.</div>';
         }
-    }
-
-    async openMemoryDetailById(nodeId) {
+    }\n\n    async openMemoryDetailById(nodeId) {
         try {
             const { nodes } = await window.electronAPI.getFullMemoryGraph();
             const node = nodes.find(n => n.id === nodeId);
