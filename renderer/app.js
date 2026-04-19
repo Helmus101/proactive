@@ -775,13 +775,21 @@ class WeaveApp {
 
     getVisibleTodos() {
         const now = Date.now();
-        return this.todos.filter((todo) => {
-            if (todo.completed) return false;
-            if (todo.snoozedUntil && Number(todo.snoozedUntil) > now) return false;
-            if (this.currentFilter === 'all') return true;
-            if (this.currentFilter === 'followups') return todo.category === 'followup';
-            return todo.category === this.currentFilter;
-        });
+const filtered = this.todos.filter((todo) => {
+        if (todo.completed) return false;
+        if (todo.snoozedUntil && Number(todo.snoozedUntil) > now) return false;
+        if (this.currentFilter === 'all') return true;
+        if (this.currentFilter === 'followups') return todo.category === 'followup';
+        return todo.category === this.currentFilter;
+    });
+
+    return filtered
+        .sort((a, b) => {
+            const priorityDelta = this.priorityWeight(b.priority) - this.priorityWeight(a.priority);
+            if (priorityDelta !== 0) return priorityDelta;
+            return (b.createdAt || 0) - (a.createdAt || 0);
+        })
+        .slice(0, 10);
     }
 
     formatConfidence(value) {

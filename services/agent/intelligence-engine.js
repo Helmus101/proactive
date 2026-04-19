@@ -228,6 +228,40 @@ async function callLLM(prompt, configOrApiKey = null, temperature = 0.3) {
   return callDeepSeek(prompt, config.apiKey, temperature);
 }
 
+async function detectTasks(items = [], configOrApiKey = null) {
+  const itemsList = Array.isArray(items) ? items : [items];
+  if (!itemsList.length) return [];
+  const prompt = `You are a helpful assistant that extracts open, actionable tasks from recent memory evidence. Given the following list of activity items, return a strict JSON object containing a top-level field named \"tasks\". Each task should include: title, description, reason, category, priority, source_id, and completed. If no tasks are actionable, return {\"tasks\": []}.
+
+Items:
+${itemsList.slice(0, 30).map((item, index) => `Item ${index + 1}: ${JSON.stringify(item).slice(0, 1200)}`).join('\n')}
+
+Return only valid JSON, nothing else.`;
+  const payload = await callLLM(prompt, normalizeLLMConfig(configOrApiKey), 0.2);
+  if (!payload || !Array.isArray(payload.tasks)) return [];
+  return payload.tasks.filter(Boolean).map((item, idx) => {
+    const title = String(item.title || item.name || item.summary || item.text || '').trim();
+    const description = String(item.description || item.reason || item.details || '').trim();
+    const reason = String(item.reason || item.description || item.details || title).trim();
+    const category = String(item.category || item.type || 'work').toLowerCase();
+    const priority = ['high', 'medium', 'low'].includes(String(item.priority || '').toLowerCase())
+      ? String(item.priority).toLowerCase()
+      : 'medium';
+    return {
+      id: item.id || `task_${Date.now()}_${idx}`,
+      title: title || `Follow up on memory item ${idx + 1}`,
+      description: description || title || 'Task derived from recent activity.',
+      reason: reason || 'Detected as unfinished or actionable from recent memory.',
+      category,
+      priority,
+      source_id: item.source_id || item.sourceId || item.source || null,
+      completed: false,
+      assignee: item.assignee || 'ai',
+      createdAt: Date.now()
+    };
+  }).filter(task => task.title);
+}
+
 async function generateNodeTLDR(node, apiKey) {
   if (!node || !apiKey) return null;
   const isEpisode = node.layer === 'episode';
@@ -758,6 +792,7 @@ async function buildGlobalGraph() {
 module.exports = {
   callDeepSeek,
   callLLM,
+  detectTasks,
   runEpisodeJob,
   runEnrichmentJob,
   runSemanticSummaryWindow,

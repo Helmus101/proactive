@@ -808,20 +808,41 @@ function suggestionQueueKey(item = {}) {
 }
 
 function mergeSuggestionQueues(existing = [], incoming = [], limit = MAX_PRACTICAL_SUGGESTIONS) {
-  const out = [];
+  const all = [
+    ...(Array.isArray(existing) ? existing : []),
+    ...(Array.isArray(incoming) ? incoming : [])
+  ].filter((item) => item && !item.completed);
+
+  const deduped = [];
   const seen = new Set();
-  const push = (item) => {
-    if (!item || item.completed) return;
+  for (const item of all) {
     const key = suggestionQueueKey(item);
-    if (!key || seen.has(key)) return;
+    if (!key || seen.has(key)) continue;
     seen.add(key);
-    out.push(item);
+    deduped.push(item);
+  }
+
+  const priorityValue = (item) => {
+    const map = { high: 3, medium: 2, low: 1 };
+    return map[String(item?.priority || 'medium').toLowerCase()] || 2;
   };
 
-  // Keep existing items first, then append new ones until cap.
-  (Array.isArray(existing) ? existing : []).forEach(push);
-  (Array.isArray(incoming) ? incoming : []).forEach(push);
-  return out.slice(0, Math.max(1, Number(limit || MAX_PRACTICAL_SUGGESTIONS)));
+  deduped.sort((a, b) => {
+    const priorityDelta = priorityValue(b) - priorityValue(a);
+    if (priorityDelta !== 0) return priorityDelta;
+
+    const urgencyA = Number(a?.urgency ?? a?.score ?? a?.confidence ?? 0);
+    const urgencyB = Number(b?.urgency ?? b?.score ?? b?.confidence ?? 0);
+    if (urgencyB !== urgencyA) return urgencyB - urgencyA;
+
+    const scoreA = Number(a?.score ?? a?.confidence ?? 0);
+    const scoreB = Number(b?.score ?? b?.confidence ?? 0);
+    if (scoreB !== scoreA) return scoreB - scoreA;
+
+    return Number(b?.createdAt || 0) - Number(a?.createdAt || 0);
+  });
+
+  return deduped.slice(0, Math.max(1, Number(limit || MAX_PRACTICAL_SUGGESTIONS)));
 }
 
 function ensureSensorStorageDir() {
@@ -8999,7 +9020,7 @@ ipcMain.handle('start-google-auth', async () => {
 ipcMain.handle('get-suggestions', async () => {
   try {
     const s = store.get('suggestions') || [];
-    return s;
+    return Array.isArray(s) ? s.slice(0, MAX_PRACTICAL_SUGGESTIONS) : [];
   } catch (e) {
     console.error('Failed to get suggestions:', e);
     return [];

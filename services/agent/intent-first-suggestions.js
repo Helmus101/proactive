@@ -128,7 +128,7 @@ function normalizeSuggestion(raw, options = {}) {
   const evidenceDensity = clamp(evidence.length / 4);
   const baseScore = clamp(
     raw?.score ??
-      (confidence * 0.32 + specificity * 0.28 + evidenceDensity * 0.18 + continuity * 0.12 + urgency * 0.1)
+      (confidence * 0.26 + specificity * 0.26 + evidenceDensity * 0.14 + continuity * 0.12 + urgency * 0.22)
   );
 
   return {
