@@ -727,6 +727,8 @@ async function observeDesktopState(options = {}) {
     } else {
       console.log('[OCR] OCR failed or no text, using AX text');
     }
+    // Delete local screenshot file immediately after OCR
+    fs.promises.unlink(screenshot.file_path).catch(() => {});
   }
 
   const browserLike = /chrome|safari|arc|firefox/.test(String(frontmost.appName || '').toLowerCase());
