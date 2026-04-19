@@ -47,15 +47,16 @@ function inferIntentLabel(text) {
 function titleHasConcreteTarget(title) {
   const t = safeText(title).trim();
   if (t.length < 14) return false;
-  if (/\b(this|that|it|something|anything|stuff|things)\b/i.test(t)) return false;
+  if (/\b(this|that|it|something|anything|stuff|things|item|context|task|step)\b/i.test(t)) return false;
   if (/["']/i.test(t)) return true;
-  if (/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\b/.test(t)) return true;
-  if (/\b(email|thread|meeting|agenda|proposal|report|deck|draft|bug|ticket|assignment|homework|profile|application|checkout|doc|file|calendar)\b/i.test(t)) return true;
-  return t.split(/\s+/).length >= 4;
+  // Proper noun check (CamelCase)
+  if (/[A-Z][a-z]+/.test(t)) return true;
+  if (/\b(email|thread|meeting|agenda|proposal|report|deck|draft|bug|ticket|assignment|homework|profile|application|checkout|doc|file|calendar|extension|manifest|budget|invoice)\b/i.test(t)) return true;
+  return false; // Require explicit target now, don't just rely on word count
 }
 
 function hasBroadVerb(text) {
-  return /\b(take action|follow up|return to|work on|keep working|continue|resume|investigate|look into|handle this|move forward)\b/i.test(safeText(text));
+  return /\b(take action|follow up|return to|work on|keep working|continue|resume|investigate|look into|handle this|move forward|be proactive|stay on top|make progress|check in|review this|organize)\b/i.test(safeText(text));
 }
 
 function buildPlan(input) {
