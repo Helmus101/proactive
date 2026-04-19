@@ -426,9 +426,9 @@ function summarizeClusterFallback(group = {}) {
   return { title: String(title).slice(0, 220), summary: String(summary).slice(0, 1024), topics: domains, confidence: 0.68 };
 }
 
-// Summarize raw events for a short time window (e.g., last 30 minutes).
+// Summarize raw events for a short time window (e.g., last 15 minutes).
 // Returns an array of created semantic node ids.
-async function runSemanticSummaryWindow(windowMs = 30 * 60 * 1000, llmConfigOrKey = null) {
+async function runSemanticSummaryWindow(windowMs = 15 * 60 * 1000, llmConfigOrKey = null) {
   try {
     const now = Date.now();
     const start = new Date(now - windowMs).toISOString();

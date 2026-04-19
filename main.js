@@ -1601,7 +1601,7 @@ async function runEpisodeGeneration() {
   episodeJobLock = true;
   
   try {
-    console.log('[EpisodeJob] Running 90-minute episode generation...');
+    console.log('[EpisodeJob] Running 15-minute episode generation...');
     const { runEpisodeJob } = require('./services/agent/intelligence-engine');
     
     store.set('memoryGraphHealth', {
@@ -1646,9 +1646,9 @@ async function runSemanticWindowGeneration() {
       console.log('[SemanticWindow] Skipping to reduce system load');
       return;
     }
-    console.log('[SemanticWindow] Running half-hour semantic summary...');
+    console.log('[SemanticWindow] Running 15-minute semantic summary...');
     const { runSemanticSummaryWindow } = require('./services/agent/intelligence-engine');
-    const result = await runSemanticSummaryWindow(30 * 60 * 1000, process.env.DEEPSEEK_API_KEY || null);
+    const result = await runSemanticSummaryWindow(15 * 60 * 1000, process.env.DEEPSEEK_API_KEY || null);
     const semIds = Array.isArray(result) ? result.filter(Boolean) : (result ? [result] : []);
     if (semIds.length) {
       console.log('[SemanticWindow] Created semantic nodes:', semIds.join(', '));
@@ -1918,7 +1918,7 @@ function startMemoryGraphProcessing() {
     if (episodeGenerationTimer) clearInterval(episodeGenerationTimer);
     episodeGenerationTimer = setInterval(runEpisodeGeneration, 15 * 60 * 1000);
     if (semanticsTimer) clearInterval(semanticsTimer);
-    semanticsTimer = setInterval(runSemanticWindowGeneration, 30 * 60 * 1000);
+    semanticsTimer = setInterval(runSemanticWindowGeneration, 15 * 60 * 1000);
   }
   
   // Suggestion engine every 30 minutes

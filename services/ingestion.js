@@ -539,7 +539,8 @@ function interpretDesktopCapture(text, metadata = {}) {
 
 function sanitizeDesktopText(text, metadata) {
   const meta = metadata && typeof metadata === 'object' ? metadata : {};
-  return interpretDesktopCapture(text, meta).searchText;
+  const interpretation = interpretDesktopCapture(text, meta);
+  return `${interpretation.searchText}\n\nFull OCR:\n${interpretation.cleanedText}`;
 }
 
 function sanitizeSourceText({ type, source, text, metadata }) {

@@ -196,9 +196,9 @@ function assignEpisode(groups, envelope) {
     const sameApp = envelopeApp && group.apps.has(envelopeApp);
     const sameSourceRef = envelope.source_ref && group.sourceRefs.has(envelope.source_ref);
     const sameCommunicationFlow = group.typeGroup === 'communication' && envelope.type_group === 'communication';
-    const MAX_EPISODE_SPAN = 2 * 60 * 60 * 1000; // soft ceiling of 2 hours for discrete events
+    const MAX_EPISODE_SPAN = EPISODE_WINDOW_MS; // strictly enforce 15m generation window
 
-    if (Math.abs(ts - group.startTs) > MAX_EPISODE_SPAN || gapMs > 30 * 60 * 1000) continue;
+    if (Math.abs(ts - group.startTs) > MAX_EPISODE_SPAN || gapMs > EPISODE_WINDOW_MS) continue;
 
     // Hard boundary for parallel but unrelated contexts happening in the same window.
     // Use 5-minute gap as a stricter boundary for session-like grouping.
@@ -215,11 +215,11 @@ function assignEpisode(groups, envelope) {
 
     const eligible =
       sameSourceRef ||
-      (sameDomain && gapMs <= 15 * 60 * 1000) ||
+      (sameDomain && gapMs <= EPISODE_WINDOW_MS) ||
       (sameApp && topicHits >= 1 && gapMs <= 5 * 60 * 1000) ||
-      (participantHits >= 1 && gapMs <= 30 * 60 * 1000) ||
+      (participantHits >= 1 && gapMs <= EPISODE_WINDOW_MS) ||
       (topicHits >= 3 && gapMs <= 10 * 60 * 1000) ||
-      (sameCommunicationFlow && participantHits >= 1 && gapMs <= 60 * 60 * 1000) ||
+      (sameCommunicationFlow && participantHits >= 1 && gapMs <= EPISODE_WINDOW_MS) ||
       (group.typeGroup === envelope.type_group && topicHits >= 2 && gapMs <= 5 * 60 * 1000);
 
     if (!eligible) continue;
@@ -232,7 +232,7 @@ function assignEpisode(groups, envelope) {
     score += topicHits * 1.25;
     if (sameCommunicationFlow) score += 1.5;
     if (group.typeGroup === envelope.type_group) score += 0.75;
-    if (gapMs > 45 * 60 * 1000) score -= 1.5;
+    if (gapMs > EPISODE_WINDOW_MS) score -= 1.5;
 
     candidates.push({ group, score });
   }
@@ -808,7 +808,7 @@ async function writeEpisodeGroup(group, version) {
       summary.title,
       summary.summary,
       group.events.map((event) => event.text).join('\n')
-    ].filter(Boolean).join('\n').slice(0, 4000),
+    ].filter(Boolean).join('\n').slice(0, 8000),
     participants: summary.participants,
     domains: summary.domains,
     topics: summary.topics,
@@ -877,7 +877,7 @@ async function writeEpisodeGroup(group, version) {
     const rawNodeId = `raw_${stableHash(String(event.id || `${event.timestamp}|${event.title || ''}`))}`;
     const rawTs = isoFromTs(parseTs(event.occurred_at || event.timestamp)) || episodeData.anchor_at || new Date().toISOString();
     const rawTitle = String(event.title || event.window_title || event.app || 'Raw event').slice(0, 200);
-    const rawSummary = String(event.text || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+    const rawSummary = String(event.text || '').replace(/\s+/g, ' ').trim();
     const rawCanonical = [
       rawTitle,
       event.app ? `App: ${event.app}` : '',
@@ -922,7 +922,7 @@ async function writeEpisodeGroup(group, version) {
       toNodeId: group.id,
       edgeType: 'PART_OF_EPISODE',
       weight: 0.62,
-      traceLabel: 'Raw event grouped into 90-minute episode window',
+      traceLabel: 'Raw event grouped into 15-minute episode window',
       evidenceCount: 1,
       metadata: {
         event_id: event.id
