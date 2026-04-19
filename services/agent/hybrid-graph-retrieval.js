@@ -1235,7 +1235,7 @@ async function buildHybridGraphRetrieval({
     reason: row.match_reason,
     source_refs: row.source_refs || [],
     text: String(row.text || '').slice(0, 8000)
-  })).filter(n => !['core', 'insight', 'cloud'].includes(n.layer));
+    })).filter(n => n.layer === 'episode' || n.layer === 'semantic');
 
   const traceSummary = [
     `Mode: ${retrievalPlan.mode}`,

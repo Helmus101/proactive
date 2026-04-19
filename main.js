@@ -64,18 +64,6 @@ let semanticsTimer = null;
 let dailyInsightTimer = null;
 let weeklyInsightTimer = null;
 let livingCoreTimer = null;
-  }
-  if (semanticsPulseTimer) {
-    clearInterval(semanticsPulseTimer);
-    semanticsPulseTimer = null;
-  }
-  if (semanticsPulseTimer) {
-    clearInterval(semanticsPulseTimer);
-    semanticsPulseTimer = null;
-  }
-  if (semanticsPulseTimer) {
-    clearInterval(semanticsPulseTimer);
-    semanticsPulseTimer = null;
 let semanticsPulseTimer = null;
 let episodeJobLock = false;
 let suggestionJobLock = false;
@@ -1036,7 +1024,8 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   sensorCaptureInProgress = true;
   const timestamp = Date.now();
   const filename = `ocr_capture_${timestamp}_${crypto.randomBytes(4).toString('hex')}.png`;
-  const imagePath = path.join(os.tmpdir(), filename);
+  const sensorStorageDir = ensureSensorStorageDir();
+  const imagePath = path.join(sensorStorageDir, filename);
   const windowContext = await getFrontmostWindowContext();
   let sourceName = 'Screen';
   let captureMode = 'screen';
@@ -1155,7 +1144,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     windowId: windowContext.windowId || null,
     windowBounds: windowContext.bounds || null,
     windowContextStatus: windowContext.status || 'unavailable',
-    imagePath: null,
+    imagePath: imagePath,
     text: '',
     textCaptureSource: 'none',
     ocrLines: [],
@@ -1170,7 +1159,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   // Always run OCR so screenshot text capture is not reliant on AX-only extraction.
   const axText = String(windowContext.extractedText || '').trim();
   const ocr = await runVisionOCR(imagePath);
-  fs.promises.unlink(imagePath).catch(() => {});
+  // Keep screenshot for better identification
   const ocrText = String(ocr.text || '').trim();
   const mergedText = [axText, ocrText].filter(Boolean).join('\n').trim();
   event.text = mergedText;
@@ -5131,10 +5120,21 @@ ipcMain.handle('run-initial-sync', async (event) => {
 });
 
 // ── IPC: Get full details for a specific event (evidence backlink) ───────────
-ipcMain.handle('get-event-details', (event, eventId) => {
+ipcMain.handle('get-event-details', async (event, eventId) => {
+  const db = require('./services/db');
+  try {
+    const row = await db.getQuery(`SELECT * FROM events WHERE id = ? OR source_ref = ?`, [eventId, eventId]);
+    if (row) {
+      try {
+        row.metadata = JSON.parse(row.metadata || '{}');
+      } catch (_) {}
+      return row;
+    }
+  } catch (err) {
+    console.error('[get-event-details] Error:', err);
+  }
+
   const historicalSummaries = store.get('historicalSummaries') || {};
-  
-  // Search through all summaries for this event ID
   for (const date in historicalSummaries) {
     const summary = historicalSummaries[date];
     if (summary.events) {
@@ -9477,6 +9477,7 @@ ipcMain.handle('search-memory-graph', async (event, query, options = {}) => {
                 strategy_mode: routed?.strategy?.strategy_mode || null,
                 entry_mode: routed?.strategy?.entry_mode || null
               }),
+              source_refs: ev.source_refs || [],
               updated_at: ev.latest_activity_at || ev.timestamp || new Date().toISOString()
             };
           });
@@ -9499,7 +9500,7 @@ ipcMain.handle('search-memory-graph', async (event, query, options = {}) => {
         results = await db.allQuery(
           `SELECT n.id, n.layer, n.subtype, n.title, n.summary, n.metadata, n.anchor_at, n.created_at, n.updated_at, n.source_refs
            FROM memory_nodes n
-           WHERE n.id IN (${placeholders}) AND n.layer IN ('episode', 'semantic', 'insight')`,
+           WHERE n.id IN (${placeholders}) AND n.layer IN ('episode', 'semantic')`,
           nodeIds
         );
       }
@@ -9509,7 +9510,7 @@ ipcMain.handle('search-memory-graph', async (event, query, options = {}) => {
       let sql = `
         SELECT n.id, n.layer, n.subtype, n.title, n.summary, n.canonical_text, n.metadata, n.anchor_at, n.created_at, n.updated_at, n.source_refs
         FROM memory_nodes n
-        WHERE n.layer IN ('episode', 'semantic', 'insight') AND (n.title LIKE ? OR n.summary LIKE ? OR n.canonical_text LIKE ?)
+        WHERE n.layer IN ('episode', 'semantic') AND (n.title LIKE ? OR n.summary LIKE ? OR n.canonical_text LIKE ?)
       `;
       const params = [`%${effectiveQuery}%`, `%${effectiveQuery}%`, `%${effectiveQuery}%`];
       if (nodeTypes.length > 0) {
