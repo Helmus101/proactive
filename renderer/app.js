@@ -2296,14 +2296,14 @@ Would you like me to continue with more detail?` : content;
 
         const query = (this.memorySearchInput?.value || '').trim();
         const filterType = this.memoryFilterType?.value || 'all';
-        const includeRaw = filterType === 'all' || filterType === 'raw_event';
-        const nodeTypes = filterType === 'all' || filterType === 'raw_event' ? [] : [filterType];
+        const includeRaw = false; // Search now only returns episodes and semantics
+        const nodeTypes = filterType === 'all' ? ['episode', 'semantic', 'insight'] : 
+                         filterType === 'episode' ? ['episode'] : 
+                         filterType === 'semantic' ? ['semantic'] : 
+                         filterType === 'insight' ? ['insight'] : [];
 
         try {
-            const [nodes, rawEvents] = await Promise.all([
-                window.electronAPI.searchMemoryGraph(query, { nodeTypes, limit: 120 }),
-                includeRaw ? window.electronAPI.searchRawEvents(query) : Promise.resolve([])
-            ]);
+            const nodes = await window.electronAPI.searchMemoryGraph(query, { nodeTypes, limit: 120 });
 
             const normalizedNodes = (nodes || []).map((item) => ({
                 id: item.id,
@@ -2312,19 +2312,7 @@ Would you like me to continue with more detail?` : content;
                 timestamp: item.data?.timestamp || item.data?.date || 0
             }));
 
-            const normalizedEvents = (rawEvents || []).map((event) => ({
-                id: event.id,
-                type: 'raw_event',
-                data: {
-                    title: event.text || event.type || 'Raw Event',
-                    source: event.source,
-                    metadata: event.metadata || {},
-                    text: event.text || ''
-                },
-                timestamp: event.timestamp || 0
-            }));
-
-            this.memorySearchResults = [...normalizedNodes, ...normalizedEvents]
+            this.memorySearchResults = normalizedNodes
                 .sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime())
                 .slice(0, 200);
 
@@ -2874,7 +2862,7 @@ Would you like me to continue with more detail?` : content;
 
         try {
             const activeFilter = this.libraryFilters.find(f => f.classList.contains('active'))?.dataset.libFilter || 'all';
-            const nodeTypes = activeFilter === 'all' ? [] : [activeFilter];
+            const nodeTypes = activeFilter === 'all' ? ['episode', 'semantic', 'insight'] : [activeFilter];
 
             const results = await window.electronAPI.searchMemoryGraph(query, {
                 limit: 40,

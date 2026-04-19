@@ -9440,9 +9440,9 @@ ipcMain.handle('search-memory-graph', async (event, query, options = {}) => {
       if (nodeIds.length) {
         const placeholders = nodeIds.map(() => '?').join(',');
         results = await db.allQuery(
-          `SELECT n.id, n.layer, n.subtype, n.title, n.summary, n.metadata, n.anchor_at, n.created_at, n.updated_at
+          `SELECT n.id, n.layer, n.subtype, n.title, n.summary, n.metadata, n.anchor_at, n.created_at, n.updated_at, n.source_refs
            FROM memory_nodes n
-           WHERE n.id IN (${placeholders})`,
+           WHERE n.id IN (${placeholders}) AND n.layer IN ('episode', 'semantic', 'insight')`,
           nodeIds
         );
       }
@@ -9450,9 +9450,9 @@ ipcMain.handle('search-memory-graph', async (event, query, options = {}) => {
 
     if (!results.length) {
       let sql = `
-        SELECT n.id, n.layer, n.subtype, n.title, n.summary, n.metadata, n.anchor_at, n.created_at, n.updated_at
+        SELECT n.id, n.layer, n.subtype, n.title, n.summary, n.canonical_text, n.metadata, n.anchor_at, n.created_at, n.updated_at, n.source_refs
         FROM memory_nodes n
-        WHERE n.title LIKE ? OR n.summary LIKE ? OR n.canonical_text LIKE ?
+        WHERE n.layer IN ('episode', 'semantic', 'insight') AND (n.title LIKE ? OR n.summary LIKE ? OR n.canonical_text LIKE ?)
       `;
       const params = [`%${effectiveQuery}%`, `%${effectiveQuery}%`, `%${effectiveQuery}%`];
       if (nodeTypes.length > 0) {
@@ -9530,6 +9530,7 @@ ipcMain.handle('search-memory-graph', async (event, query, options = {}) => {
         anchor_at: row.anchor_at || parseNodeMetadata(row).anchor_at || null,
         created_at: row.created_at || null,
         updated_at: row.updated_at || null,
+        source_refs: (() => { try { return JSON.parse(row.source_refs || '[]'); } catch (_) { return []; } })(),
         ...(parseNodeMetadata(row))
       }
     }));
