@@ -10,9 +10,9 @@ const {
 } = require('./graph-store');
 const { callLLM } = require('./intelligence-engine');
 
-const DEFAULT_SEED_LIMIT = 10;
+const DEFAULT_SEED_LIMIT = 25;
 const DEFAULT_HOP_LIMIT = 10;
-const MAX_EXPANDED = 300;
+const MAX_EXPANDED = 500;
 
 function getEmbedding(row) {
   if (!row) return [];
@@ -931,9 +931,9 @@ async function buildHybridGraphRetrieval({
     ? []
     : await vectorSearchNodes(finalNodeRows, retrievalPlan.semantic_queries || retrievalPlan.search_queries || []);
   
-  // Consolidate and rank all search results picking the top 5
+  // Consolidate and rank all search results picking the top 10
   const consolidatedSeeds = reciprocalRankFusion(semanticRankings);
-  const primarySeeds = consolidatedSeeds.slice(0, 5);
+  const primarySeeds = consolidatedSeeds.slice(0, 10);
   
   emit('primary_search_results', 'completed', {
     count: primarySeeds.length,
@@ -943,7 +943,7 @@ async function buildHybridGraphRetrieval({
   const hierarchicalExpansion = await expandGraphHierarchical(primarySeeds, finalNodeRows);
   emit('iterative_expansion', 'completed', {
     count: hierarchicalExpansion.expandedNodes.length,
-    detail: `Expanded graph from top 5 seeds following hierarchical sequence.`
+    detail: `Expanded graph from top 10 seeds following hierarchical sequence.`
   });
 
   const semanticSeeds = [].concat(...semanticRankings).filter(r => r.base_score > 0.7);
@@ -1217,7 +1217,7 @@ async function buildHybridGraphRetrieval({
   }));
   evidenceRows.forEach((row) => pushEvidenceRow(row));
 
-  const evidence = prioritizedEvidenceRows.slice(0, 100).map((row) => ({
+  const evidence = prioritizedEvidenceRows.slice(0, 150).map((row) => ({
     id: row.node_id || row.event_id || row.key,
     node_id: row.node_id || null,
     event_id: row.event_id || null,
@@ -1235,7 +1235,7 @@ async function buildHybridGraphRetrieval({
     reason: row.match_reason,
     source_refs: row.source_refs || [],
     text: String(row.text || '').slice(0, 8000)
-    })).filter(n => n.layer === 'episode' || n.layer === 'semantic');
+    })).filter(n => n.layer === 'episode' || n.layer === 'semantic' || n.layer === 'raw' || n.layer === 'event');
 
   const traceSummary = [
     `Mode: ${retrievalPlan.mode}`,
@@ -1290,7 +1290,7 @@ async function buildHybridGraphRetrieval({
     ...sourceRefEvidenceRows.map((row) => row.event_id || row.key)
   ].filter(Boolean);
 
-  const drilldownRefs = Array.from(new Set(allSourceRefIds)).slice(0, 200);
+  const drilldownRefs = Array.from(new Set(allSourceRefIds)).slice(0, 400);
 
   return {
     retrieval_run_id: retrievalRunId,
