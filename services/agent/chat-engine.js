@@ -667,7 +667,7 @@ async function fetchDrilldownEvidence(refs = []) {
   ).catch(() => []);
   return rows.map((row) => {
     const metadata = safeJsonParse(row.metadata, {});
-    const text = metadata.cleaned_capture_text || row.redacted_text || row.raw_text || '';
+    const text = metadata.cleaned_capture_text || row.redacted_text || row.raw_text || row.text || '';
     return {
       id: row.id,
       source_type: row.source_type,

@@ -31,20 +31,6 @@ try {
   store = null;
 }
 
-// Get screenshots directory path
-function getScreenshotsDir() {
-  const screenshotRoot = process.env.PROACTIVE_SCREENSHOTS_DIR || path.join(os.homedir(), '.proactive');
-  const screenshotsDir = path.join(screenshotRoot, 'screenshots');
-  if (!fs.existsSync(screenshotsDir)) {
-    try {
-      fs.mkdirSync(screenshotsDir, { recursive: true });
-    } catch (e) {
-      // Silently fail if we can't create the directory
-    }
-  }
-  return screenshotsDir;
-}
-
 function readJsonFile(filePath) {
   return fs.promises.readFile(filePath, 'utf8').then((raw) => JSON.parse(raw));
 }
@@ -411,14 +397,14 @@ function deriveInteractiveCandidates(visibleElements = [], surfaceType = 'generi
   return candidates;
 }
 
-async function captureWindowScreenshot(bounds = null) {
+async function captureWindowScreenshot(bounds = null, options = {}) {
   if (process.platform !== 'darwin') {
     return { present: false, error: 'unsupported_platform' };
   }
 
-  const screenshotsDir = getScreenshotsDir();
+  const keepFilePath = Boolean(options.keepFilePath);
   const fileName = `screen-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.jpg`;
-  const filePath = path.join(screenshotsDir, fileName);
+  const filePath = path.join(os.tmpdir(), fileName);
   const args = ['-x', '-t', 'jpg'];
   if (bounds && Number.isFinite(bounds.x) && Number.isFinite(bounds.y) && Number.isFinite(bounds.width) && Number.isFinite(bounds.height)) {
     args.push('-R', `${Math.round(bounds.x)},${Math.round(bounds.y)},${Math.max(1, Math.round(bounds.width))},${Math.max(1, Math.round(bounds.height))}`);
@@ -430,15 +416,22 @@ async function captureWindowScreenshot(bounds = null) {
     const buffer = await fs.promises.readFile(filePath);
     const base64 = buffer.toString('base64');
     const truncated = base64.length > MAX_SCREENSHOT_BASE64;
-    return {
+    if (!keepFilePath) {
+      await fs.promises.unlink(filePath).catch(() => {});
+    }
+    const result = {
       present: true,
       data_url: `data:image/jpeg;base64,${truncated ? base64.slice(0, MAX_SCREENSHOT_BASE64) : base64}`,
       captured_at: new Date().toISOString(),
-      file_path: filePath,
       file_name: fileName,
       truncated
     };
+    if (keepFilePath) {
+      result.file_path = filePath;
+    }
+    return result;
   } catch (error) {
+    await fs.promises.unlink(filePath).catch(() => {});
     return {
       present: false,
       error: error.message,
@@ -705,7 +698,7 @@ async function observeDesktopState(options = {}) {
         error: error.message
       }));
   const screenshot = screenshotDecision.capture
-    ? (console.log('[observeDesktopState] Capturing screenshot:', screenshotDecision.reason), await captureWindowScreenshot(frontmost.bounds || null))
+    ? (console.log('[observeDesktopState] Capturing screenshot:', screenshotDecision.reason), await captureWindowScreenshot(frontmost.bounds || null, { keepFilePath: true }))
     : ((visualBundle?.frames?.length && visualBundle.frames[visualBundle.frames.length - 1]?.image)
       ? (console.log('[observeDesktopState] Using visual bundle frame'), {
           present: true,
@@ -728,7 +721,8 @@ async function observeDesktopState(options = {}) {
       console.log('[OCR] OCR failed or no text, using AX text');
     }
     // Delete local screenshot file immediately after OCR
-    fs.promises.unlink(screenshot.file_path).catch(() => {});
+    await fs.promises.unlink(screenshot.file_path).catch(() => {});
+    delete screenshot.file_path;
   }
 
   const browserLike = /chrome|safari|arc|firefox/.test(String(frontmost.appName || '').toLowerCase());
@@ -1140,7 +1134,6 @@ module.exports = {
   openAccessibilitySettings,
   openScreenRecordingSettings,
   saveOCRResults,
-  getScreenshotsDir,
   getOCRHistory: () => {
     if (!store) {
       try {
