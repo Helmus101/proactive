@@ -55,6 +55,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   captureSensorSnapshot: () => ipcRenderer.invoke('capture-sensor-snapshot'),
   getAccessibilityStatus: () => ipcRenderer.invoke('get-accessibility-status'),
   openAccessibilitySettings: () => ipcRenderer.invoke('open-accessibility-settings'),
+  openScreenRecordingSettings: () => ipcRenderer.invoke('open-screen-recording-settings'),
   getVoiceControlStatus: () => ipcRenderer.invoke('get-voice-control-status'),
   setVoiceControlEnabled: (enabled) => ipcRenderer.invoke('set-voice-control-enabled', enabled),
   voiceCaptureFailed: (payload = {}) => ipcRenderer.invoke('voice-capture-failed', payload),

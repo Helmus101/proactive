@@ -13,7 +13,7 @@ const {
 } = require('./graph-store');
 
 const GRAPH_VERSION_PREFIX = 'zero_base_memory_v1';
-const EPISODE_WINDOW_MS = 30 * 60 * 1000;
+const EPISODE_WINDOW_MS = 15 * 60 * 1000;
 
 function parseTs(value) {
   if (!value && value !== 0) return 0;

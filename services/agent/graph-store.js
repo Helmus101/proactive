@@ -94,8 +94,15 @@ async function upsertMemoryNode({
   const titleText = String(title || '').trim();
   const summaryText = String(summary || '').trim();
   const canonical = String(canonicalText || titleText || summaryText || '').trim();
-  const resolvedAnchorAt = anchorAt || asObj(metadata).anchor_at || now;
+  const metadataObj = asObj(metadata);
+  const resolvedAnchorAt = anchorAt || metadataObj.anchor_at || metadataObj.latest_activity_at || metadataObj.occurred_at || metadataObj.timestamp || createdAt || now;
   const resolvedAnchorDate = anchorDate || asObj(metadata).anchor_date || (resolvedAnchorAt ? resolvedAnchorAt.slice(0, 10) : now.slice(0, 10));
+  const resolvedMetadata = {
+    ...metadataObj,
+    anchor_at: resolvedAnchorAt,
+    anchor_date: resolvedAnchorDate,
+    timestamp: metadataObj.timestamp || resolvedAnchorAt
+  };
   await db.runQuery(
     `INSERT OR REPLACE INTO memory_nodes
      (id, layer, subtype, title, summary, canonical_text, confidence, status, source_refs, metadata, graph_version, created_at, updated_at, embedding, anchor_date, anchor_at)
@@ -110,7 +117,7 @@ async function upsertMemoryNode({
       Number(confidence || 0),
       status || 'active',
       JSON.stringify(Array.isArray(sourceRefs) ? sourceRefs : []),
-      JSON.stringify(metadata || {}),
+      JSON.stringify(resolvedMetadata),
       graphVersion,
       createdAt || now,
       updatedAt || now,
@@ -134,7 +141,7 @@ async function upsertMemoryNode({
       confidence: Number(confidence || 0),
       status: status || 'active',
       source_refs: Array.isArray(sourceRefs) ? sourceRefs : [],
-      ...asObj(metadata)
+      ...resolvedMetadata
     },
     embedding
   }).catch(() => {});

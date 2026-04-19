@@ -90,31 +90,73 @@ func getFrontmostWindowExtractedText(pid: pid_t) -> String {
 }
 
 func frontmostWindowContext() -> WindowContext {
-    guard let app = NSWorkspace.shared.frontmostApplication else {
+    // Optionally accept a PID to exclude (passed from main process) so the app can avoid returning
+    // its own window when asking for the 'frontmost' window to capture.
+    var excludePid: pid_t? = nil
+    var excludeOwnerName: String? = nil
+    if CommandLine.arguments.count > 1 {
+        if let argPid = Int32(CommandLine.arguments[1]) {
+            excludePid = argPid
+        }
+    }
+    if CommandLine.arguments.count > 2 {
+        let rawName = CommandLine.arguments[2].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !rawName.isEmpty {
+            excludeOwnerName = rawName
+        }
+    }
+
+    // Use NSWorkspace frontmost application as a helpful default, but we will search window list
+    // and prefer the topmost on-screen window that is not owned by `excludePid` if provided.
+    guard let _ = NSWorkspace.shared.frontmostApplication else {
         return WindowContext(appName: "", windowTitle: "", windowId: nil, x: nil, y: nil, width: nil, height: nil, extractedText: "", status: "no_frontmost_app")
     }
+    // We'll populate these with the chosen window's values
+    var chosenOwnerPid: pid_t? = nil
+    var chosenTitle: String = ""
+    var chosenBounds: CGRect? = nil
+    var chosenAppName: String = ""
+    var chosenWindowId: UInt32? = nil
 
-    let pid = app.processIdentifier
-    let appName = app.localizedName ?? ""
-    let extractedText = getFrontmostWindowExtractedText(pid: pid)
+    // Retrieve full window list
     guard let infoList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
-        return WindowContext(appName: appName, windowTitle: "", windowId: nil, x: nil, y: nil, width: nil, height: nil, extractedText: extractedText, status: "window_query_failed")
+        return WindowContext(appName: "", windowTitle: "", windowId: nil, x: nil, y: nil, width: nil, height: nil, extractedText: "", status: "window_query_failed")
     }
-
+    // Iterate windows in top-to-bottom order (infoList is ordered frontmost first) and pick the
+    // first layer-0 window whose ownerPid is not the excluded PID (if provided) and has reasonable bounds.
     for info in infoList {
         let ownerPid = info[kCGWindowOwnerPID as String] as? pid_t
         let layer = info[kCGWindowLayer as String] as? Int ?? 0
-        guard ownerPid == pid, layer == 0 else { continue }
+        let ownerName = ((info[kCGWindowOwnerName as String] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        // prefer layer 0 windows
+        if layer != 0 { continue }
+        if let exclude = excludePid, ownerPid == exclude { continue }
+        if let excludeOwnerName {
+            let lowerOwner = ownerName.lowercased()
+            if !lowerOwner.isEmpty && (lowerOwner == excludeOwnerName || lowerOwner.contains(excludeOwnerName) || excludeOwnerName.contains(lowerOwner)) {
+                continue
+            }
+        }
 
         let boundsDict = info[kCGWindowBounds as String] as? NSDictionary
         var bounds = CGRect.zero
         if let boundsDict, CGRectMakeWithDictionaryRepresentation(boundsDict, &bounds), bounds.width > 20, bounds.height > 20 {
-            let windowId = info[kCGWindowNumber as String] as? UInt32
-            let title = (info[kCGWindowName as String] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            chosenOwnerPid = ownerPid
+            chosenWindowId = info[kCGWindowNumber as String] as? UInt32
+            chosenTitle = (info[kCGWindowName as String] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            chosenBounds = bounds
+            chosenAppName = ownerName
+            break
+        }
+    }
+
+    if let ownerPid = chosenOwnerPid {
+        let extractedText = getFrontmostWindowExtractedText(pid: ownerPid)
+        if let bounds = chosenBounds {
             return WindowContext(
-                appName: appName,
-                windowTitle: title,
-                windowId: windowId,
+                appName: chosenAppName,
+                windowTitle: chosenTitle,
+                windowId: chosenWindowId,
                 x: bounds.origin.x,
                 y: bounds.origin.y,
                 width: bounds.width,
@@ -125,7 +167,8 @@ func frontmostWindowContext() -> WindowContext {
         }
     }
 
-    return WindowContext(appName: appName, windowTitle: "", windowId: nil, x: nil, y: nil, width: nil, height: nil, extractedText: extractedText, status: "no_window")
+    // Fallback: return minimal info (no suitable window found)
+    return WindowContext(appName: "", windowTitle: "", windowId: nil, x: nil, y: nil, width: nil, height: nil, extractedText: "", status: "no_window")
 }
 
 let encoder = JSONEncoder()

@@ -3,6 +3,15 @@ const os = require('os');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 const path = require('path');
+const Store = require('electron-store').default || require('electron-store');
+const db = require('./db');
+
+let app;
+try {
+  app = require('electron').app;
+} catch (e) {
+  app = null;
+}
 
 const SCREENSHOT_COOLDOWN_MS = 2500;
 const BURST_COOLDOWN_MS = 6000;
@@ -13,6 +22,28 @@ const MAX_SCREENSHOT_BASE64 = 450000;
 let lastScreenshotAt = 0;
 let lastBurstAt = 0;
 let lastWindowClipAt = 0;
+
+let store;
+try {
+  store = new Store();
+} catch (e) {
+  // Store not available (e.g., in non-Electron context); initialize on-demand later
+  store = null;
+}
+
+// Get screenshots directory path
+function getScreenshotsDir() {
+  const screenshotRoot = process.env.PROACTIVE_SCREENSHOTS_DIR || path.join(os.homedir(), '.proactive');
+  const screenshotsDir = path.join(screenshotRoot, 'screenshots');
+  if (!fs.existsSync(screenshotsDir)) {
+    try {
+      fs.mkdirSync(screenshotsDir, { recursive: true });
+    } catch (e) {
+      // Silently fail if we can't create the directory
+    }
+  }
+  return screenshotsDir;
+}
 
 function readJsonFile(filePath) {
   return fs.promises.readFile(filePath, 'utf8').then((raw) => JSON.parse(raw));
@@ -32,6 +63,98 @@ function runCommand(cmd, args = [], options = {}) {
         return;
       }
       resolve((stdout || '').toString());
+    });
+  });
+}
+
+// Check if the screen is on/awake on macOS
+async function isScreenOn() {
+  if (process.platform !== 'darwin') return true; // Assume screen is on for non-macOS
+  try {
+    // Quick check: use pmset to see if display is in sleep/off state
+    // This is much faster than ioreg
+    const output = await runCommand('pmset', ['-g'], { timeout: 3000 });
+    // If we get output without timeout, system is responsive (screen likely on)
+    return true;
+  } catch (error) {
+    // If command fails or times out, assume screen is on (fail-safe)
+    // This prevents screenshots from being blocked by screen detection
+    return true;
+  }
+}
+
+// Save OCR/extracted text to electron-store and database memory
+async function saveOCRResults(ocrText, metadata = {}) {
+  if (!store) {
+    try {
+      store = new Store();
+    } catch (e) {
+      // Still not available; silently fail
+    }
+  }
+
+  try {
+    // Save to electron-store
+    const ocrHistory = store ? (store.get('ocr_history') || []) : [];
+    const record = {
+      timestamp: new Date().toISOString(),
+      text: String(ocrText || ''), // Save full OCR text
+      app: metadata.app || '',
+      window_title: metadata.window_title || '',
+      text_length: String(ocrText || '').length,
+      screenshot_file: metadata.screenshot_file || '',
+      ...metadata
+    };
+    ocrHistory.push(record);
+    // Keep last 100 OCR results
+    if (ocrHistory.length > 100) {
+      ocrHistory.shift();
+    }
+    if (store) {
+      store.set('ocr_history', ocrHistory);
+    }
+
+    // Also save to database memory as a screen_ocr event
+    if (db) {
+      try {
+        const eventId = `ocr-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+        const eventMetadata = {
+          app: metadata.app || '',
+          window_title: metadata.window_title || '',
+          screenshot_file: metadata.screenshot_file || '',
+          vision_mode: metadata.vision_mode || 'ax_only',
+          screenshot_present: metadata.screenshot_present || false
+        };
+        await db.runQuery(
+          `INSERT OR IGNORE INTO events (id, type, timestamp, source, text, metadata) VALUES (?, ?, ?, ?, ?, ?)`,
+          [eventId, 'screen_ocr', new Date().toISOString(), 'desktop_vision', String(ocrText || ''), JSON.stringify(eventMetadata)]
+        ).catch(() => {}); // Silently fail if DB write fails
+      } catch (e) {
+        // Silently fail
+      }
+    }
+  } catch (error) {
+    // Silently fail if store/db write fails
+  }
+}
+
+// Run OCR on a screenshot image using the Swift script
+async function runOCR(imagePath) {
+  return new Promise((resolve, reject) => {
+    const scriptPath = path.join(__dirname, '..', 'ocr_vision.swift');
+    execFile('swift', [scriptPath, imagePath], { timeout: 30000 }, (error, stdout, stderr) => {
+      if (error) {
+        console.warn('[OCR] Swift OCR failed:', error.message);
+        resolve(null); // Return null on failure, don't reject
+        return;
+      }
+      try {
+        const result = JSON.parse(stdout);
+        resolve(result);
+      } catch (parseError) {
+        console.warn('[OCR] Failed to parse OCR result:', parseError.message);
+        resolve(null);
+      }
     });
   });
 }
@@ -293,7 +416,9 @@ async function captureWindowScreenshot(bounds = null) {
     return { present: false, error: 'unsupported_platform' };
   }
 
-  const filePath = path.join(os.tmpdir(), `weave-ax-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.jpg`);
+  const screenshotsDir = getScreenshotsDir();
+  const fileName = `screen-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.jpg`;
+  const filePath = path.join(screenshotsDir, fileName);
   const args = ['-x', '-t', 'jpg'];
   if (bounds && Number.isFinite(bounds.x) && Number.isFinite(bounds.y) && Number.isFinite(bounds.width) && Number.isFinite(bounds.height)) {
     args.push('-R', `${Math.round(bounds.x)},${Math.round(bounds.y)},${Math.max(1, Math.round(bounds.width))},${Math.max(1, Math.round(bounds.height))}`);
@@ -309,6 +434,8 @@ async function captureWindowScreenshot(bounds = null) {
       present: true,
       data_url: `data:image/jpeg;base64,${truncated ? base64.slice(0, MAX_SCREENSHOT_BASE64) : base64}`,
       captured_at: new Date().toISOString(),
+      file_path: filePath,
+      file_name: fileName,
       truncated
     };
   } catch (error) {
@@ -317,8 +444,6 @@ async function captureWindowScreenshot(bounds = null) {
       error: error.message,
       captured_at: new Date().toISOString()
     };
-  } finally {
-    fs.promises.unlink(filePath).catch(() => {});
   }
 }
 
@@ -448,7 +573,7 @@ async function captureTemporalVisualBundle({
   };
 }
 
-function shouldCaptureScreenshot({
+async function shouldCaptureScreenshot({
   permissionTrusted = false,
   frontmost = {},
   visibleElements = [],
@@ -458,10 +583,18 @@ function shouldCaptureScreenshot({
 } = {}) {
   if (!permissionTrusted) return { capture: false, reason: 'permission_not_granted' };
   if (options.includeScreenshot === false) return { capture: false, reason: 'disabled_by_caller' };
+  // Check if screen is on; if off, skip screenshot capture
+  const screenIsOn = await isScreenOn();
+  if (!screenIsOn) return { capture: false, reason: 'screen_off' };
   if (Date.now() - lastScreenshotAt < SCREENSHOT_COOLDOWN_MS && !options.forceScreenshot) {
     return { capture: false, reason: 'cooldown_active' };
   }
 
+  // If explicitly requested to capture, always do it
+  if (options.forceScreenshot) return { capture: true, reason: 'forced' };
+
+  // Otherwise, be more aggressive: try to capture frequently
+  // (changed from conservative ax_sufficient default)
   const textSample = String(frontmost?.extractedText || '').trim();
   const weakLabels = interactiveCandidates.length > 0
     && interactiveCandidates.filter((item) => !(item.name || item.description || item.value)).length >= Math.ceil(interactiveCandidates.length / 2);
@@ -471,14 +604,20 @@ function shouldCaptureScreenshot({
   const noUsefulText = textSample.length < 60;
   const lastActionNoEffect = Boolean(options.lastActionNoEffect);
 
-  if (options.forceScreenshot) return { capture: true, reason: 'forced' };
   if (lastActionNoEffect) return { capture: true, reason: 'last_action_no_effect' };
   if (hardSurface && (weakLabels || noElements)) return { capture: true, reason: 'hard_surface_disambiguation' };
   if (ambiguousSurface && (weakLabels || noUsefulText || noElements)) return { capture: true, reason: 'ambiguous_surface' };
-  return { capture: false, reason: 'ax_sufficient' };
+  
+  // NEW: Default to capturing unless ax_tree is very strong
+  // This ensures screenshots are taken regularly for monitoring
+  if (!interactiveCandidates.length || !textSample.length) {
+    return { capture: true, reason: 'sparse_ax_data' };
+  }
+  
+  return { capture: true, reason: 'periodic_capture' };
 }
 
-function chooseVisionMode({
+async function chooseVisionMode({
   permissionTrusted = false,
   frontmost = {},
   visibleElements = [],
@@ -487,6 +626,9 @@ function chooseVisionMode({
   options = {}
 } = {}) {
   if (!permissionTrusted) return { mode: 'ax_only', reason: 'permission_not_granted' };
+  // If screen is off, use ax_only mode (no visual capture)
+  const screenIsOn = await isScreenOn();
+  if (!screenIsOn) return { mode: 'ax_only', reason: 'screen_off' };
   if (options.visionRequest === 'ax_only') return { mode: 'ax_only', reason: 'planner_requested_ax_only' };
   if (options.visionRequest === 'browser_vlm') return { mode: 'browser_vlm', reason: 'planner_requested_browser_vlm' };
   const weakLabels = interactiveCandidates.length > 0
@@ -514,11 +656,13 @@ function chooseVisionMode({
 }
 
 async function observeDesktopState(options = {}) {
+  console.log('[observeDesktopState] Starting observation, options:', JSON.stringify(options));
   const [permission, frontmost, visibleElements] = await Promise.all([
     checkAccessibilityPermission(),
     getFrontmostWindowContext(),
     getVisibleElements()
   ]);
+  console.log('[observeDesktopState] Got permission, frontmost, visibleElements');
 
   const focusedElement = visibleElements.find((item) => /text field|text area|text/i.test(String(item.role || '').toLowerCase())) || null;
   const surfaceType = classifySurface({
@@ -528,7 +672,7 @@ async function observeDesktopState(options = {}) {
     visibleElements
   });
   const interactiveCandidates = deriveInteractiveCandidates(visibleElements, surfaceType);
-  const visionDecision = chooseVisionMode({
+  const visionDecision = await chooseVisionMode({
     permissionTrusted: permission.trusted,
     frontmost,
     visibleElements,
@@ -536,7 +680,8 @@ async function observeDesktopState(options = {}) {
     surfaceType,
     options
   });
-  const screenshotDecision = shouldCaptureScreenshot({
+  console.log('[observeDesktopState] Vision decision:', visionDecision);
+  const screenshotDecision = await shouldCaptureScreenshot({
     permissionTrusted: permission.trusted,
     frontmost,
     visibleElements,
@@ -544,6 +689,7 @@ async function observeDesktopState(options = {}) {
     surfaceType,
     options
   });
+  console.log('[observeDesktopState] Screenshot decision:', screenshotDecision);
   const visualBundle = visionDecision.mode === 'ax_only'
     ? null
     : await captureTemporalVisualBundle({
@@ -559,16 +705,30 @@ async function observeDesktopState(options = {}) {
         error: error.message
       }));
   const screenshot = screenshotDecision.capture
-    ? await captureWindowScreenshot(frontmost.bounds || null)
+    ? (console.log('[observeDesktopState] Capturing screenshot:', screenshotDecision.reason), await captureWindowScreenshot(frontmost.bounds || null))
     : ((visualBundle?.frames?.length && visualBundle.frames[visualBundle.frames.length - 1]?.image)
-      ? {
+      ? (console.log('[observeDesktopState] Using visual bundle frame'), {
           present: true,
           data_url: visualBundle.frames[visualBundle.frames.length - 1].image.data_url,
           captured_at: visualBundle.frames[visualBundle.frames.length - 1].image.captured_at,
           truncated: Boolean(visualBundle.frames[visualBundle.frames.length - 1].image.truncated)
-        }
-      : { present: false, skipped: true, reason: screenshotDecision.reason, captured_at: new Date().toISOString() });
+        })
+      : (console.log('[observeDesktopState] No screenshot:', screenshotDecision.reason), { present: false, skipped: true, reason: screenshotDecision.reason, captured_at: new Date().toISOString() }));
   if (screenshot.present) lastScreenshotAt = Date.now();
+
+  // Get full OCR text from screenshot if available
+  let ocrText = frontmost.extractedText || '';
+  if (screenshot.present && screenshot.file_path) {
+    console.log('[OCR] Running full OCR on screenshot:', screenshot.file_path);
+    const ocrResult = await runOCR(screenshot.file_path);
+    if (ocrResult && ocrResult.text) {
+      ocrText = ocrResult.text;
+      console.log('[OCR] Full OCR extracted:', ocrText.length, 'characters');
+    } else {
+      console.log('[OCR] OCR failed or no text, using AX text');
+    }
+  }
+
   const browserLike = /chrome|safari|arc|firefox/.test(String(frontmost.appName || '').toLowerCase());
   const surfaceDriver = browserLike ? 'live_browser_ax' : 'native_ax';
   const screenshotSummary = {
@@ -579,6 +739,17 @@ async function observeDesktopState(options = {}) {
     visual_change_summary: visualBundle?.visual_change_summary || '',
     frame_count: Array.isArray(visualBundle?.frames) ? visualBundle.frames.length : 0
   };
+
+  // Save OCR/extracted text to settings and database for future reference
+  if (ocrText) {
+    await saveOCRResults(ocrText, {
+      app: frontmost.appName,
+      window_title: frontmost.windowTitle,
+      screenshot_present: Boolean(screenshot.present),
+      screenshot_file: screenshot.file_name || '',
+      vision_mode: visualBundle?.mode || visionDecision.mode || 'ax_only'
+    }).catch(() => {}); // Silently fail if OCR save fails
+  }
 
   return {
     surface_driver: surfaceDriver,
@@ -664,6 +835,25 @@ async function openAccessibilitySettings() {
   }
 
   throw new Error(lastError?.message || 'Unable to open Accessibility settings');
+}
+
+async function openScreenRecordingSettings() {
+  const urls = [
+    'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
+    'x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture'
+  ];
+
+  let lastError = null;
+  for (const url of urls) {
+    try {
+      await runCommand('/usr/bin/open', [url], { timeout: 10000 });
+      return { status: 'success', url };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw new Error(lastError?.message || 'Unable to open Screen Recording settings');
 }
 
 async function keyPress(key, modifiers = []) {
@@ -945,5 +1135,18 @@ module.exports = {
   checkAccessibilityPermission,
   observeDesktopState,
   executeDesktopAction,
-  openAccessibilitySettings
+  openAccessibilitySettings,
+  openScreenRecordingSettings,
+  saveOCRResults,
+  getScreenshotsDir,
+  getOCRHistory: () => {
+    if (!store) {
+      try {
+        store = new Store();
+      } catch (e) {
+        return [];
+      }
+    }
+    return store.get('ocr_history') || [];
+  }
 };

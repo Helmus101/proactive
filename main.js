@@ -22,7 +22,7 @@ const { runInitialSync, searchSummaries } = require('./services/summarizer/initi
 const { generateTodaySummaryWithContext } = require('./services/summarizer/aiDailySummary');
 const { buildDailySummaries } = require('./services/summarizer/dailySummary');
 const { planNextAction, normalizeDesktopGoal } = require('./services/agent/agentPlanner');
-const { checkAccessibilityPermission, observeDesktopState, executeDesktopAction, openAccessibilitySettings } = require('./services/desktop-control');
+const { checkAccessibilityPermission, observeDesktopState, executeDesktopAction, openAccessibilitySettings, openScreenRecordingSettings } = require('./services/desktop-control');
 const { ensureManagedBrowser, observeManagedBrowserState, executeManagedBrowserAction, getManagedBrowserStatus } = require('./services/browser-driver');
 const { 
   buildGlobalGraph,
@@ -48,6 +48,7 @@ let authWindow;
 let voiceHudWindow = null;
 let pendingAITasks = [];
 let sensorCaptureTimer = null;
+let periodicScreenshotTimer = null;
 let sensorCaptureInProgress = false;
 let activeVoiceSession = null;
 let activeStudySession = null;
@@ -733,13 +734,18 @@ function getSensorStatus() {
   return {
     ...settings,
     active: Boolean(sensorCaptureTimer && settings.enabled),
+    intervalSeconds: Math.round(intervalMinutesToMs(settings.intervalMinutes) / 1000),
     lastCaptureAt: events[0]?.timestamp || null,
     totalCaptures: events.length,
     screenPermission,
-    transport: 'desktop-capturer',
+    transport: 'apple-vision-frontmost-window',
     study_session: getStudySessionState(),
     performance_mode: isReducedLoadMode() ? 'reduced' : 'normal'
   };
+}
+
+function intervalMinutesToMs(minutes) {
+  return Math.max(1, Number(minutes || 0)) * 60 * 1000;
 }
 
 function sanitizeSuggestionProvider(value) {
@@ -944,7 +950,10 @@ function getFrontmostWindowContext() {
 
   return new Promise((resolve) => {
     const scriptPath = path.join(__dirname, 'frontmost_window.swift');
-    execFile('/usr/bin/xcrun', ['swift', scriptPath], { timeout: 15000 }, (error, stdout, stderr) => {
+    const appName = String(app?.getName?.() || '').trim();
+    // Pass current process PID as an optional argument so the swift helper can exclude
+    // this process' own windows from the frontmost window search.
+    execFile('/usr/bin/xcrun', ['swift', scriptPath, String(process.pid), appName], { timeout: 15000 }, (error, stdout, stderr) => {
       if (error) {
         resolve({
           appName: '',
@@ -991,11 +1000,9 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     return null;
   }
   sensorCaptureInProgress = true;
-  const settings = getSensorSettings();
-  const capturesDir = ensureSensorStorageDir();
   const timestamp = Date.now();
-  const filename = `capture_${timestamp}.png`;
-  const imagePath = path.join(capturesDir, filename);
+  const filename = `ocr_capture_${timestamp}_${crypto.randomBytes(4).toString('hex')}.png`;
+  const imagePath = path.join(os.tmpdir(), filename);
   const windowContext = await getFrontmostWindowContext();
   let sourceName = 'Screen';
   let captureMode = 'screen';
@@ -1014,8 +1021,31 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
       }
     } catch (_) {}
   }
+  if (captureMode !== 'frontmost-window' && process.platform === 'darwin' && windowContext.bounds) {
+    try {
+      const { x, y, width, height } = windowContext.bounds || {};
+      if ([x, y, width, height].every((value) => Number.isFinite(value)) && width > 20 && height > 20) {
+        await new Promise((resolve, reject) => {
+          execFile(
+            '/usr/sbin/screencapture',
+            ['-x', '-R', `${Math.round(x)},${Math.round(y)},${Math.max(1, Math.round(width))},${Math.max(1, Math.round(height))}`, imagePath],
+            { timeout: 15000 },
+            (error) => {
+              if (error) reject(error);
+              else resolve();
+            }
+          );
+        });
+        if (fs.existsSync(imagePath)) {
+          captureMode = 'frontmost-window-bounds';
+          sourceName = windowContext.windowTitle || windowContext.appName || 'Window';
+        }
+      }
+    } catch (_) {}
+  }
+  console.log(`[SensorCapture] windowContext status=${windowContext.status} app=${windowContext.appName} title=${windowContext.windowTitle} windowId=${windowContext.windowId}`);
 
-  if (captureMode !== 'frontmost-window') {
+  if (!String(captureMode).startsWith('frontmost-window')) {
     const primary = screen.getPrimaryDisplay();
     const fullSize = primary?.size || { width: 1920, height: 1080 };
     const reducedLoad = isReducedLoadMode();
@@ -1023,13 +1053,40 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     const scale = Math.min(1, maxWidth / Math.max(1, Number(fullSize.width || 1920)));
     const thumbWidth = Math.max(640, Math.floor((fullSize.width || 1920) * scale));
     const thumbHeight = Math.max(360, Math.floor((fullSize.height || 1080) * scale));
+
+    // Request both window and screen sources and try to prefer the frontmost window
     const sources = await desktopCapturer.getSources({
-      types: ['screen'],
+      types: ['window', 'screen'],
       thumbnailSize: { width: thumbWidth, height: thumbHeight }
     });
-    const source = sources[0];
+
+  // Try to find a window source that matches the frontmost window title or app name
+    let matchedSource = null;
+    try {
+      const title = String(windowContext.windowTitle || '').toLowerCase();
+      const appName = String(windowContext.appName || '').toLowerCase();
+      for (const s of sources) {
+        const name = String(s.name || '').toLowerCase();
+        const displayId = String(s.display_id || '').toLowerCase();
+        if (title && name.includes(title)) { matchedSource = s; break; }
+        if (appName && name.includes(appName)) { matchedSource = s; break; }
+        // Some sources encode app/window metadata in the name like "Safari - example.com"
+        if (title && name.indexOf(title) >= 0) { matchedSource = s; break; }
+        if (appName && name.indexOf(appName) >= 0) { matchedSource = s; break; }
+      }
+    } catch (_) { matchedSource = null; }
+
+  console.log('[SensorCapture] desktopCapturer sources:', sources.map(s => ({ id: s.id, name: s.name })).slice(0,10));
+
+    // Prefer matched window source; otherwise fall back to the first screen source
+    const screenSource = sources.find((s) => String(s.id || '').toLowerCase().startsWith('screen:')) || sources.find((s) => String(s.id || '').toLowerCase().includes('screen'));
+  const source = matchedSource || screenSource || sources[0];
+  if (matchedSource) console.log('[SensorCapture] matchedSource selected:', { id: matchedSource.id, name: matchedSource.name });
+  else if (screenSource) console.log('[SensorCapture] falling back to screenSource:', { id: screenSource.id, name: screenSource.name });
+  else console.log('[SensorCapture] using first available source:', { id: source.id, name: source.name });
     if (!source) {
-      throw new Error('No screen source available for capture');
+      sensorCaptureInProgress = false;
+      throw new Error('No screen or window source available for capture');
     }
 
     const pngBuffer = source.thumbnail.toPNG();
@@ -1053,18 +1110,18 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   const event = {
     id: `sensor_${timestamp}`,
     type: 'screen_capture',
-    title: `Desktop capture: ${contextSuffix || sourceName || 'Screen'}`,
+    title: `Frontmost OCR: ${contextSuffix || sourceName || 'Screen'}`,
     timestamp,
     captured_at: new Date(timestamp).toISOString(),
     captured_at_local: new Date(timestamp).toLocaleString(),
     sourceName,
-    captureMode,
+    captureMode: `${captureMode}-ocr`,
     activeApp: windowContext.appName || '',
     activeWindowTitle: windowContext.windowTitle || '',
     windowId: windowContext.windowId || null,
     windowBounds: windowContext.bounds || null,
     windowContextStatus: windowContext.status || 'unavailable',
-    imagePath,
+    imagePath: null,
     text: '',
     textCaptureSource: 'none',
     ocrLines: [],
@@ -1109,6 +1166,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     // Clean up and delete the sensitive capture
     sensorCaptureInProgress = false;
     await deleteSensitiveCapture(imagePath, event.id, filterCheck.reason);
+    fs.promises.unlink(imagePath).catch(() => {});
     return null; // Return null to indicate capture was filtered
   }
 
@@ -1168,6 +1226,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     });
   }
 
+  fs.promises.unlink(imagePath).catch(() => {});
   sensorCaptureInProgress = false;
   return event;
 }
@@ -1180,13 +1239,57 @@ function startSensorCaptureLoop() {
   }
   if (!settings.enabled) return;
 
-  const intervalMs = settings.intervalMinutes * 60 * 1000;
+  captureDesktopSensorSnapshot('loop-start').catch((error) => {
+    console.warn('Initial sensor capture failed:', error && error.message ? error.message : error);
+  });
+
+  const intervalMs = intervalMinutesToMs(settings.intervalMinutes);
   sensorCaptureTimer = setInterval(() => {
     // Fire-and-forget scheduled capture to keep it in the background
     captureDesktopSensorSnapshot('scheduled').catch((error) => {
       console.warn('Scheduled sensor capture failed:', error && error.message ? error.message : error);
     });
   }, intervalMs);
+}
+
+// Periodic screenshot capture every 30 seconds
+function startPeriodicScreenshotCapture() {
+  if (periodicScreenshotTimer) {
+    clearInterval(periodicScreenshotTimer);
+    periodicScreenshotTimer = null;
+  }
+
+  console.log('[Screenshot] Starting periodic screenshot capture (every 30s)');
+
+  // Take first screenshot immediately
+  console.log('[Screenshot] Taking initial screenshot...');
+  observeDesktopState({ forceScreenshot: true })
+    .then((result) => {
+      console.log('[Screenshot] Initial screenshot result:', {
+        screenshot_present: result?.screenshot?.present,
+        file_name: result?.screenshot?.file_name,
+        decision_reason: result?.screenshot_summary?.decision_reason
+      });
+    })
+    .catch((error) => {
+      console.error('[Screenshot] Initial screenshot failed:', error?.message || error);
+    });
+
+  // Then take screenshots every 30 seconds
+  periodicScreenshotTimer = setInterval(() => {
+    console.log('[Screenshot] Taking periodic screenshot...');
+    observeDesktopState({ forceScreenshot: true })
+      .then((result) => {
+        if (result?.screenshot?.present) {
+          console.log('[Screenshot] Periodic screenshot captured:', result.screenshot.file_name);
+        } else {
+          console.warn('[Screenshot] Periodic screenshot skipped:', result?.screenshot_summary?.decision_reason || 'unknown');
+        }
+      })
+      .catch((error) => {
+        console.error('[Screenshot] Periodic screenshot failed:', error?.message || error);
+      });
+  }, 30000); // 30 seconds
 }
 
 // Schedule daily tasks
@@ -1788,32 +1891,32 @@ function startMemoryGraphProcessing() {
     processorTimersActive: true
   });
   
-  // Episode generation every 30 minutes
-  // Episode generation & semantic window summaries aligned to wall-clock half-hours (:00 and :30)
+  // Episode generation every 15 minutes
+  // Episode generation & semantic window summaries aligned to wall-clock quarter-hours (:00, :15, :30, :45)
   try {
-    const halfHourMs = 30 * 60 * 1000;
+    const quarterHourMs = 15 * 60 * 1000;
     // clear any previous timers
     if (episodeGenerationTimer) try { clearInterval(episodeGenerationTimer); } catch (_) {}
     if (semanticsTimer) try { clearInterval(semanticsTimer); } catch (_) {}
 
     const now = Date.now();
-    // compute next half-hour boundary
-    const nextBoundary = Math.ceil(now / halfHourMs) * halfHourMs;
+    // compute next quarter-hour boundary
+    const nextBoundary = Math.ceil(now / quarterHourMs) * quarterHourMs;
     const delay = Math.max(1000, nextBoundary - now);
 
     // schedule first aligned run, then set repeating intervals
     setTimeout(() => {
       runEpisodeGeneration().catch((e) => console.warn('[MemoryGraph] Aligned episode generation failed:', e?.message || e));
-      try { episodeGenerationTimer = setInterval(runEpisodeGeneration, 30 * 60 * 1000); } catch (_) {}
+      try { episodeGenerationTimer = setInterval(runEpisodeGeneration, 15 * 60 * 1000); } catch (_) {}
       // also kick off semantic window at same boundary
       runSemanticWindowGeneration().catch((e) => console.warn('[MemoryGraph] Aligned semantic window failed:', e?.message || e));
-      try { semanticsTimer = setInterval(runSemanticWindowGeneration, halfHourMs); } catch (_) {}
+      try { semanticsTimer = setInterval(runSemanticWindowGeneration, quarterHourMs); } catch (_) {}
     }, delay);
-    console.log('[MemoryGraph] Aligned episode (30m) & semantic (30m) scheduling, first run in', Math.round(delay / 1000), 's');
+    console.log('[MemoryGraph] Aligned episode (15m) & semantic (15m) scheduling, first run in', Math.round(delay / 1000), 's');
   } catch (e) {
-    console.warn('[MemoryGraph] Failed to schedule aligned half-hour jobs, falling back to interval timers:', e?.message || e);
+    console.warn('[MemoryGraph] Failed to schedule aligned quarter-hour jobs, falling back to interval timers:', e?.message || e);
     if (episodeGenerationTimer) clearInterval(episodeGenerationTimer);
-    episodeGenerationTimer = setInterval(runEpisodeGeneration, 30 * 60 * 1000);
+    episodeGenerationTimer = setInterval(runEpisodeGeneration, 15 * 60 * 1000);
     if (semanticsTimer) clearInterval(semanticsTimer);
     semanticsTimer = setInterval(runSemanticWindowGeneration, 30 * 60 * 1000);
   }
@@ -6897,7 +7000,7 @@ setInterval(() => {
 // Full Memory Graph for Settings Explorer
 ipcMain.handle("get-full-memory-graph", async () => {
   try {
-    const nodes = await db.allQuery(`SELECT id, layer, subtype, title, summary, metadata, anchor_date FROM memory_nodes LIMIT 2000`).catch(() => []);
+    const nodes = await db.allQuery(`SELECT id, layer, subtype, title, summary, metadata, anchor_date, anchor_at, created_at, updated_at FROM memory_nodes LIMIT 2000`).catch(() => []);
     const edges = await db.allQuery(`SELECT from_node_id AS source, to_node_id AS target, edge_type, weight, trace_label FROM memory_edges LIMIT 5000`).catch(() => []);
     return { nodes, edges };
   } catch (err) {
@@ -7249,6 +7352,17 @@ ipcMain.handle('open-accessibility-settings', async () => {
     return {
       status: 'error',
       error: error?.message || 'Unable to open Accessibility settings'
+    };
+  }
+});
+
+ipcMain.handle('open-screen-recording-settings', async () => {
+  try {
+    return await openScreenRecordingSettings();
+  } catch (error) {
+    return {
+      status: 'error',
+      error: error?.message || 'Unable to open Screen Recording settings'
     };
   }
 });
@@ -9173,16 +9287,37 @@ ipcMain.handle('search-memory-graph', async (event, query, options = {}) => {
     const startMs = dateRange?.start ? Date.parse(String(dateRange.start)) : null;
     const endMs = dateRange?.end ? Date.parse(String(dateRange.end)) : null;
     const normalizedDataSource = dataSource && dataSource !== 'auto' ? String(dataSource).toLowerCase() : null;
+    const parseNodeMetadata = (row) => {
+      try { return JSON.parse(row?.metadata || '{}'); } catch (_) { return {}; }
+    };
+    const getCanonicalNodeTimestamp = (row) => {
+      const metadata = parseNodeMetadata(row);
+      return (
+        metadata.event_time ||
+        metadata.occurred_at ||
+        metadata.anchor_at ||
+        metadata.latest_activity_at ||
+        metadata.cluster_anchor_at ||
+        metadata.cluster_latest_at ||
+        metadata.timestamp ||
+        row?.anchor_at ||
+        row?.created_at ||
+        row?.updated_at ||
+        null
+      );
+    };
+    const getCanonicalNodeTsMs = (row) => {
+      const ts = Date.parse(String(getCanonicalNodeTimestamp(row) || ''));
+      return Number.isFinite(ts) ? ts : 0;
+    };
     const rowMatchesNodeFilters = (row) => {
-      const metadata = (() => {
-        try { return JSON.parse(row?.metadata || '{}'); } catch (_) { return {}; }
-      })();
+      const metadata = parseNodeMetadata(row);
       if (appFilters.length) {
         const appHay = `${metadata.app || ''} ${(metadata.apps || []).join(' ')} ${metadata.window_title || ''}`.toLowerCase();
         if (!appFilters.some((needle) => appHay.includes(needle))) return false;
       }
       if (Number.isFinite(startMs) || Number.isFinite(endMs)) {
-        const ts = Date.parse(String(metadata.latest_activity_at || metadata.anchor_at || row?.updated_at || ''));
+        const ts = getCanonicalNodeTsMs(row);
         if (!Number.isFinite(ts)) return false;
         if (Number.isFinite(startMs) && ts < startMs) return false;
         if (Number.isFinite(endMs) && ts > endMs) return false;
@@ -9244,7 +9379,11 @@ ipcMain.handle('search-memory-graph', async (event, query, options = {}) => {
               subtype: ev.subtype || null,
               title: ev.title || fallbackTitle,
               summary: text.slice(0, 220),
+              anchor_at: ev.anchor_at || ev.timestamp || null,
+              created_at: ev.anchor_at || ev.timestamp || null,
               metadata: JSON.stringify({
+                timestamp: ev.anchor_at || ev.timestamp || null,
+                occurred_at: ev.anchor_at || ev.timestamp || null,
                 anchor_at: ev.anchor_at || null,
                 latest_activity_at: ev.latest_activity_at || ev.timestamp || null,
                 app: ev.app || null,
@@ -9274,7 +9413,7 @@ ipcMain.handle('search-memory-graph', async (event, query, options = {}) => {
       if (nodeIds.length) {
         const placeholders = nodeIds.map(() => '?').join(',');
         results = await db.allQuery(
-          `SELECT n.id, n.layer, n.subtype, n.title, n.summary, n.metadata, n.updated_at
+          `SELECT n.id, n.layer, n.subtype, n.title, n.summary, n.metadata, n.anchor_at, n.created_at, n.updated_at
            FROM memory_nodes n
            WHERE n.id IN (${placeholders})`,
           nodeIds
@@ -9284,7 +9423,7 @@ ipcMain.handle('search-memory-graph', async (event, query, options = {}) => {
 
     if (!results.length) {
       let sql = `
-        SELECT n.id, n.layer, n.subtype, n.title, n.summary, n.metadata, n.updated_at
+        SELECT n.id, n.layer, n.subtype, n.title, n.summary, n.metadata, n.anchor_at, n.created_at, n.updated_at
         FROM memory_nodes n
         WHERE n.title LIKE ? OR n.summary LIKE ? OR n.canonical_text LIKE ?
       `;
@@ -9351,14 +9490,20 @@ ipcMain.handle('search-memory-graph', async (event, query, options = {}) => {
       results = results.filter((row) => rowMatchesNodeFilters(row));
     }
 
+    results = results.sort((a, b) => getCanonicalNodeTsMs(b) - getCanonicalNodeTsMs(a));
+
     return results.slice(0, limit).map(row => ({
       id: row.id,
       type: row.layer,
       data: {
         title: row.title,
         summary: row.summary,
-        timestamp: row.updated_at || null,
-        ...(JSON.parse(row.metadata || '{}'))
+        timestamp: getCanonicalNodeTimestamp(row),
+        occurred_at: getCanonicalNodeTimestamp(row),
+        anchor_at: row.anchor_at || parseNodeMetadata(row).anchor_at || null,
+        created_at: row.created_at || null,
+        updated_at: row.updated_at || null,
+        ...(parseNodeMetadata(row))
       }
     }));
   } catch (error) {
@@ -9372,7 +9517,7 @@ ipcMain.handle('get-related-nodes', async (event, nodeId, relationType = null) =
     const db = require('./services/db');
     
     let sql = `
-      SELECT n.id, n.layer, n.title, n.summary, n.metadata, e.edge_type
+      SELECT n.id, n.layer, n.title, n.summary, n.metadata, n.anchor_at, n.created_at, n.updated_at, e.edge_type
       FROM memory_nodes n
       JOIN memory_edges e ON (n.id = e.from_node_id OR n.id = e.to_node_id)
       WHERE (e.from_node_id = ? OR e.to_node_id = ?) AND n.id != ?
@@ -9391,6 +9536,14 @@ ipcMain.handle('get-related-nodes', async (event, nodeId, relationType = null) =
       data: {
         title: row.title,
         summary: row.summary,
+        timestamp: (() => {
+          try {
+            const metadata = JSON.parse(row.metadata || '{}');
+            return metadata.event_time || metadata.occurred_at || metadata.anchor_at || metadata.latest_activity_at || metadata.timestamp || row.anchor_at || row.created_at || row.updated_at || null;
+          } catch (_) {
+            return row.anchor_at || row.created_at || row.updated_at || null;
+          }
+        })(),
         ...(JSON.parse(row.metadata || '{}'))
       },
       relation: row.edge_type
@@ -10134,6 +10287,7 @@ app.whenReady().then(async () => {
   });
   startSensorCaptureLoop();
   startSourceWarmup();
+  startPeriodicScreenshotCapture();
   
   // Initialize memory graph processing
   startMemoryGraphProcessing();

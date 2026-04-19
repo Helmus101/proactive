@@ -288,6 +288,32 @@ async function ensureSchemaMigrations() {
         if (!memoryExisting.has('anchor_at')) {
           await runStatement(`ALTER TABLE memory_nodes ADD COLUMN anchor_at TEXT`).catch(() => {});
         }
+        await runStatement(`
+          UPDATE memory_nodes
+          SET anchor_at = COALESCE(
+            NULLIF(anchor_at, ''),
+            NULLIF(json_extract(metadata, '$.anchor_at'), ''),
+            NULLIF(json_extract(metadata, '$.occurred_at'), ''),
+            NULLIF(json_extract(metadata, '$.event_time'), ''),
+            NULLIF(json_extract(metadata, '$.timestamp'), ''),
+            NULLIF(created_at, ''),
+            NULLIF(updated_at, '')
+          )
+          WHERE anchor_at IS NULL OR anchor_at = ''
+        `).catch(() => {});
+        await runStatement(`
+          UPDATE memory_nodes
+          SET anchor_date = substr(COALESCE(
+            NULLIF(anchor_at, ''),
+            NULLIF(json_extract(metadata, '$.anchor_at'), ''),
+            NULLIF(json_extract(metadata, '$.occurred_at'), ''),
+            NULLIF(json_extract(metadata, '$.event_time'), ''),
+            NULLIF(json_extract(metadata, '$.timestamp'), ''),
+            NULLIF(created_at, ''),
+            NULLIF(updated_at, '')
+          ), 1, 10)
+          WHERE anchor_date IS NULL OR anchor_date = ''
+        `).catch(() => {});
         await runStatement(`CREATE INDEX IF NOT EXISTS idx_memory_nodes_anchor_date ON memory_nodes(anchor_date)`).catch(() => {});
         await runStatement(`CREATE INDEX IF NOT EXISTS idx_memory_nodes_anchor_at ON memory_nodes(anchor_at)`).catch(() => {});
         return;

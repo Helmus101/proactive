@@ -125,11 +125,75 @@
                     <div class="settings-card">
                         <div class="settings-row">
                             <div>
-                                <div class="settings-label">Enable Screenshots</div>
-                                <div class="settings-description">Allow Weave to capture periodic screenshots for memory enrichment.</div>
+                                <div class="settings-label">Frontmost OCR Capture</div>
+                                <div class="settings-description">Capture text from the frontmost window every 30 seconds with Apple Vision OCR, keep the image ephemeral, and store only structured context.</div>
                             </div>
                             <div class="settings-control">
                                 <div class="toggle-switch" id="capture-toggle"></div>
+                            </div>
+                        </div>
+                        <div class="settings-row" style="margin-top: 16px; align-items: flex-start;">
+                            <div>
+                                <div class="settings-label" style="font-size: 12px;">Screen Recording Permission</div>
+                                <div class="settings-description">macOS requires Screen Recording permission for frontmost-window OCR capture.</div>
+                            </div>
+                            <div class="settings-control">
+                                <button id="open-screen-recording-btn" class="pill-btn" type="button">Enable Screen Recording</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="settings-card" style="margin-top: 24px;">
+                        <div class="settings-label" style="margin-bottom: 12px;">How OCR Works</div>
+                        <div class="settings-description" style="margin-bottom: 14px;">
+                            Proactive uses a multi-stage OCR pipeline to turn the text in your frontmost window into searchable memory.
+                        </div>
+                        <div style="display: grid; gap: 14px;">
+                            <div>
+                                <div class="settings-label" style="font-size: 12px; margin-bottom: 6px;">1. Frontmost Window Snapshot</div>
+                                <div class="settings-description">
+                                    Every few seconds while you are active, Proactive captures the frontmost window instead of blindly scanning the whole desktop. The image is treated as a temporary OCR input and is discarded after text extraction.
+                                </div>
+                            </div>
+                            <div>
+                                <div class="settings-label" style="font-size: 12px; margin-bottom: 6px;">2. macOS Vision OCR</div>
+                                <div class="settings-description">
+                                    Text is extracted with Apple Vision on-device. The OCR pass finds visible text regions, applies language-aware recognition, and keeps confidence scores so weak reads can be filtered out.
+                                </div>
+                            </div>
+                            <div>
+                                <div class="settings-label" style="font-size: 12px; margin-bottom: 6px;">3. Structure + Context</div>
+                                <div class="settings-description">
+                                    OCR text is combined with macOS Accessibility data, window title, app name, and timestamp so the result is more than a bag of words.
+                                </div>
+                                <table class="msg-table" style="margin-top: 10px;">
+                                    <thead>
+                                        <tr>
+                                            <th>Layer</th>
+                                            <th>What it provides</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr>
+                                            <td>OCR (Vision)</td>
+                                            <td>Literal text visible in custom UI, images, and surfaces without native text labels.</td>
+                                        </tr>
+                                        <tr>
+                                            <td>Accessibility API</td>
+                                            <td>Structural roles such as buttons, fields, URL bars, and other interface semantics.</td>
+                                        </tr>
+                                        <tr>
+                                            <td>Context Wrapper</td>
+                                            <td>App name, window title, timestamp, and frontmost-window metadata.</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div>
+                                <div class="settings-label" style="font-size: 12px; margin-bottom: 6px;">4. Memory Processing</div>
+                                <div class="settings-description">
+                                    Repeated states are deduplicated, sensitive patterns can be filtered before storage, and the resulting text is indexed so the memory graph can retrieve meaning instead of just exact keywords.
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -139,6 +203,27 @@
                         <div id="settings-graph-container" class="graph-explorer-container">
                             <div class="graph-placeholder">Loading memory graph...</div>
                         </div>
+                    </div>
+
+                    <div class="settings-card" style="margin-top: 24px;">
+                        <div class="settings-row" style="align-items: flex-start; gap: 16px;">
+                            <div style="flex: 1; min-width: 0;">
+                                <div class="settings-label">Daily OCR Export</div>
+                                <div class="settings-description">Review and copy all text gathered from today&apos;s frontmost-window OCR captures.</div>
+                                <div id="daily-ocr-meta" class="history-row-meta" style="margin-top: 10px;">Loading today's OCR…</div>
+                            </div>
+                            <div class="settings-control" style="display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end;">
+                                <button id="refresh-daily-ocr-btn" class="pill-btn" type="button">Refresh</button>
+                                <button id="copy-daily-ocr-btn" class="pill-btn pill-btn-primary" type="button">Copy Today's OCR</button>
+                            </div>
+                        </div>
+                        <textarea
+                            id="daily-ocr-text"
+                            class="chat-input"
+                            readonly
+                            placeholder="Today's frontmost-window OCR will appear here."
+                            style="margin-top: 16px; min-height: 220px; resize: vertical; white-space: pre-wrap;"
+                        ></textarea>
                     </div>
                 </div>
 

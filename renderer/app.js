@@ -79,6 +79,11 @@ class WeaveApp {
         this.historyMeta = document.getElementById('settings-history-meta');
         this.screenCapturesList = document.getElementById('screen-captures-list');
         this.captureStatusText = document.getElementById('capture-status-text');
+        this.openScreenRecordingButton = document.getElementById('open-screen-recording-btn');
+        this.dailyOcrMeta = document.getElementById('daily-ocr-meta');
+        this.dailyOcrText = document.getElementById('daily-ocr-text');
+        this.copyDailyOcrButton = document.getElementById('copy-daily-ocr-btn');
+        this.refreshDailyOcrButton = document.getElementById('refresh-daily-ocr-btn');
         this.desktopTestStatus = document.getElementById('desktop-test-status');
         this.desktopPromptStatus = document.getElementById('desktop-prompt-status');
         this.desktopPromptInput = document.getElementById('desktop-prompt-input');
@@ -1483,6 +1488,15 @@ Would you like me to continue with more detail?` : content;
             const enabled = this.captureToggle.classList.contains("active");
             await this.setDesktopCaptureEnabled(enabled);
         });
+        this.openScreenRecordingButton?.addEventListener('click', async () => {
+            await this.openScreenRecordingSettings();
+        });
+        this.copyDailyOcrButton?.addEventListener('click', async () => {
+            await this.copyDailyOcrText();
+        });
+        this.refreshDailyOcrButton?.addEventListener('click', async () => {
+            await this.refreshDailyOcrText();
+        });
 
         // Delete all data button (factory reset)
         this.deleteAllDataButton?.addEventListener('click', async () => {
@@ -1614,6 +1628,24 @@ Would you like me to continue with more detail?` : content;
             console.error('Failed to update desktop capture setting:', error);
             this.showToast('Failed to update desktop capture');
             document.getElementById('capture-toggle')?.classList.toggle('active', this.desktopCaptureEnabled);
+        }
+    }
+
+    async openScreenRecordingSettings() {
+        const button = this.openScreenRecordingButton;
+        if (button) button.textContent = 'Opening...';
+        try {
+            const result = await window.electronAPI.openScreenRecordingSettings?.();
+            if (result?.status === 'error') {
+                throw new Error(result.error || 'Unable to open Screen Recording settings');
+            }
+            this.showToast('Opened Screen Recording settings');
+            setTimeout(() => this.loadSensorData(), 1200);
+        } catch (error) {
+            console.error('Failed to open Screen Recording settings:', error);
+            this.showToast('Failed to open Screen Recording settings');
+        } finally {
+            if (button) button.textContent = 'Enable Screen Recording';
         }
     }
 
@@ -2060,6 +2092,7 @@ Would you like me to continue with more detail?` : content;
                 window.electronAPI.getSensorStatus(),
                 window.electronAPI.getSensorEvents()
             ]);
+            this.latestSensorEvents = Array.isArray(events) ? events : [];
 
             this.desktopCaptureEnabled = Boolean(status?.enabled);
             localStorage.setItem('desktopCaptureEnabled', String(this.desktopCaptureEnabled));
@@ -2068,17 +2101,122 @@ Would you like me to continue with more detail?` : content;
             if (this.captureStatusText) {
                 const permission = status?.screenPermission ? `Permission: ${status.screenPermission}` : 'Permission unknown';
                 const captures = status?.totalCaptures || 0;
-                this.captureStatusText.textContent = `${status?.active ? 'Active' : 'Idle'} • ${captures} captures • ${permission}`;
+                const interval = status?.intervalSeconds ? `${status.intervalSeconds}s interval` : '30s interval';
+                const transport = status?.transport ? ` • ${String(status.transport).replace(/-/g, ' ')}` : '';
+                this.captureStatusText.textContent = `${status?.active ? 'Active' : 'Idle'} • ${captures} captures • ${permission} • ${interval}${transport}`;
+            }
+            if (this.openScreenRecordingButton) {
+                const permitted = ['granted', 'authorized'].includes(String(status?.screenPermission || '').toLowerCase());
+                this.openScreenRecordingButton.disabled = permitted;
+                this.openScreenRecordingButton.textContent = permitted ? 'Screen Recording Enabled' : 'Enable Screen Recording';
             }
 
             this.renderScreenCaptures(events || []);
+            this.renderDailyOcrExport(this.latestSensorEvents);
         } catch (error) {
             console.error('Failed to load sensor data:', error);
             if (this.captureStatusText) this.captureStatusText.textContent = 'Failed to read capture status';
             if (this.screenCapturesList) {
                 this.screenCapturesList.innerHTML = '<div class="history-row"><div class="history-row-title">No screen captures available</div></div>';
             }
+            this.renderDailyOcrExport([]);
         }
+    }
+
+    async refreshDailyOcrText() {
+        try {
+            const events = await window.electronAPI.getSensorEvents();
+            this.latestSensorEvents = Array.isArray(events) ? events : [];
+            this.renderDailyOcrExport(this.latestSensorEvents);
+            this.showToast('Daily OCR refreshed');
+        } catch (error) {
+            console.error('Failed to refresh daily OCR:', error);
+            this.showToast('Failed to refresh OCR text');
+        }
+    }
+
+    renderDailyOcrExport(events = []) {
+        if (!this.dailyOcrText && !this.dailyOcrMeta) return;
+        const result = this.buildTodayOcrExport(events);
+        if (this.dailyOcrText) this.dailyOcrText.value = result.text;
+        if (this.dailyOcrMeta) this.dailyOcrMeta.textContent = result.meta;
+    }
+
+    buildTodayOcrExport(events = []) {
+        const rows = (Array.isArray(events) ? events : [])
+            .filter((event) => this.isTodayTimestamp(event?.timestamp) && String(event?.text || '').trim())
+            .sort((a, b) => Number(a?.timestamp || 0) - Number(b?.timestamp || 0));
+
+        if (!rows.length) {
+            return {
+                text: '',
+                meta: 'No OCR text captured yet today.'
+            };
+        }
+
+        const text = rows.map((event, index) => {
+            const time = event?.captured_at_local || this.formatFullTimestamp(event?.timestamp);
+            const app = String(event?.activeApp || event?.sourceName || 'Desktop').trim();
+            const windowTitle = String(event?.activeWindowTitle || event?.title || '').trim();
+            const header = [`[${index + 1}] ${time}`, app].concat(windowTitle ? [windowTitle] : []).join(' | ');
+            return `${header}\n${String(event?.text || '').trim()}`;
+        }).join('\n\n---\n\n');
+
+        const totalChars = rows.reduce((sum, event) => sum + String(event?.text || '').trim().length, 0);
+        return {
+            text,
+            meta: `${rows.length} captures with OCR today • ${totalChars.toLocaleString()} characters`
+        };
+    }
+
+    isTodayTimestamp(value) {
+        const date = new Date(Number(value) || value || 0);
+        if (!date || Number.isNaN(date.getTime())) return false;
+        const now = new Date();
+        return date.getFullYear() === now.getFullYear()
+            && date.getMonth() === now.getMonth()
+            && date.getDate() === now.getDate();
+    }
+
+    formatFullTimestamp(value) {
+        const date = new Date(Number(value) || value || 0);
+        if (!date || Number.isNaN(date.getTime())) return 'Unknown time';
+        return date.toLocaleString();
+    }
+
+    async copyDailyOcrText() {
+        const text = String(this.dailyOcrText?.value || '').trim();
+        if (!text) {
+            this.showToast('No OCR text available for today');
+            return;
+        }
+        try {
+            await this.writeToClipboard(text);
+            this.showToast('Copied today\'s OCR');
+        } catch (error) {
+            console.error('Failed to copy daily OCR:', error);
+            this.showToast('Copy failed');
+        }
+    }
+
+    async writeToClipboard(text) {
+        if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(text);
+            return;
+        }
+
+        const helper = document.createElement('textarea');
+        helper.value = text;
+        helper.setAttribute('readonly', 'readonly');
+        helper.style.position = 'fixed';
+        helper.style.opacity = '0';
+        helper.style.pointerEvents = 'none';
+        document.body.appendChild(helper);
+        helper.select();
+        helper.setSelectionRange(0, helper.value.length);
+        const success = document.execCommand('copy');
+        document.body.removeChild(helper);
+        if (!success) throw new Error('execCommand copy failed');
     }
 
     renderScreenCaptures(events) {
