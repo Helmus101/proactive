@@ -5,6 +5,9 @@
 
 const axios = require('axios');
 const { EventEmitter } = require('events');
+const crypto = require('crypto');
+const Store = require('electron-store');
+const store = new Store();
 let visionUnsupported = false;
 
 function getComputerUseProvider() {
@@ -192,6 +195,29 @@ async function callPlannerLLM(goal, history, observation, plannerContext = {}) {
   const cleanObservation = sanitizeObservation(observation);
   const screenshotDataUrl = observation?.screenshot?.data_url || '';
   const canUseVision = !visionUnsupported && screenshotDataUrl.startsWith('data:image/');
+
+  // Use persistent cache for planner actions
+  const screenshotHash = screenshotDataUrl ? crypto.createHash('sha1').update(screenshotDataUrl).digest('hex') : null;
+  const cacheKey = crypto.createHash('sha1').update(JSON.stringify({
+    provider: providerConfig.provider,
+    model: providerConfig.model,
+    goal: goalBundle,
+    history: (history || []).slice(-5), // only last 5 actions for cache key stability
+    observation: { ...cleanObservation, screenshot: undefined },
+    screenshotHash,
+    plannerContext
+  })).digest('hex');
+
+  const CACHE_TTL = 30 * 60 * 1000; // 30 mins
+  const cache = store.get('llm_planner_cache') || {};
+  const cached = cache[cacheKey];
+  if (cached && (Date.now() - cached.at) < CACHE_TTL) {
+    const metrics = store.get('llm_metrics') || { total_calls: 0, cached_calls: 0, actual_calls: 0 };
+    metrics.total_calls += 1;
+    metrics.cached_calls += 1;
+    store.set('llm_metrics', metrics);
+    return cached.value;
+  }
 
   const prompt = `
 You are a "Desktop Agent" controlling macOS through Accessibility APIs.
@@ -416,7 +442,24 @@ Rules:
     // If action is null (parse failure), try once more without vision if possible
     if ((!res || !res.action) && canUseVision) {
       visionUnsupported = true;
-      return await makeRequest(false);
+      const fallbackRes = await makeRequest(false);
+      if (fallbackRes && fallbackRes.action) {
+        const metrics = store.get('llm_metrics') || { total_calls: 0, cached_calls: 0, actual_calls: 0 };
+        metrics.total_calls += 1;
+        metrics.actual_calls += 1;
+        store.set('llm_metrics', metrics);
+        cache[cacheKey] = { at: Date.now(), value: fallbackRes };
+        store.set('llm_planner_cache', cache);
+      }
+      return fallbackRes;
+    }
+    if (res && res.action) {
+      const metrics = store.get('llm_metrics') || { total_calls: 0, cached_calls: 0, actual_calls: 0 };
+      metrics.total_calls += 1;
+      metrics.actual_calls += 1;
+      store.set('llm_metrics', metrics);
+      cache[cacheKey] = { at: Date.now(), value: res };
+      store.set('llm_planner_cache', cache);
     }
     return res;
   } catch (e) {

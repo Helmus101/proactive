@@ -28,7 +28,7 @@ const {
   buildGlobalGraph,
   detectTasks, 
   generateSuggestionFromGraph, 
-  generateCoreGlobal 
+  generateCoreGlobal, callLLM 
 } = require('./services/agent/intelligence-engine');
 const {
   normalizeSuggestion,
@@ -1608,10 +1608,34 @@ function startSourceWarmup() {
 }
 
 // ── Memory Graph Processing Functions ───────────────────────────────
+async function hasNewNodesSince(jobKey, layers = []) {
+  const lastRun = store.get(`lastRunTimestamp:${jobKey}`) || "2000-01-01T00:00:00.000Z";
+  const placeholders = layers.map(() => "?").join(",");
+  const row = await db.getQuery(`SELECT COUNT(*) as count, MAX(created_at) as max_at FROM memory_nodes WHERE layer IN (${placeholders}) AND created_at > ?`, [...layers, lastRun]);
+  return {
+    hasNew: row && row.count > 0,
+    maxAt: row && row.max_at ? row.max_at : lastRun
+  };
+}
+
+async function hasNewEventsSince(jobKey) {
+  const lastProcessed = store.get(`lastProcessedEventTimestamp:${jobKey}`) || "2000-01-01T00:00:00.000Z";
+  const row = await db.getQuery(`SELECT COUNT(*) as count, MAX(timestamp) as max_ts FROM events WHERE timestamp > ?`, [lastProcessed]);
+  return { 
+    hasNew: row && row.count > 0, 
+    maxTs: row && row.max_ts ? row.max_ts : lastProcessed 
+  };
+}
+
 
 async function runEpisodeGeneration() {
   if (episodeJobLock) {
     console.log('[EpisodeJob] Already running, skipping this cycle');
+    return;
+  }
+  const check = await hasNewEventsSince('episode');
+  if (!check.hasNew) {
+    console.log('[EpisodeJob] No new events since last run, skipping');
     return;
   }
   if (!canRunHeavyJob(lastEpisodeHeavyRunAt)) {
@@ -1633,6 +1657,7 @@ async function runEpisodeGeneration() {
     const newEpisodeIds = await runEpisodeJob(process.env.DEEPSEEK_API_KEY || null);
     console.log(`[EpisodeJob] Generated ${newEpisodeIds.length} new episodes`);
     store.set('lastEpisodeRun', new Date().toISOString());
+    store.set('lastProcessedEventTimestamp:episode', check.maxTs);
     store.set('memoryGraphHealth', {
       ...(store.get('memoryGraphHealth') || {}),
       lastEpisodeRunAt: new Date().toISOString(),
@@ -1663,6 +1688,11 @@ async function runEpisodeGeneration() {
 
 async function runSemanticWindowGeneration() {
   try {
+    const check = await hasNewEventsSince('semantic');
+    if (!check.hasNew) {
+      console.log('[SemanticWindow] No new events since last run, skipping');
+      return;
+    }
     if (!canRunHeavyJob(lastEpisodeHeavyRunAt)) {
       console.log('[SemanticWindow] Skipping to reduce system load');
       return;
@@ -1670,6 +1700,7 @@ async function runSemanticWindowGeneration() {
     console.log('[SemanticWindow] Running 15-minute semantic summary...');
     const { runSemanticSummaryWindow } = require('./services/agent/intelligence-engine');
     const result = await runSemanticSummaryWindow(15 * 60 * 1000, process.env.DEEPSEEK_API_KEY || null);
+    store.set('lastProcessedEventTimestamp:semantic', check.maxTs);
     const semIds = Array.isArray(result) ? result.filter(Boolean) : (result ? [result] : []);
     if (semIds.length) {
       console.log('[SemanticWindow] Created semantic nodes:', semIds.join(', '));
@@ -1699,6 +1730,11 @@ async function runSuggestionEngineJob() {
       console.log('[SuggestionEngine] Already running; queued one follow-up run');
       lastSuggestionLockSkipLogAt = now;
     }
+    return;
+  }
+  const check = await hasNewEventsSince('suggestion');
+  if (!check.hasNew) {
+    console.log('[SuggestionEngine] No new events since last run, skipping');
     return;
   }
   if (!canRunHeavyJob(lastSuggestionHeavyRunAt)) {
@@ -1748,6 +1784,7 @@ async function runSuggestionEngineJob() {
     });
     console.log(`[SuggestionEngine] Generated ${newSuggestions.length} actionable suggestions`);
     store.set('lastSuggestionRun', new Date().toISOString());
+    store.set('lastProcessedEventTimestamp:suggestion', check.maxTs);
     store.set('memoryGraphHealth', {
       ...(store.get('memoryGraphHealth') || {}),
       lastSuggestionRunAt: new Date().toISOString(),
@@ -1847,11 +1884,17 @@ async function runWeeklyInsightJobScheduled() {
       console.warn('[WeeklyInsight] No DeepSeek API key, skipping weekly insights');
       return;
     }
+    const check = await hasNewNodesSince('weekly_insight', ['cloud', 'episode', 'semantic']);
+    if (!check.hasNew) {
+      console.log('[WeeklyInsight] No new source nodes since last run, skipping');
+      return;
+    }
 
     console.log('[WeeklyInsight] Running weekly insight generation...');
     const { runWeeklyInsightJob } = require('./services/agent/intelligence-engine');
     
     await runWeeklyInsightJob(apiKey);
+    store.set('lastRunTimestamp:weekly_insight', check.maxAt);
     console.log('[WeeklyInsight] Weekly insights completed');
     
     // Send status to UI
@@ -1873,9 +1916,15 @@ async function runDailyInsightsScheduled() {
       console.warn('[DailyInsight] No DeepSeek API key, skipping daily insights');
       return;
     }
+    const check = await hasNewNodesSince('daily_insight', ['cloud', 'episode', 'semantic']);
+    if (!check.hasNew) {
+      console.log('[DailyInsight] No new source nodes since last run, skipping');
+      return;
+    }
     console.log('[DailyInsight] Running daily insight generation...');
     const { runDailyInsights } = require('./services/agent/intelligence-engine');
     const created = await runDailyInsights(apiKey);
+    store.set('lastRunTimestamp:daily_insight', check.maxAt);
     console.log('[DailyInsight] Promoted insights:', created.length);
     if (mainWindow && mainWindow.webContents) {
       mainWindow.webContents.send('memory-graph-update', { type: 'daily_insights_completed', count: created.length, timestamp: Date.now() });
@@ -1892,9 +1941,15 @@ async function runLivingCoreJobScheduled() {
       console.warn("[LivingCore] No DeepSeek API key, skipping Living Core synthesis");
       return;
     }
+    const check = await hasNewNodesSince('living_core', ['insight']);
+    if (!check.hasNew) {
+      console.log('[LivingCore] No new source nodes since last run, skipping');
+      return;
+    }
     console.log("[LivingCore] Running Living Core synthesis job...");
     const { runLivingCoreJob } = require("./services/agent/intelligence-engine");
     const created = await runLivingCoreJob(apiKey);
+    store.set('lastRunTimestamp:living_core', check.maxAt);
     console.log("[LivingCore] Created core nodes:", created.length);
     if (mainWindow && mainWindow.webContents) {
       mainWindow.webContents.send("memory-graph-update", { type: "living_core_completed", count: created.length, timestamp: Date.now() });
@@ -5918,38 +5973,8 @@ async function generateMorningBrief({ force = false, scheduled = false } = {}) {
 }
 
 async function callDeepSeek(prompt, apiKey, temperature = 0.1) {
-  if (!apiKey) throw new Error('DEEPSEEK_API_KEY is not set');
-
-  const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      model: 'deepseek-chat',
-      messages: [{ role: 'user', content: prompt }],
-      temperature
-    })
-  });
-
-  if (!response.ok) {
-    throw new Error(`DeepSeek API error: ${response.status}`);
-  }
-
-  const data = await response.json();
-  const content = data?.choices?.[0]?.message?.content?.trim() || '';
-  if (!content) return [];
-
-  const fencedMatch = content.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-  const candidate = fencedMatch ? fencedMatch[1].trim() : content;
-
-  try {
-    const parsed = JSON.parse(candidate);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (_) {
-    return [];
-  }
+  const parsed = await callLLM(prompt, apiKey, temperature);
+  return Array.isArray(parsed) ? parsed : [];
 }
 
 function normalizeProfileField(value) {
@@ -6195,25 +6220,7 @@ async function decideAssistantRetrieval(query, apiKey, temporalWindow) {
   }
 
   try {
-    const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        model: 'deepseek-chat',
-        temperature: 0,
-        max_tokens: 120,
-        messages: [{
-          role: 'user',
-          content: `Decide retrieval strategy for this query.\nQuery: ${query}\nReturn ONLY JSON: {"use_web":boolean,"use_memory":boolean,"reason":"short"}.`
-        }]
-      })
-    });
-    const data = await response.json();
-    const raw = (data?.choices?.[0]?.message?.content || '').trim();
-    const parsed = JSON.parse(raw.replace(/^```json/i, '').replace(/^```/, '').replace(/```$/, '').trim());
+    const parsed = await callLLM(`Decide retrieval strategy for this query.\nQuery: ${query}\nReturn ONLY JSON: {"use_web":boolean,"use_memory":boolean,"reason":"short"}.`, apiKey, 0);
     const strategy = {
       use_web: Boolean(parsed?.use_web),
       use_memory: Boolean(parsed?.use_memory),

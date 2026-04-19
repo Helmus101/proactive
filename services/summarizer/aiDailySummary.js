@@ -8,68 +8,8 @@
  * Used both during initial sync (batch mode) and for ongoing daily generation.
  */
 
-const DEEPSEEK_ENDPOINT = 'https://api.deepseek.com/v1/chat/completions';
+const { callLLM } = require('../agent/intelligence-engine');
 
-/**
- * Safely parse JSON-like text returned by LLMs. Attempts several heuristics:
- *  - strip markdown code fences
- *  - find the first { or [ and the last matching } or ] and try parsing that slice
- *  - remove trailing commas and fix smart quotes
- * Returns parsed value or null on failure.
- */
-function safeParseJSON(rawText) {
-  if (!rawText || typeof rawText !== 'string') return null;
-  let txt = rawText.trim();
-  // Remove fenced code blocks (```json ... ``` / ``` ... ```)
-  txt = txt.replace(/^```[a-zA-Z0-9]*\n?/i, '').replace(/```$/g, '').trim();
-
-  // Find outermost JSON-like start and end
-  const firstOpen = Math.min(
-    ...['{', '['].map((ch) => { const i = txt.indexOf(ch); return i === -1 ? Number.MAX_SAFE_INTEGER : i; })
-  );
-  const lastClose = Math.max(txt.lastIndexOf('}'), txt.lastIndexOf(']'));
-  let candidate = firstOpen <= lastClose ? txt.slice(firstOpen, lastClose + 1) : txt;
-
-  const tryParse = (s) => {
-    try {
-      return JSON.parse(s);
-    } catch (_) {
-      return null;
-    }
-  };
-
-  let parsed = tryParse(candidate);
-  if (parsed !== null) return parsed;
-
-  // Heuristic fixes: remove trailing commas before } or ] and replace smart quotes
-  let fixed = candidate.replace(/,\s*(?=[}\]])/g, '').replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
-  // Strip unexpected control characters
-  fixed = fixed.replace(/\u0000/g, '');
-  parsed = tryParse(fixed);
-  if (parsed !== null) return parsed;
-
-  // As a last resort, attempt to locate any substring that starts with { or [ and ends with matching bracket
-  const starts = [];
-  for (let i = 0; i < txt.length; i++) {
-    if (txt[i] === '{' || txt[i] === '[') starts.push(i);
-  }
-  for (const sIdx of starts) {
-    for (let eIdx = txt.length - 1; eIdx > sIdx; eIdx--) {
-      if (txt[eIdx] === '}' || txt[eIdx] === ']') {
-        const sub = txt.slice(sIdx, eIdx + 1);
-        const p = tryParse(sub);
-        if (p !== null) return p;
-      }
-    }
-  }
-
-  return null;
-}
-
-/**
- * Build a compact, token-efficient text representation of a day's events
- * for inclusion in the AI prompt.
- */
 function buildDayContext(date, events) {
   const emails   = events.filter(e => e.type === 'email');
   const docs     = events.filter(e => ['doc', 'spreadsheet', 'slide'].includes(e.type));
@@ -210,36 +150,8 @@ Respond with ONLY a valid JSON array. No markdown. No explanation:
   }
 ]`;
 
-  const response = await fetch(DEEPSEEK_ENDPOINT, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      model: 'deepseek-chat',
-      messages: [
-        {
-          role: 'system',
-          content: 'You are a personal AI life assistant. Always respond with valid JSON only. No markdown fences.'
-        },
-        { role: 'user', content: prompt }
-      ],
-      temperature: 0.4,
-      max_tokens: Math.min(2200, 260 * dayBuckets.length)
-    })
-  });
-
-  if (!response.ok) {
-    throw new Error(`DeepSeek API error: ${response.status} ${response.statusText}`);
-  }
-
-  const data = await response.json();
-  const raw = (data.choices?.[0]?.message?.content || '[]').trim();
-  const parsed = safeParseJSON(raw);
-  if (parsed) return parsed;
-  console.error('Failed to parse AI day summaries: could not extract valid JSON from LLM response');
-  return [];
+  const parsed = await callLLM(prompt, apiKey, 0.4);
+  return parsed || [];
 }
 
 /**
@@ -324,7 +236,7 @@ RESPOND WITH ONLY JSON:
   "topics": ["Project X"],
   "intent_clusters": ["job_search"]
 }`;
-  return callDeepSeek(prompt, apiKey, 0.3);
+  return callLLM(prompt, apiKey, 0.3);
 }
 
 /**
@@ -350,7 +262,7 @@ Include evidence_id (the event id).
 
 RESPOND WITH ONLY JSON ARRAY:
 [{ "title": "...", "priority": "high", "category": "Relationship", "reason": "...", "context_path": "...", "evidence_id": "...", "action_type": "prepare" }]`;
-  return callDeepSeek(prompt, apiKey, 0.4);
+  return callLLM(prompt, apiKey, 0.4);
 }
 
 /**
@@ -375,7 +287,7 @@ Include evidence_id.
 
 RESPOND WITH ONLY JSON ARRAY:
 [{ "title": "...", "priority": "medium", "category": "Work", "reason": "...", "evidence_id": "...", "action_type": "review" }]`;
-  return callDeepSeek(prompt, apiKey, 0.3);
+  return callLLM(prompt, apiKey, 0.3);
 }
 
 /**
@@ -385,7 +297,7 @@ async function generateLeisureSubAgent(today, userProfile, historicalSummaries, 
   const prompt = `Based on user style (${userProfile.leisure_style || 'unknown'}) and history, suggest 1 leisure action for tonight.
 RESPOND WITH ONLY JSON ARRAY:
 [{ "title": "...", "priority": "low", "category": "Leisure", "reason": "...", "action_type": "schedule" }]`;
-  return callDeepSeek(prompt, apiKey, 0.5);
+  return callLLM(prompt, apiKey, 0.5);
 }
 
 /**
@@ -395,36 +307,7 @@ async function extractIntelligenceSubAgent(today, todayEvents, historicalSummari
   const prompt = `Extract behavioral patterns and preferences from today's events (${today}).
 RESPOND WITH ONLY JSON:
 { "patterns": ["..."], "preferences": ["..."] }`;
-  return callDeepSeek(prompt, apiKey, 0.2);
+  return callLLM(prompt, apiKey, 0.2);
 }
-
-/**
- * Low-level DeepSeek caller
- */
-async function callDeepSeek(prompt, apiKey, temperature = 0.3) {
-  try {
-    const response = await fetch(DEEPSEEK_ENDPOINT, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model: 'deepseek-chat',
-        messages: [{ role: 'user', content: prompt }],
-        temperature,
-        max_tokens: 520
-      })
-    });
-  const data = await response.json();
-  const raw = (data.choices?.[0]?.message?.content || '{}').trim();
-  const parsed = safeParseJSON(raw);
-  if (parsed !== null) return parsed;
-  console.error('DeepSeek returned non-JSON or unparsable JSON');
-  return null;
-  } catch (e) {
-    console.error('DeepSeek call failed:', e.message);
-    return null;
-  }
-}
-
-module.exports = { buildDayContext, generateAISummariesForDays, generateTodaySummaryWithContext };
 
 module.exports = { buildDayContext, generateAISummariesForDays, generateTodaySummaryWithContext };

@@ -1,5 +1,7 @@
 const crypto = require('crypto');
 const db = require('../db');
+const Store = require('electron-store');
+const store = new Store();
 // Lazy require graph-derivation to avoid circular require/initialization order issues
 function graphDerivation() {
   // require on demand to break cyclic module dependencies
@@ -10,8 +12,28 @@ const { upsertMemoryNode, updateMemoryNode, upsertMemoryEdge, upsertRetrievalDoc
 const { generateEmbedding } = require('../embedding-engine');
 
 const DEEPSEEK_ENDPOINT = 'https://api.deepseek.com/v1/chat/completions';
-const llmCache = new Map();
 let lastAiParseLogAt = 0;
+const CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+const MAX_CACHE_SIZE = 500;
+
+function updateLlmMetrics(cached = false) {
+  const metrics = store.get('llm_metrics') || { total_calls: 0, cached_calls: 0, actual_calls: 0 };
+  metrics.total_calls += 1;
+  if (cached) metrics.cached_calls += 1;
+  else metrics.actual_calls += 1;
+  store.set('llm_metrics', metrics);
+}
+
+function pruneLlmCache() {
+  const cache = store.get('llm_cache') || {};
+  const keys = Object.keys(cache);
+  if (keys.length > MAX_CACHE_SIZE) {
+    const sortedKeys = keys.sort((a, b) => cache[a].at - cache[b].at);
+    const keysToDelete = sortedKeys.slice(0, keys.length - MAX_CACHE_SIZE);
+    keysToDelete.forEach(key => delete cache[key]);
+    store.set('llm_cache', cache);
+  }
+}
 
 function cleanModelJsonText(raw = '') {
   return String(raw || '')
@@ -102,8 +124,12 @@ async function callDeepSeek(prompt, apiKey, temperature = 0.3) {
   try {
     if (!apiKey) return null;
     const cacheKey = crypto.createHash('sha1').update(`${temperature}|${String(prompt || '').slice(0, 7000)}`).digest('hex');
-    const cached = llmCache.get(cacheKey);
-    if (cached && (Date.now() - cached.at) < 5 * 60 * 1000) return cached.value;
+    const cache = store.get('llm_cache') || {};
+    const cached = cache[cacheKey];
+    if (cached && (Date.now() - cached.at) < CACHE_TTL) {
+      updateLlmMetrics(true);
+      return cached.value;
+    }
 
     const response = await fetch(DEEPSEEK_ENDPOINT, {
       method: 'POST',
@@ -112,7 +138,7 @@ async function callDeepSeek(prompt, apiKey, temperature = 0.3) {
         model: 'deepseek-chat',
         messages: [{ role: 'user', content: prompt }],
         temperature,
-        max_tokens: 1024
+        max_tokens: 2048
       })
     });
     const responseText = await response.text();
@@ -126,23 +152,15 @@ async function callDeepSeek(prompt, apiKey, temperature = 0.3) {
       const errMsg = data?.error?.message || response.statusText || 'DeepSeek request failed';
       throw new Error(`${response.status}: ${errMsg}`);
     }
-    const raw = data?.choices?.[0]?.message?.content || 'null';
+    const raw = data?.choices?.[0]?.message?.content || '';
     const value = tryParseJsonLoose(raw);
-    if (value == null) {
-      const now = Date.now();
-      if ((now - lastAiParseLogAt) > (2 * 60 * 1000)) {
-        const preview = String(raw || '').replace(/\s+/g, ' ').slice(0, 220);
-        console.warn('[AI] Parse fallback: model returned non-JSON content; using null result. Preview:', preview);
-        lastAiParseLogAt = now;
-      }
-      return null;
-    }
-    llmCache.set(cacheKey, { at: Date.now(), value });
-    if (llmCache.size > 120) {
-      const oldest = [...llmCache.entries()].sort((a, b) => a[1].at - b[1].at).slice(0, llmCache.size - 120);
-      oldest.forEach(([key]) => llmCache.delete(key));
-    }
-    return value;
+    const finalValue = value !== null ? value : raw;
+
+    updateLlmMetrics(false);
+    cache[cacheKey] = { at: Date.now(), value: finalValue };
+    store.set('llm_cache', cache);
+    pruneLlmCache();
+    return finalValue;
   } catch (e) {
     const msg = String(e?.message || e);
     const now = Date.now();
@@ -173,6 +191,14 @@ function normalizeLLMConfig(configOrApiKey = null) {
 
 async function callOllama(prompt, config = {}, temperature = 0.3) {
   try {
+    const cacheKey = crypto.createHash('sha1').update(`ollama|${config.model}|${temperature}|${String(prompt || '').slice(0, 7000)}`).digest('hex');
+    const cache = store.get('llm_cache') || {};
+    const cached = cache[cacheKey];
+    if (cached && (Date.now() - cached.at) < CACHE_TTL) {
+      updateLlmMetrics(true);
+      return cached.value;
+    }
+
     const baseUrl = String(config.baseUrl || config.base_url || process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434').replace(/\/+$/, '');
     const endpoint = `${baseUrl}/api/chat`;
     const model = String(config.model || process.env.OLLAMA_MODEL || 'llama3.1:8b');
@@ -206,8 +232,16 @@ async function callOllama(prompt, config = {}, temperature = 0.3) {
       throw new Error(`${response.status}: ${errMsg}`);
     }
 
-    const raw = data?.message?.content || data?.response || 'null';
-    return tryParseJsonLoose(raw);
+    const raw = data?.message?.content || data?.response || '';
+    const value = tryParseJsonLoose(raw);
+    const finalValue = value !== null ? value : raw;
+    if (finalValue != null) {
+      updateLlmMetrics(false);
+      cache[cacheKey] = { at: Date.now(), value: finalValue };
+      store.set('llm_cache', cache);
+      pruneLlmCache();
+    }
+    return finalValue;
   } catch (e) {
     const msg = String(e?.message || e);
     const now = Date.now();
