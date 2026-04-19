@@ -1157,6 +1157,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   // Always run OCR so screenshot text capture is not reliant on AX-only extraction.
   const axText = String(windowContext.extractedText || '').trim();
   const ocr = await runVisionOCR(imagePath);
+  fs.promises.unlink(imagePath).catch(() => {});
   const ocrText = String(ocr.text || '').trim();
   const mergedText = [axText, ocrText].filter(Boolean).join('\n').trim();
   event.text = mergedText;
@@ -1187,7 +1188,6 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     // Clean up and delete the sensitive capture
     sensorCaptureInProgress = false;
     await deleteSensitiveCapture(imagePath, event.id, filterCheck.reason);
-    fs.promises.unlink(imagePath).catch(() => {});
     return null; // Return null to indicate capture was filtered
   }
 
@@ -1247,7 +1247,6 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     });
   }
 
-  fs.promises.unlink(imagePath).catch(() => {});
   sensorCaptureInProgress = false;
   return event;
 }
