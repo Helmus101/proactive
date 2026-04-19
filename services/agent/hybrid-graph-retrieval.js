@@ -1277,12 +1277,20 @@ async function buildHybridGraphRetrieval({
     }
   });
 
-  const drilldownRefs = Array.from(new Set(
-    evidence.flatMap((item) => [
+  const allSourceRefIds = [
+    ...evidence.flatMap((item) => [
       ...(item.source_refs || []),
       item.event_id || null
-    ]).filter(Boolean)
-  )).slice(0, 100);
+    ]),
+    ...primaryNodes.flatMap((item) => parseSourceRefs(item.source_refs)),
+    ...supportNodes.flatMap((item) => parseSourceRefs(item.source_refs)),
+    ...evidenceNodes.flatMap((item) => parseSourceRefs(item.source_refs)),
+    ...graph.expandedNodes.flatMap((item) => parseSourceRefs(item.source_refs)),
+    ...hierarchicalExpansion.expandedNodes.flatMap((item) => parseSourceRefs(item.source_refs)),
+    ...sourceRefEvidenceRows.map((row) => row.event_id || row.key)
+  ].filter(Boolean);
+
+  const drilldownRefs = Array.from(new Set(allSourceRefIds)).slice(0, 200);
 
   return {
     retrieval_run_id: retrievalRunId,

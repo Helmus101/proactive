@@ -258,7 +258,7 @@ function buildInterpretedMemorySummary(retrieval, drilldownEvidence = []) {
     lines.push(`- Connected ${node.layer}${node.subtype ? `/${node.subtype}` : ''}: ${node.title || node.id}${summary ? ` — ${summary.slice(0, 160)}` : ''}`);
   }
 
-  for (const item of drilldownEvidence.slice(0, 3)) {
+  for (const item of drilldownEvidence.slice(0, 6)) {
     const text = String(item.text || '').replace(/\s+/g, ' ').trim();
     lines.push(`- Supporting detail: ${item.title || item.id}${text ? ` — ${text.slice(0, 220)}` : ''}`);
   }
@@ -278,7 +278,7 @@ function buildPriorityEvidenceLines(retrieval, drilldownEvidence = [], limit = 1
     if (!text) continue;
     lines.push(`- [${layer}] ${text}`);
   }
-  for (const row of (drilldownEvidence || []).slice(0, 2)) {
+  for (const row of (drilldownEvidence || []).slice(0, 6)) {
     const text = String(row.text || row.title || '').replace(/\s+/g, ' ').trim().slice(0, 8000);
     if (!text) continue;
     lines.push(`- [raw:${row.source_type || 'event'}] ${text}`);
@@ -299,7 +299,7 @@ function buildGroundedFallbackAnswer(query, retrieval, drilldownEvidence = []) {
     }
   }
 
-  const raw = (drilldownEvidence || []).slice(0, 2);
+  const raw = (drilldownEvidence || []).slice(0, 6);
   if (raw.length) {
     lines.push('');
     lines.push('Raw supporting details:');
@@ -655,11 +655,11 @@ function needsRawDrilldown(query) {
 }
 
 async function fetchDrilldownEvidence(refs = []) {
-  const ids = Array.from(new Set((refs || []).filter(Boolean))).slice(0, 20);
+  const ids = Array.from(new Set((refs || []).filter(Boolean))).slice(0, 60);
   if (!ids.length) return [];
   const placeholders = ids.map(() => '?').join(',');
   const rows = await db.allQuery(
-    `SELECT id, source_type, occurred_at, title, redacted_text, raw_text, app, source_account, metadata
+    `SELECT id, source_type, occurred_at, title, redacted_text, raw_text, text, app, source_account, metadata
      FROM events
      WHERE id IN (${placeholders})
      ORDER BY COALESCE(occurred_at, timestamp) DESC`,
