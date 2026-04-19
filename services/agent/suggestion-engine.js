@@ -1,6 +1,13 @@
 const db = require('../db');
 const Store = require('electron-store');
-const { generateFeedSuggestions } = require('./feed-generation');
+const {
+  generateFeedSuggestions,
+  qualityGateSuggestion,
+  isWeakTitle,
+  isConcreteActionLabel,
+  hasTemplateTone,
+  startsWithImperativeVerb
+} = require('./feed-generation');
 const { upsertRetrievalDoc } = require('./graph-store');
 const { callLLM } = require('./intelligence-engine');
 const { buildHybridGraphRetrieval } = require('./hybrid-graph-retrieval');
@@ -163,10 +170,6 @@ module.exports = {
   runSuggestionEngine
 };
 
-function isConcreteActionLabel(text = '') {
-  return /\b(open|draft|reply|send|prepare|review|confirm|research|finish|complete|schedule|summarize|update|submit|resolve|fix|call|book|share|wish|check\s*in|reconnect)\b/i.test(String(text || ''));
-}
-
 function firstEvidenceLine(evidence = []) {
   const item = (Array.isArray(evidence) ? evidence : []).find(Boolean);
   if (!item) return '';
@@ -220,15 +223,6 @@ function layerWeight(layer = '', subtype = '') {
   if (l === 'cloud') return 1.0;
   if (l === 'episode') return 0.95;
   return 0.82;
-}
-
-function isWeakTitle(title = '') {
-  const t = String(title || '').trim().toLowerCase();
-  if (!t) return true;
-  if (/^review (episode|memory) item \d+/.test(t)) return true;
-  if (/^(do|handle|work on|be proactive|next step|review this)\b/.test(t)) return true;
-  if (t.split(/\s+/).length < 3) return true;
-  return false;
 }
 
 function toEvidenceText(item = {}) {
@@ -613,23 +607,25 @@ async function generateTopTodosFromMemoryQuery(llmConfig, options = {}) {
 
   const standingNotes = String(options?.standing_notes || '').trim();
   const phase1Prompt = `
-  You are deciding next actions from memory.
-  First ask memory this question: "What are the top five things to do now?"
-  Then return exactly 5 AI-generated considerations as a strict JSON array of plain strings.
+  You are an Action-Oriented Planner.
+  Your goal is to identify highly actionable, concrete to-dos from the user's memory.
+  First ask memory this question: "What are the top five specific things to do now?"
+  Then return exactly 5 highly specific to-do items as a strict JSON array of plain strings.
 
   Return strict JSON array of strings only:
   [
-  "Action 1 description based on context",
-  "Action 2 description based on context",
-  "Action 3 description based on context",
-  "Action 4 description based on context",
-  "Action 5 description based on context"
+  "Action 1: Concrete task with specific entity/target",
+  "Action 2: Concrete task with specific entity/target",
+  "Action 3: Concrete task with specific entity/target",
+  "Action 4: Concrete task with specific entity/target",
+  "Action 5: Concrete task with specific entity/target"
   ]
 
   RULES:
   - Use only STANDING NOTES + MEMORY EVIDENCE + GRAPH EDGES.
-  - Look for any relevant actionable tasks, follow-ups, or open loops in the retrieved memory evidence.
-  - Prefer semantic tasks and insight-backed actions over raw-event cleanup.
+  - Every to-do MUST be concrete and imperative.
+  - Every to-do MUST reference a specific person, file, event, or artifact from the evidence.
+  - Avoid generic advice or "considerations."
 
 STANDING NOTES:
 ${standingNotes || 'None'}
@@ -650,7 +646,7 @@ ${edgeDigest || 'No edge traces available.'}
   if (!topFiveItems.length) return [];
 
   const phase2Prompt = `
-I asked the memory what the top 5 things to do now were, and it gave me the following 5 things:
+I asked the memory what the top 5 concrete to-dos now were, and it gave me the following 5 things:
 ${JSON.stringify(topFiveItems, null, 2)}
 
 Now generate final proactive suggestions in this exact internal template.
@@ -681,6 +677,12 @@ Rules:
 - One suggestion = one job only.
 - Avoid vague text like "be proactive", "work on this", "review item 3".
 - Keep each action grounded in the 5 items provided.
+
+SPECIFITY RULES:
+- Title MUST start with a concrete verb + a specific named entity, filename, person name, or exact time.
+- NEVER start with "Take the next step", "Review and organize", "Send a quick update", or "Continue working on".
+- reason MUST reference a specific artifact, timestamp, or person NAME drawn from the provided evidence.
+- Avoid weak language: no "maybe", "could", "consider", or "might".
 `;
 
   const aiRows = await callLLM(phase2Prompt, llmConfig, 0.22).catch(() => null);
@@ -784,7 +786,11 @@ Rules:
 
   const filteredBuilt = built
     .filter((item) => item?.title && item?.reason)
-    .filter((item) => !isWeakTitle(item.title))
+    .filter((item) => !isWeakTitle(item.title) && startsWithImperativeVerb(item.title))
+    .filter((item) => {
+      // Check for specificity anchor in title
+      return /[A-Z][a-z]{2,}/.test(item.title) || /[\d]{1,2}:\d{2}/.test(item.title) || /\.[a-z]{2,4}\b/i.test(item.title);
+    })
     .filter((item) => Array.isArray(item.evidence) && item.evidence.length > 0)
     .slice(0, 5);
 
@@ -818,14 +824,17 @@ async function generateAndPersistTasksFromLLM(llmConfig, options = {}) {
     .slice(0, 18)
     .join('\n');
   const standingNotes = String(options?.standing_notes || '').trim();
-  const prompt = `You are a proactive planner.
-First ask memory: "what are todos that are still open right now?"
-Then return a JSON array of 3 to 5 tasks that should be done next.
+  const prompt = `You are a proactive Action-Oriented Planner.
+First ask memory: "what are concrete todos that are still open right now?"
+Then return a JSON array of 3 to 5 highly actionable tasks that should be done next.
 
 Rules:
 - Use only evidence from MEMORY CONTEXT and STANDING NOTES.
 - Prefer unresolved or repeated items with concrete next actions.
 - Keep titles imperative and specific.
+- Every title MUST name a concrete target (person, file, artifact, or topic).
+- Every reason MUST reference specific evidence from the context.
+- Avoid weak language (consider, might, maybe).
 - Each item must be an object with keys:
   title (short imperative),
   description (optional),
@@ -846,9 +855,14 @@ ${memoryContext || '- No memory context available; return []'} `;
 
   // Normalize into persistent todo shape
   const persistentTodos = store.get('persistentTodos') || [];
-  const candidates = rows.slice(0, 5).map((r) => {
-    const title = String(r.title || r.task || r.action || '').trim();
-    return {
+  const candidates = rows.slice(0, 5)
+    .filter((r) => {
+      const title = String(r.title || r.task || r.action || '').trim();
+      return title && !isWeakTitle(title) && startsWithImperativeVerb(title);
+    })
+    .map((r) => {
+      const title = String(r.title || r.task || r.action || '').trim();
+      return {
       id: `todo_llm_${Math.random().toString(36).slice(2, 9)}`,
       title: title || 'Task',
       description: String(r.description || '').trim(),

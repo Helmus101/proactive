@@ -117,15 +117,43 @@ function hasReceiptAttribution(text = '') {
   return false;
 }
 
+function startsWithImperativeVerb(text = '') {
+  const t = String(text || '').trim();
+  if (/^review\b/i.test(t)) {
+    return hasConcreteAction(t);
+  }
+  return /^(?:open|draft|reply|send|prepare|confirm|research|finish|complete|schedule|summarize|update|submit|resolve|fix|call|book|share|drill|resume|tag|rename|close|start|run)\b/i.test(t);
+}
+
 function hasConcreteAction(text = '') {
-  return /\b(open|draft|reply|send|prepare|review|confirm|research|finish|complete|schedule|summarize|update|submit|resolve|fix|call|book|share|drill|resume|tag|rename|close|start|run)\b/i.test(String(text || ''));
+  const value = String(text || '');
+  const hasVerb = /\b(open|draft|reply|send|prepare|confirm|research|finish|complete|schedule|summarize|update|submit|resolve|fix|call|book|share|drill|resume|tag|rename|close|start|run)\b/i.test(value);
+  if (hasVerb) return true;
+  const reviewMatch = value.match(/\breview\s+(\w+)/i);
+  if (reviewMatch) {
+    const target = reviewMatch[1].toLowerCase();
+    if (!['this', 'it', 'item', 'context', 'memory', 'episode', 'artifact'].includes(target)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function isConcreteActionLabel(label = '') {
   const value = String(label || '').trim();
   if (!value) return false;
   if (/\b(open source context|open context|action \d+|execute next action|do it)\b/i.test(value)) return false;
+  if (/^review$/i.test(value)) return false; // Review alone is not concrete
   return hasConcreteAction(value);
+}
+
+function isWeakTitle(title = '') {
+  const t = String(title || '').trim().toLowerCase();
+  if (!t) return true;
+  if (/^review (episode|memory|item|context) \d+/.test(t)) return true;
+  if (/^(do|handle|work on|be proactive|next step|review this|make progress|stay on top|organize|check in on|handle this)\b/.test(t)) return true;
+  if (t.split(/\s+/).length < 3) return true;
+  return false;
 }
 
 function hasContextAnchor(text = '') {
@@ -219,7 +247,8 @@ const GENERIC_TITLE_PHRASES = [
   'take the next', 'next concrete step', 'review and organize',
   'send a quick update', 'keep momentum', 'recent activity',
   'open your', 'quickly tag or rename', 'complete next step now',
-  'continue working on', 'take action on', 'address this item'
+  'continue working on', 'take action on', 'address this item',
+  'stay on top of', 'be proactive', 'make progress', 'handle this', 'work on', 'check in on'
 ];
 
 function qualityGateSuggestion({ title = '', body = '', reason = '', display = null, epistemicTrace = [], suggestedActions = [] } = {}) {
@@ -233,20 +262,24 @@ function qualityGateSuggestion({ title = '', body = '', reason = '', display = n
   const titleSummaryMatch = titleSummaryConsistent(title, display?.summary || body || '');
   // Reject generic verb-phrase titles that could apply to any suggestion
   const titleLower = (title || '').toLowerCase();
-  const hasGenericTitle = GENERIC_TITLE_PHRASES.some((phrase) => titleLower.includes(phrase));
-  // Require a specific anchor: proper noun (CamelCase word), HH:MM time, file extension, or a specific
-  // name referenced in the epistemic trace (person name, app, domain)
+  const hasGenericTitle = GENERIC_TITLE_PHRASES.some((phrase) => titleLower.includes(phrase)) || isWeakTitle(title);
+  const startsWithVerb = startsWithImperativeVerb(title);
+  // Require a specific anchor in the title: proper noun (CamelCase word), HH:MM time, or file extension
+  const hasTitleAnchor = /[A-Z][a-z]{2,}/.test(title) || /[\d]{1,2}:\d{2}/.test(title) || /\.[a-z]{2,4}\b/i.test(title);
+  // Also check the broader context for grounding
   const traceText = Array.isArray(epistemicTrace)
     ? epistemicTrace.map((item) => `${item.source || ''} ${item.text || ''}`).join(' ')
     : '';
   const specificAnchorText = title + ' ' + (reason || '') + ' ' + (body || '') + ' ' + traceText;
-  const hasSpecificAnchor = /[A-Z][a-z]{2,}|[\d]{1,2}:\d{2}|\.[a-z]{2,4}\b|\d+[hd] ago|\d+x\b/i.test(specificAnchorText);
-  const pass = !hasTemplate && !hasGenericTitle && hasSpecificAnchor && receiptEnough && actionEnough && concrete && anchor && receiptLanguage && titleSummaryMatch;
+  const hasSpecificAnchor = /[A-Z][a-z]{2,}/.test(specificAnchorText) || /[\d]{1,2}:\d{2}/.test(specificAnchorText) || /\.[a-z]{2,4}\b/i.test(specificAnchorText) || /\d+[hd] ago|\d+x\b/i.test(specificAnchorText);
+  const pass = !hasTemplate && !hasGenericTitle && startsWithVerb && hasTitleAnchor && hasSpecificAnchor && receiptEnough && actionEnough && concrete && anchor && receiptLanguage && titleSummaryMatch;
   return {
     pass,
     reasons: {
       hasTemplate,
       hasGenericTitle,
+      startsWithVerb,
+      hasTitleAnchor,
       hasSpecificAnchor,
       receiptEnough,
       actionEnough,
@@ -273,10 +306,13 @@ Return strict JSON only:
 }
 
 Rules:
-- No template phrases.
+- No template phrases (like "take the next step", "be proactive").
 - Use concrete nouns from evidence.
+- Title must start with an imperative verb and name a specific target.
+- Body must be exactly two sentences: 1) Risk/Context, 2) Direct Command.
 - Must reference what the user was actually doing recently.
 - Action must be immediately executable.
+- PROHIBITED: "review and organize", "make progress", "stay on top of".
 
 Now: ${new Date(now).toISOString()}
 Trigger: ${seed.trigger_summary}
@@ -608,9 +644,9 @@ function hasOpenWorkSignal(seed = {}) {
 
 function isVagueSuggestionText(title = '', body = '') {
   const text = `${title} ${body}`.toLowerCase();
-  if (!title || title.trim().length < 16) return true;
-  if (/\b(do this|work on this|keep going|make progress|be proactive|follow up|handle this)\b/.test(text)) return true;
-  if (!/\b(open|draft|reply|send|prepare|review|confirm|research|finish|complete|schedule|summarize)\b/.test(text)) return true;
+  if (!title || title.trim().length < 16 || isWeakTitle(title)) return true;
+  if (/\b(do this|work on this|keep going|make progress|be proactive|follow up|handle this|stay on top|take action)\b/.test(text)) return true;
+  if (!startsWithImperativeVerb(title)) return true;
   return false;
 }
 
@@ -919,70 +955,76 @@ async function buildSuggestionFromSeed(seed, apiKey, now, options = {}) {
   const suggestionCategory = isStudySeed ? 'study' : (seed.category === 'followup' ? 'followup' : 'work');
 
   const prompt = `
-You are generating one proactive suggestion from a user's memory graph.
-There are two kinds of suggestions:
-- STUDY: drill/review/resume a specific concept, session, or assignment. Category = "study".
-- WORK/FOLLOWUP: close an open loop in work, communication, or planning. Category = "work" or "followup".
-This seed is type: ${suggestionCategory.toUpperCase()}.
+  You are generating one proactive suggestion from a user's memory graph.
+  There are two kinds of suggestions:
+  - STUDY: drill/review/resume a specific concept, session, or assignment. Category = "study".
+  - WORK/FOLLOWUP: close an open loop in work, communication, or planning. Category = "work" or "followup".
+  This seed is type: ${suggestionCategory.toUpperCase()}.
 
-Return strict JSON:
-{
-  "title": "...",
-  "body": "...",
-  "intent": "...",
-  "reason": "...",
-  "category": "${suggestionCategory}",
-  "suggestion_category": "${suggestionCategory}",
-  "pattern_type": "temporal|contextual|frequency|trigger",
-  "suggestion_type": "predictive_reminder|optimization|context_awareness|comparative|anomaly|opportunity",
-  "value_score": 0,
-  "risk_score": 0,
-  "confidence": 0.0,
-  "plan": ["...", "...", "..."],
-  "expected_benefit": "...",
-  "prerequisites": ["..."],
-  "explanation": "one sentence describing why this suggestion was generated",
-  "display": { "headline": "...", "summary": "...", "insight": "..." },
-  "epistemic_trace": [{ "node_id": "...", "source": "...", "text": "...", "timestamp": "ISO-8601" }],
-  "suggested_actions": [{ "label": "...", "type": "browser_operator|open_source|manual", "payload": { "action": "...", "url": "...", "template": "..." } }]
-}
+  Return strict JSON:
+  {
+    "title": "...",
+    "body": "...",
+    "intent": "...",
+    "reason": "...",
+    "category": "${suggestionCategory}",
+    "suggestion_category": "${suggestionCategory}",
+    "pattern_type": "temporal|contextual|frequency|trigger",
+    "suggestion_type": "predictive_reminder|optimization|context_awareness|comparative|anomaly|opportunity",
+    "value_score": 0,
+    "risk_score": 0,
+    "confidence": 0.0,
+    "plan": ["...", "...", "..."],
+    "expected_benefit": "...",
+    "prerequisites": ["..."],
+    "explanation": "one sentence describing why this suggestion was generated",
+    "display": { "headline": "...", "summary": "...", "insight": "..." },
+    "epistemic_trace": [{ "node_id": "...", "source": "...", "text": "...", "timestamp": "ISO-8601" }],
+    "suggested_actions": [{ "label": "...", "type": "browser_operator|open_source|manual", "payload": { "action": "...", "url": "...", "template": "..." } }]
+  }
 
-Rules:
-- One immediate action only.
-- Use a direct coach voice: blunt, clear, no fluff, no cheerleading.
-- The action must be specific enough that the user could do it next.
-- Make it deep and concrete, not generic.
-- The title must sound like a reality check plus a concrete target.
-- The body must be exactly 2 short sentences:
-  1) call out the specific risk/pattern from evidence
-  2) command the exact next step with a timebox or immediate trigger
-- Assume any AI-executable action should remove one extra step for the user.
-- Break the task into 2-4 small steps.
-- Prefer stakeholder updates, meeting prep, open-loop closure, and exact follow-ups over broad productivity advice.
-- Prioritize suggestions that match these types when evidence supports them:
-  deadline intelligence, research optimization, collaboration intelligence, grade/performance risk, time optimization.
-- Do not mention hidden system internals or node IDs.
-- Avoid weak language: no "maybe", "could", "consider", or "might".
-- Confidence must be realistic and evidence-based. If below 0.70, return confidence below 0.70.
-- Keep risk_score between 0 and 10 (higher means higher downside if wrong).
-- Keep value_score between 0 and 25 (time/effort/stress saved).
-- explanation must explicitly reference the observed pattern.
-- Always output a non-empty epistemic_trace with 2-4 receipts.
-- Always output 1-3 suggested_actions with concrete labels and payloads.
-- Treat this as a context bundle: Trigger -> Evidence -> Insight -> Action.
-- Reason from three-node convergence when possible:
-  episodic (time/context), semantic (facts/entities), insight (inferred pattern).
-- Do not output generic productivity phrasing.
-- Output must read like a to-do item from unfinished or pending work, not a motivational reminder.
-- Include "what", "why now", and "exact action" in plain language.
-- If evidence does not support a concrete suggestion, return no suggestion (empty object).
+  Rules:
+  - One immediate action only.
+  - Use a direct coach voice: blunt, clear, no fluff, no cheerleading.
+  - The action must be specific enough that the user could do it next.
+  - Make it deep and concrete, not generic.
+  - The title must sound like a reality check plus a concrete target.
+  - The body must be exactly 2 short sentences:
+    1) call out the specific risk/pattern from evidence
+    2) command the exact next step with a timebox or immediate trigger
+  - Assume any AI-executable action should remove one extra step for the user.
+  - Break the task into 2-4 small steps.
+  - Prefer stakeholder updates, meeting prep, open-loop closure, and exact follow-ups over broad productivity advice.
+  - Prioritize suggestions that match these types when evidence supports them:
+    deadline intelligence, research optimization, collaboration intelligence, grade/performance risk, time optimization.
+  - Do not mention hidden system internals or node IDs.
+  - Avoid weak language: no "maybe", "could", "consider", or "might".
+  - Confidence must be realistic and evidence-based. If below 0.70, return confidence below 0.70.
+  - Keep risk_score between 0 and 10 (higher means higher downside if wrong).
+  - Keep value_score between 0 and 25 (time/effort/stress saved).
+  - explanation must explicitly reference the observed pattern.
+  - Always output a non-empty epistemic_trace with 2-4 receipts.
+  - Always output 1-3 suggested_actions with concrete labels and payloads.
+  - Treat this as a context bundle: Trigger -> Evidence -> Insight -> Action.
+  - Reason from three-node convergence when possible:
+    episodic (time/context), semantic (facts/entities), insight (inferred pattern).
+  - Do not output generic productivity phrasing.
+  - Output must read like a to-do item from unfinished or pending work, not a motivational reminder.
+  - Include "what", "why now", and "exact action" in plain language.
+  - If evidence does not support a concrete suggestion, return no suggestion (empty object).
 
-SPECIFICITY RULES (mandatory — violating any of these will cause this suggestion to be rejected):
-- Title MUST start with a concrete verb + a specific named entity, filename, person name, or exact time. NEVER start with "Take the next step", "Review and organize", "Send a quick update", "Continue working on", or any phrase that could apply to ANY suggestion.
-- reason MUST reference a specific artifact, timestamp, or person NAME drawn from the epistemic_trace. If the trace contains "09:23 screen capture" or "Alex" or "clawdbot.js", the reason must use that exact reference — not "recent activity" or "recent context".
-- body/reason combined length: ≤120 chars. Every word must add specific information. Cut filler and padding.
-- time_anchor must be a specific clock time (e.g. "09:23 this morning") or a concrete relative reference ("2 hours ago", "in 47 minutes") — NOT just "today" or "this morning" alone.
-- Do NOT generate a suggestion about organizing, tagging, or renaming files unless the epistemic_trace explicitly names specific files.
+  GOOD VS BAD EXAMPLES:
+  - GOOD Title: "Reply to Alex about the Q3 Budget"
+  - BAD Title: "Follow up on your recent emails"
+  - GOOD Body: "This budget thread has been idle for 2 days since Alex asked for your approval. Draft a short confirmation now to unblock the team."
+  - BAD Body: "You have some unread emails from Alex. You should consider replying to them when you have time."
+
+  SPECIFICITY RULES (mandatory — violating any of these will cause this suggestion to be rejected):
+  - Title MUST start with a concrete verb + a specific named entity, filename, person name, or exact time. NEVER start with "Take the next step", "Review and organize", "Send a quick update", "Continue working on", or any phrase that could apply to ANY suggestion.
+  - reason MUST reference a specific artifact, timestamp, or person NAME drawn from the epistemic_trace. If the trace contains "09:23 screen capture" or "Alex" or "clawdbot.js", the reason must use that exact reference — not "recent activity" or "recent context".
+  - body/reason combined length: ≤120 chars. Every word must add specific information. Cut filler and padding.
+  - time_anchor must be a specific clock time (e.g. "09:23 this morning") or a concrete relative reference ("2 hours ago", "in 47 minutes") — NOT just "today" or "this morning" alone.
+  - Do NOT generate a suggestion about organizing, tagging, or renaming files unless the epistemic_trace explicitly names specific files.
 
 Now: ${new Date(now).toISOString()}
 Suggestion type: ${suggestionCategory.toUpperCase()}
@@ -1336,6 +1378,11 @@ async function generateFeedSuggestions(apiKey, now = Date.now(), options = {}) {
 module.exports = {
   scoreGraphFeedSeeds,
   generateFeedSuggestions,
+  qualityGateSuggestion,
+  isWeakTitle,
+  isConcreteActionLabel,
+  hasTemplateTone,
+  startsWithImperativeVerb,
   __test__: {
     hasTemplateTone,
     hasReceiptAttribution,
