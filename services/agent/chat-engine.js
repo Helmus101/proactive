@@ -16,7 +16,7 @@ function uniq(items = [], limit = 12) {
   return Array.from(new Set((items || []).filter(Boolean))).slice(0, limit);
 }
 
-function normalizeChatHistoryWindow(history = [], limit = 12) {
+function normalizeChatHistoryWindow(history = [], limit = 30) {
   if (!Array.isArray(history)) return [];
   return history
     .filter((item) => item && typeof item.content === 'string')
@@ -30,7 +30,7 @@ function normalizeChatHistoryWindow(history = [], limit = 12) {
 }
 
 function buildQueryWithChatContext(query, chatHistory = []) {
-  const userTurns = chatHistory.filter((item) => item.role === 'user').map((item) => item.content).slice(-4);
+  const userTurns = chatHistory.filter((item) => item.role === 'user').map((item) => item.content).slice(-10);
   if (!userTurns.length) return String(query || '').trim();
   return `${String(query || '').trim()}\n\nConversation context:\n${userTurns.map((item) => `- ${item}`).join('\n')}`;
 }
@@ -278,7 +278,7 @@ function buildPriorityEvidenceLines(retrieval, drilldownEvidence = [], limit = 1
     if (!text) continue;
     lines.push(`- [${layer}] ${text}`);
   }
-  for (const row of (drilldownEvidence || []).slice(0, 6)) {
+  for (const row of (drilldownEvidence || []).slice(0, 20)) {
     const text = String(row.text || row.title || '').replace(/\s+/g, ' ').trim().slice(0, 8000);
     if (!text) continue;
     lines.push(`- [raw:${row.source_type || 'event'}] ${text}`);
@@ -288,7 +288,7 @@ function buildPriorityEvidenceLines(retrieval, drilldownEvidence = [], limit = 1
 
 function buildGroundedFallbackAnswer(query, retrieval, drilldownEvidence = []) {
   const lines = [];
-  const topEvidence = (retrieval?.evidence || []).slice(0, 5);
+  const topEvidence = (retrieval?.evidence || []).slice(0, 15);
   if (topEvidence.length) {
     lines.push('Here is what I found in your memory:');
     for (const ev of topEvidence) {
@@ -299,7 +299,7 @@ function buildGroundedFallbackAnswer(query, retrieval, drilldownEvidence = []) {
     }
   }
 
-  const raw = (drilldownEvidence || []).slice(0, 6);
+  const raw = (drilldownEvidence || []).slice(0, 15);
   if (raw.length) {
     lines.push('');
     lines.push('Raw supporting details:');
@@ -480,10 +480,10 @@ function buildThinkingSearchQueries(retrieval) {
     ? retrieval.query_sets.web_queries
     : (Array.isArray(retrieval?.generated_queries?.web) ? retrieval.generated_queries.web : []);
   return {
-    context: contextQueries.slice(0, 7),
-    messages: messageQueries.slice(0, 7),
-    lexical: lexicalTerms.filter((term) => isUsefulLexical(term)).slice(0, 10),
-    web: webQueries.slice(0, 7)
+    context: contextQueries.slice(0, 15),
+    messages: messageQueries.slice(0, 15),
+    lexical: lexicalTerms.filter((term) => isUsefulLexical(term)).slice(0, 20),
+    web: webQueries.slice(0, 15)
   };
 }
 
@@ -692,7 +692,7 @@ async function executeParallelRetrieval(baseQuery, baseThought, options, onProgr
     ...((baseThought.semantic_queries || []).map((item) => String(item || '').trim())),
     ...((baseThought.message_queries || []).map((item) => String(item || '').trim()))
   ].filter(Boolean);
-  const queries = Array.from(new Set(bundle)).slice(0, 7);
+  const queries = Array.from(new Set(bundle)).slice(0, 15);
   
   // Detect when a query requires deep context (e.g., long-term relationship, patterns)
   const requiresDeepContext = /\b(relationship|pattern|over the last|long-term|habit|habitual|recurring|years?|months?)\b/i.test(baseQuery);
@@ -781,7 +781,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     emit(event);
     return event;
   };
-  const chatHistory = normalizeChatHistoryWindow(options?.chat_history, 12);
+  const chatHistory = normalizeChatHistoryWindow(options?.chat_history, 30);
   const retrievalQuery = buildQueryWithChatContext(query, chatHistory);
 
   // Persist user chat turn as a raw event
@@ -1103,7 +1103,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
           : ''
       ].filter(Boolean).join('\n\n');
   } else {
-    const priorityEvidence = buildPriorityEvidenceLines(retrieval, drilldownEvidence, 6);
+    const priorityEvidence = buildPriorityEvidenceLines(retrieval, drilldownEvidence, 20);
 
     const prompt = `[System]
     You are Weave's memory-native assistant.

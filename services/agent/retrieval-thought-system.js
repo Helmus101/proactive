@@ -8,7 +8,7 @@ function safeText(value) {
   }
 }
 
-function uniquePush(arr, value, limit = 7) {
+function uniquePush(arr, value, limit = 15) {
   const next = String(value || '').replace(/\s+/g, ' ').trim();
   if (!next || arr.includes(next)) return;
   arr.push(next);
@@ -399,7 +399,7 @@ function sanitizeQueryForEmbedding(text) {
     .trim();
 }
 
-function sanitizeQueryList(queries = [], max = 7) {
+function sanitizeQueryList(queries = [], max = 15) {
   const out = [];
   for (const q of Array.isArray(queries) ? queries : []) {
     const cleaned = sanitizeQueryForEmbedding(q);
@@ -543,7 +543,7 @@ function buildMessageQueriesFromBundle(bundle, { max = 5 } = {}) {
 }
 
 async function buildMultiAngleQueryBundle(baseText, {
-  max = 7,
+  max = 15,
   candidateType = '',
   appScope = [],
   sourceScope = [],
@@ -560,7 +560,7 @@ async function buildMultiAngleQueryBundle(baseText, {
     You are a retrieval query generator and router for an AI memory system. 
     Your goal is to:
     1. Decide the best source for the information: "memory" (personal history/context), "web" (public knowledge), or "hybrid" (both).
-    2. Generate exactly 7 distinct search queries for vector search across the user's memory.
+    2. Generate exactly 15 distinct search queries for vector search across the user's memory.
     
     Use Intent Decomposition and Semantic Expansion for queries:
     1. Literal: The cleaned user query.
@@ -571,14 +571,14 @@ async function buildMultiAngleQueryBundle(baseText, {
     6. Contextual: Search for the likely environment (app, site, or situation).
     7. Thematic: Search for the overarching project or topic.
     
-    Return strict JSON: {"source_mode": "memory"|"web"|"hybrid", "queries": ["query 1", "query 2", "query 3", "query 4", "query 5", "query 6", "query 7"]}
+    Return strict JSON: {"source_mode": "memory"|"web"|"hybrid", "queries": ["query 1", "query 2", "query 3", "query 4", "query 5", "query 6", "query 7", "query 8", "query 9", "query 10", "query 11", "query 12", "query 13", "query 14", "query 15"]}
     
     User Query: "${baseText.replace(/"/g, '\\"')}"
     `;
     try {
       const result = await callLLM(prompt, apiKey, 0.3);
       if (result && Array.isArray(result.queries)) {
-        finalQueries = result.queries.slice(0, 7);
+        finalQueries = result.queries.slice(0, 15);
       }
       if (result && result.source_mode) {
         llmSourceMode = result.source_mode;
@@ -589,7 +589,7 @@ async function buildMultiAngleQueryBundle(baseText, {
   }
 
   // Fallback to heuristics if LLM failed or no API key
-  if (finalQueries.length < 7) {
+  if (finalQueries.length < 15) {
     const intent = inferIntent(baseText, mode, candidateType);
     const terms = normalizeTerms(cleaned);
     const namedEntities = extractNamedEntities(baseText);
@@ -598,22 +598,22 @@ async function buildMultiAngleQueryBundle(baseText, {
     const synonyms = expandSynonyms(terms.slice(0, 3));
     const decomposition = { intent, entity, terms, clusters };
     const semanticQueries = [];
-    uniquePush(semanticQueries, cleaned, 7);
-    if (intent === 'fact') uniquePush(semanticQueries, `${entity} exact details`.trim(), 7);
-    else if (intent === 'proactive') uniquePush(semanticQueries, `${entity} next steps and actions`.trim(), 7);
-    else uniquePush(semanticQueries, `${entity} current status and progress`.trim(), 7);
-    buildCrossLayerQueries(decomposition).forEach(q => uniquePush(semanticQueries, q, 7));
+    uniquePush(semanticQueries, cleaned, 15);
+    if (intent === 'fact') uniquePush(semanticQueries, `${entity} exact details`.trim(), 15);
+    else if (intent === 'proactive') uniquePush(semanticQueries, `${entity} next steps and actions`.trim(), 15);
+    else uniquePush(semanticQueries, `${entity} current status and progress`.trim(), 15);
+    buildCrossLayerQueries(decomposition).forEach(q => uniquePush(semanticQueries, q, 15));
     if (synonyms.length > terms.length) {
       const extraSynonym = synonyms.find(s => !terms.includes(s.toLowerCase()));
-      if (extraSynonym) uniquePush(semanticQueries, `${entity} ${extraSynonym}`.trim(), 7);
+      if (extraSynonym) uniquePush(semanticQueries, `${entity} ${extraSynonym}`.trim(), 15);
     }
-    uniquePush(semanticQueries, `${entity} ${clusters[0].replace(/_/g, ' ')}`.trim(), 7);
+    uniquePush(semanticQueries, `${entity} ${clusters[0].replace(/_/g, ' ')}`.trim(), 15);
     const filler = [`${entity} recent context`, `${entity} implementation details`, `${entity} related activity`, `${entity} overview`, `${entity} background`];
     for (const f of filler) {
-      if (semanticQueries.length >= 7) break;
-      uniquePush(semanticQueries, f, 7);
+      if (semanticQueries.length >= 15) break;
+      uniquePush(semanticQueries, f, 15);
     }
-    finalQueries = semanticQueries.slice(0, 7);
+    finalQueries = semanticQueries.slice(0, 15);
   }
 
   return {
@@ -882,7 +882,7 @@ function shouldUseQuerylessMode(text, dateRange) {
   return false;
 }
 
-function fallbackSemanticQueries(text, candidateType = '', max = 7) {
+function fallbackSemanticQueries(text, candidateType = '', max = 15) {
   const cleaned = stripEmbeddingWeakTerms(stripQuestionFormatting(text));
   const terms = normalizeTerms(cleaned);
   const entity = extractNamedEntities(text)[0] || '';
@@ -898,7 +898,7 @@ function fallbackSemanticQueries(text, candidateType = '', max = 7) {
   return queries.slice(0, max);
 }
 
-function buildSearchQueries(baseText, { max = 7, candidateType = '' } = {}) {
+function buildSearchQueries(baseText, { max = 15, candidateType = '' } = {}) {
   return buildMultiAngleQueryBundle(baseText, { max, candidateType }).semantic_queries;
 }
 
@@ -957,22 +957,22 @@ async function buildRetrievalThought({
   const requiresDeepContext = /\b(relationship|pattern|habit|preference|long-term|study habits|multi-hop|recurring|theme|trend|habitual|regularly|typical)\b/i.test(mergedText || query);
 
   const structuredQueries = await buildMultiAngleQueryBundle(mergedText || query, {
-    max: 7,
+    max: 15,
     candidateType,
     appScope: apps,
     sourceScope: hardSourceTypes || preferredSourceTypes || [],
     mode,
     deepScan: requiresDeepContext
   });
-  let semanticQueries = Array.isArray(structuredQueries?.semantic_queries) && structuredQueries.semantic_queries.length === 7
+  let semanticQueries = Array.isArray(structuredQueries?.semantic_queries) && structuredQueries.semantic_queries.length === 15
     ? structuredQueries.semantic_queries
-    : sanitizeQueryList(structuredQueries?.semantic_queries || [], 7);
+    : sanitizeQueryList(structuredQueries?.semantic_queries || [], 15);
   
-  if (semanticQueries.length < 7) {
-    const filler = sanitizeQueryList(fallbackSemanticQueries(mergedText || query, candidateType, 7), 7);
+  if (semanticQueries.length < 15) {
+    const filler = sanitizeQueryList(fallbackSemanticQueries(mergedText || query, candidateType, 15), 15);
     for (const q of filler) {
-      uniquePush(semanticQueries, q, 7);
-      if (semanticQueries.length >= 7) break;
+      uniquePush(semanticQueries, q, 15);
+      if (semanticQueries.length >= 15) break;
     }
   }
   
@@ -992,8 +992,8 @@ async function buildRetrievalThought({
     safeUnique([
       ...(structuredQueries?.semantic_queries || []),
       ...fallbackSemanticQueries(mergedText || query, candidateType, 5)
-    ], 7),
-    7
+    ], 15),
+    15
   );
 
   const querySets = {
@@ -1011,8 +1011,8 @@ async function buildRetrievalThought({
   reasoning.push(`Intent: ${intent}.`);
   reasoning.push(`Entry mode: ${entryMode}.`);
   reasoning.push(`Router source mode: ${strategyMode}.`);
-  reasoning.push('Mode: Agentic Retrieval Router (LLM-based source selection + 7-Query Batch).');
-  reasoning.push('Batching: Enforced strict 7-query limit.');
+  reasoning.push('Mode: Agentic Retrieval Router (LLM-based source selection + 15-Query Batch).');
+  reasoning.push('Batching: Enforced strict 15-query limit.');
   reasoning.push(`Summary mode: ${summaryVsRaw === 'raw' ? 'raw evidence retrieval' : 'bounded summary retrieval'}.`);
   if (apps.length) reasoning.push(`App hints: ${apps.join(', ')}.`);
   if (hardSourceTypes?.length) reasoning.push(`Hard source scope: ${hardSourceTypes.join(', ')}.`);
@@ -1070,9 +1070,9 @@ async function buildRetrievalThought({
       attempted: false,
       widened: false
     },
-    seed_limit: 20,
+    seed_limit: 30,
     hop_limit: 10,
-    context_budget_tokens: mode === 'suggestion' ? 1200 : 2000,
+    context_budget_tokens: mode === 'suggestion' ? 1200 : 4000,
     search_queries: semanticQueries,
     search_queries_messages: messageQueries,
     web_queries: webQueries,
