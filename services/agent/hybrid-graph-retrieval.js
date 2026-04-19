@@ -1058,7 +1058,7 @@ async function buildHybridGraphRetrieval({
     score: Number((seed.rerank_score || seed.fused_score || seed.base_score || 0).toFixed(6)),
     reason: seed.match_reason,
     source_refs: seed.source_refs || []
-  }));
+  })).filter(n => n.layer === 'episode' || n.layer === 'semantic');
   const supportNodes = Array.from(new Map([
     ...((Array.isArray(graph.supportNodes) ? graph.supportNodes : []).map((item) => [item.id, item])),
     ...(primaryNodes
@@ -1235,7 +1235,7 @@ async function buildHybridGraphRetrieval({
     reason: row.match_reason,
     source_refs: row.source_refs || [],
     text: String(row.text || '').slice(0, 8000)
-  }));
+  })).filter(n => !['core', 'insight', 'cloud'].includes(n.layer));
 
   const traceSummary = [
     `Mode: ${retrievalPlan.mode}`,

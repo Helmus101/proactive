@@ -9,7 +9,7 @@ function graphDerivation() {
   return require('./graph-derivation');
 }
 const { upsertMemoryNode, updateMemoryNode, upsertMemoryEdge, upsertRetrievalDoc } = require('./graph-store');
-const { generateEmbedding } = require('../embedding-engine');
+const { generateEmbedding, cosineSimilarity } = require('../embedding-engine');
 
 const DEEPSEEK_ENDPOINT = 'https://api.deepseek.com/v1/chat/completions';
 let lastAiParseLogAt = 0;
@@ -804,6 +804,138 @@ Return strict JSON:
   }
 }
 
+async function runHourlySemanticPulse(apiKey) {
+  try {
+    const gd = graphDerivation();
+    const since = new Date(Date.now() - 75 * 60 * 1000).toISOString();
+    
+    const rows = await db.allQuery(
+      `SELECT * FROM memory_nodes WHERE layer = 'semantic' AND created_at >= ?`,
+      [since]
+    ).catch(() => []);
+    
+    if (!rows.length) return [];
+
+    const nodes = rows.map(r => ({
+      ...r,
+      metadata: typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata,
+      source_refs: typeof r.source_refs === 'string' ? JSON.parse(r.source_refs) : r.source_refs,
+      embedding: typeof r.embedding === 'string' ? JSON.parse(r.embedding) : r.embedding
+    }));
+
+    const mergedIds = new Set();
+    const consolidatedNodes = [];
+
+    for (let i = 0; i < nodes.length; i++) {
+      if (mergedIds.has(nodes[i].id)) continue;
+      let current = nodes[i];
+      
+      for (let j = i + 1; j < nodes.length; j++) {
+        if (mergedIds.has(nodes[j].id)) continue;
+        
+        const sim = (current.embedding && nodes[j].embedding) 
+          ? cosineSimilarity(current.embedding, nodes[j].embedding)
+          : 0;
+          
+        const sameTitle = String(current.title).toLowerCase() === String(nodes[j].title).toLowerCase();
+        
+        let match = false;
+        if (sameTitle && current.subtype === nodes[j].subtype) match = true;
+        if (sim > 0.92 && current.subtype === nodes[j].subtype) {
+          if (current.subtype === 'task' && !sameTitle && sim < 0.96) {
+             // tasks need higher similarity if titles differ
+          } else {
+             match = true;
+          }
+        }
+
+        if (match) {
+          mergedIds.add(nodes[j].id);
+          current.source_refs = Array.from(new Set([...(current.source_refs || []), ...(nodes[j].source_refs || [])])).slice(0, 64);
+          current.confidence = Math.max(current.confidence, nodes[j].confidence);
+          
+          await db.runQuery(`DELETE FROM memory_nodes WHERE id = ?`, [nodes[j].id]).catch(() => {});
+          await db.runQuery(`UPDATE memory_edges SET from_node_id = ? WHERE from_node_id = ?`, [current.id, nodes[j].id]).catch(() => {});
+          await db.runQuery(`UPDATE memory_edges SET to_node_id = ? WHERE to_node_id = ?`, [current.id, nodes[j].id]).catch(() => {});
+        }
+      }
+      
+      await updateMemoryNode(current.id, {
+        sourceRefs: current.source_refs,
+        confidence: current.confidence,
+        metadata: current.metadata
+      });
+      consolidatedNodes.push(current);
+    }
+
+    const episodeIds = Array.from(new Set(consolidatedNodes.map(n => n.metadata?.episode_id).filter(Boolean)));
+    if (episodeIds.length) {
+      const episodeRows = await db.allQuery(
+        `SELECT * FROM memory_nodes WHERE id IN (${episodeIds.map(() => '?').join(',')})`,
+        episodeIds
+      ).catch(() => []);
+      
+      const episodes = episodeRows.map(r => {
+        const ep = {
+          ...r,
+          metadata: typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata,
+          source_refs: typeof r.source_refs === 'string' ? JSON.parse(r.source_refs) : r.source_refs,
+          embedding: typeof r.embedding === 'string' ? JSON.parse(r.embedding) : r.embedding
+        };
+        ep.semanticNodes = consolidatedNodes.filter(n => n.metadata?.episode_id === ep.id);
+        ep.participants = ep.metadata?.participants || [];
+        ep.topics = ep.metadata?.topics || [];
+        ep.domains = ep.metadata?.domains || [];
+        ep.end = ep.metadata?.end || ep.created_at;
+        ep.start = ep.metadata?.start || ep.created_at;
+        return ep;
+      });
+
+      const clouds = gd.deriveClouds(episodes);
+      const version = 'zero_base_memory_v1:current';
+      
+      for (const cloud of clouds) {
+        const cloudNode = await gd.writeHigherLayerNode(cloud, version);
+        for (const epId of cloud.metadata?.supporting_episode_ids || []) {
+          await upsertMemoryEdge({
+            fromNodeId: epId,
+            toNodeId: cloudNode.id,
+            edgeType: 'HYPOTHESIZES_FROM',
+            weight: cloudNode.confidence,
+            traceLabel: cloudNode.title,
+            evidenceCount: Number(cloudNode.metadata?.repeated_count || 1)
+          });
+        }
+        for (const semId of cloud.metadata?.supporting_semantic_ids || []) {
+          await upsertMemoryEdge({
+            fromNodeId: semId,
+            toNodeId: cloudNode.id,
+            edgeType: 'ABSTRACTED_TO',
+            weight: cloudNode.confidence,
+            traceLabel: 'Semantic node abstracted to recurring cloud pattern'
+          });
+        }
+      }
+
+      const insights = gd.deriveInsights(clouds);
+      for (const insight of insights) {
+        const insightNode = await gd.writeHigherLayerNode(insight, version);
+        await upsertMemoryEdge({
+          fromNodeId: insight.metadata?.promoted_from_cloud_id,
+          toNodeId: insightNode.id,
+          edgeType: 'PROMOTED_FROM',
+          weight: insightNode.confidence,
+          traceLabel: 'Promoted into durable insight'
+        });
+      }
+    }
+    return consolidatedNodes.map(n => n.id);
+  } catch (e) {
+    console.warn('[runHourlySemanticPulse] failed:', e?.message || e);
+    return [];
+  }
+}
+
 async function buildGlobalGraph() {
   const result = await graphDerivation().deriveGraphFromEvents({
     versionSeed: 'current'
@@ -833,5 +965,6 @@ module.exports = {
   runWeeklyInsightJob,
   runDailyInsights,
   runLivingCoreJob,
+  runHourlySemanticPulse,
   buildGlobalGraph
 };
