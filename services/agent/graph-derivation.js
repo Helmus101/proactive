@@ -801,6 +801,16 @@ async function writeEpisodeGroup(group, version) {
   const anchorAt = isoFromTs(group.anchorTs || group.startTs);
   const startAt = isoFromTs(group.startTs);
   const latestActivityAt = isoFromTs(group.latestTs);
+  const eventIds = group.events.map((e) => e.id).sort();
+  const contextHash = stableHash(eventIds.join(','));
+  const uniqueContextCount = new Set([
+    ...group.events.map(e => e.app).filter(Boolean),
+    ...group.events.map(e => e.domain).filter(Boolean)
+  ]).size;
+  const focusScore = group.events.length > 0
+    ? Math.max(0, 1 - (uniqueContextCount / group.events.length))
+    : 1.0;
+
   const episodeData = {
     title: summary.title,
     summary: summary.summary,
@@ -822,7 +832,9 @@ async function writeEpisodeGroup(group, version) {
     start: startAt,
     end: latestActivityAt,
     latest_activity_at: latestActivityAt,
-    event_count: group.events.length
+    event_count: group.events.length,
+    context_hash: contextHash,
+    focus_score: focusScore
   };
 
   const embedding = await embedText(buildRetrievalDocText({
@@ -1302,5 +1314,9 @@ module.exports = {
   buildDerivedVersion,
   deriveGraphFromEvents,
   envelopeFromRow,
-  clusterEnvelopes
+  clusterEnvelopes,
+  deriveClouds,
+  deriveInsights,
+  deriveSemanticGroups,
+  writeHigherLayerNode
 };

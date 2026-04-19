@@ -64,6 +64,19 @@ let semanticsTimer = null;
 let dailyInsightTimer = null;
 let weeklyInsightTimer = null;
 let livingCoreTimer = null;
+  }
+  if (semanticsPulseTimer) {
+    clearInterval(semanticsPulseTimer);
+    semanticsPulseTimer = null;
+  }
+  if (semanticsPulseTimer) {
+    clearInterval(semanticsPulseTimer);
+    semanticsPulseTimer = null;
+  }
+  if (semanticsPulseTimer) {
+    clearInterval(semanticsPulseTimer);
+    semanticsPulseTimer = null;
+let semanticsPulseTimer = null;
 let episodeJobLock = false;
 let suggestionJobLock = false;
 let lastSuggestionLockSkipLogAt = 0;
@@ -1933,6 +1946,31 @@ async function runDailyInsightsScheduled() {
   }
 }
 
+
+async function runHourlySemanticPulseJob() {
+  try {
+    const apiKey = process.env.DEEPSEEK_API_KEY;
+    if (!apiKey) {
+      console.warn('[SemanticPulse] No DeepSeek API key, skipping hourly pulse');
+      return;
+    }
+    console.log('[SemanticPulse] Running hourly semantic pulse (deduplication & graduation)...');
+    const { runHourlySemanticPulse } = require('./services/agent/intelligence-engine');
+    const consolidatedIds = await runHourlySemanticPulse(apiKey);
+    console.log(`[SemanticPulse] Consolidated ${consolidatedIds.length} semantic nodes`);
+    
+    if (mainWindow && mainWindow.webContents) {
+      mainWindow.webContents.send('memory-graph-update', {
+        type: 'hourly_pulse_completed',
+        count: consolidatedIds.length,
+        timestamp: Date.now()
+      });
+    }
+  } catch (e) {
+    console.error('[SemanticPulse] Error:', e?.message || e);
+  }
+}
+
 async function runLivingCoreJobScheduled() {
   try {
     const apiKey = process.env.DEEPSEEK_API_KEY;
@@ -1996,6 +2034,21 @@ function startMemoryGraphProcessing() {
     semanticsTimer = setInterval(runSemanticWindowGeneration, 15 * 60 * 1000);
   }
   
+
+    // Hourly semantic pulse aligned to the hour boundary (:00)
+    try {
+      if (semanticsPulseTimer) try { clearInterval(semanticsPulseTimer); } catch (_) {}
+      const hourMs = 60 * 60 * 1000;
+      const nextHour = Math.ceil(Date.now() / hourMs) * hourMs;
+      const hourDelay = Math.max(1000, nextHour - Date.now());
+      setTimeout(() => {
+        runHourlySemanticPulseJob().catch((e) => console.warn('[MemoryGraph] Aligned semantic pulse failed:', e?.message || e));
+        try { semanticsPulseTimer = setInterval(runHourlySemanticPulseJob, hourMs); } catch (_) {}
+      }, hourDelay);
+    } catch (e) {
+      console.warn('[MemoryGraph] Failed to schedule aligned hourly pulse:', e?.message || e);
+    }
+
   // Suggestion engine every 30 minutes
   if (suggestionEngineTimer) clearInterval(suggestionEngineTimer);
   suggestionEngineTimer = setInterval(runSuggestionEngineJob, SUGGESTION_REFRESH_INTERVAL_MINUTES * 60 * 1000);
@@ -2087,6 +2140,10 @@ function stopMemoryGraphProcessing() {
   if (livingCoreTimer) {
     clearTimeout(livingCoreTimer);
     livingCoreTimer = null;
+  }
+  if (semanticsPulseTimer) {
+    clearInterval(semanticsPulseTimer);
+    semanticsPulseTimer = null;
   }
   console.log('[MemoryGraph] Automated processing stopped');
 }
