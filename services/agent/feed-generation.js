@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const db = require('../db');
-const { callDeepSeek } = require('./intelligence-engine');
+const { callLLM } = require('./intelligence-engine');
 const { buildHybridGraphRetrieval } = require('./hybrid-graph-retrieval');
 const { mineProactiveOpportunities } = require('./opportunity-miner');
 
@@ -321,7 +321,7 @@ ${graphContext.contextText || 'None'}
 Current JSON:
 ${JSON.stringify(payload || {}, null, 2)}
 `;
-  const rewritten = await callDeepSeek(rewritePrompt, apiKey, 0.15).catch(() => null);
+  const rewritten = await callLLM(rewritePrompt, apiKey, 0.15).catch(() => null);
   return (rewritten && !Array.isArray(rewritten) && typeof rewritten === 'object') ? rewritten : payload;
 }
 
@@ -1049,7 +1049,7 @@ Recent 24h recall:
 ${recentRecall.map((r) => `- [${r.source}] ${r.text} (${r.timestamp})`).join('\n') || 'None'}
 `;
 
-  let payload = await callDeepSeek(prompt, apiKey, 0.2);
+  let payload = await callLLM(prompt, apiKey, 0.2);
   if (!payload || Array.isArray(payload) || (typeof payload === 'object' && !Object.keys(payload).length)) {
     return fallbackSuggestion(seed, graphContext, now, options);
   }

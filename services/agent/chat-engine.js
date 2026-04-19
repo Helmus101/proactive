@@ -1,5 +1,6 @@
 const db = require('../db');
 const { ingestRawEvent } = require('../ingestion');
+const { callLLM } = require('./intelligence-engine');
 const { buildHybridGraphRetrieval } = require('./hybrid-graph-retrieval');
 const { buildRetrievalThought, widenTemporalWindow, inferSurfaceFamilies } = require('./retrieval-thought-system');
 
@@ -1131,26 +1132,10 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     ${query}`;
 
     try {
-      const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`
-        },
-        body: JSON.stringify({
-          model: 'deepseek-chat',
-          messages: [{ role: 'user', content: prompt }],
-          temperature: 0.22,
-          max_tokens: 980
-        })
-      });
-
-      if (!response.ok) {
-        const body = await response.text().catch(() => '');
-        throw new Error(`LLM request failed (${response.status})${body ? `: ${body.slice(0, 180)}` : ''}`);
+      content = await callLLM(prompt, apiKey, 0.22);
+      if (!content) {
+        content = "I couldn't produce an answer from the current memory context.";
       }
-      const data = await response.json().catch(() => ({}));
-      content = data?.choices?.[0]?.message?.content || content;
     } catch (llmError) {
       content = buildGroundedFallbackAnswer(query, retrieval, drilldownEvidence);
     }
