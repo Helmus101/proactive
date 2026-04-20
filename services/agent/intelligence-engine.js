@@ -1,7 +1,6 @@
 const crypto = require('crypto');
 const db = require('../db');
-const Store = require('electron-store');
-const store = new Store();
+
 // Lazy require graph-derivation to avoid circular require/initialization order issues
 function graphDerivation() {
   // require on demand to break cyclic module dependencies
@@ -36,22 +35,27 @@ async function updateLlmMetrics(cached = false) {
   }
 }
 
-async function pruneLlmCache() {
+async function pruneKVCache(type = 'llm_response', maxSize = MAX_CACHE_SIZE) {
   try {
-    // Basic pruning: keep it under MAX_CACHE_SIZE by deleting oldest LLM responses
-    const countRow = await db.getQuery("SELECT COUNT(*) as count FROM kv_cache WHERE type = 'llm_response'");
-    if (countRow && countRow.count > MAX_CACHE_SIZE) {
-      const toDelete = countRow.count - MAX_CACHE_SIZE;
+    const countRow = await db.getQuery('SELECT COUNT(*) as count FROM kv_cache WHERE type = ?', [type]);
+    if (countRow && countRow.count > maxSize) {
+      const toDelete = countRow.count - maxSize;
       await db.runQuery(
         `DELETE FROM kv_cache WHERE key IN (
-          SELECT key FROM kv_cache WHERE type = 'llm_response' ORDER BY created_at ASC LIMIT ?
+          SELECT key FROM kv_cache WHERE type = ? ORDER BY created_at ASC LIMIT ?
         )`,
-        [toDelete]
+        [type, toDelete]
       );
     }
   } catch (e) {
-    console.warn('[Intelligence] Cache pruning failed:', e.message);
+    console.warn(`[Intelligence] Cache pruning failed for type ${type}:`, e.message);
   }
+}
+
+async function pruneLlmCache() {
+  await pruneKVCache('llm_response', MAX_CACHE_SIZE);
+  // Also prune embeddings if they grow too large
+  await pruneKVCache('embedding', 2000); 
 }
 
 function cleanModelJsonText(raw = '') {

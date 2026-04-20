@@ -848,7 +848,7 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
 
   try {
     await db.runQuery(
-      `INSERT OR REPLACE INTO events
+      `INSERT OR IGNORE INTO events
        (id, type, timestamp, date, source, source_type, source_account, occurred_at, ingested_at, observation_time, event_time, app, window_title, url, domain, participants, title, raw_text, redacted_text, source_ref, text, metadata)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
