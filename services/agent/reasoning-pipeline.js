@@ -1,242 +1,324 @@
 /**
- * Deliberate Reasoning Pipeline
+ * Deliberate 6-Stage Reasoning Pipeline
  *
- * Implements a staged reasoning stack for proactive suggestions:
- * 1. Router: Decide query type (memory-first, web-first, hybrid)
- * 2. Planner: Decompose query into subproblems and retrieval plans
- * 3. Retriever: Search memory/web and expand via edges
- * 4. Judge: Score relevance, confidence, completeness
- * 5. Synthesizer: Produce final answer/suggestion with evidence
- * 6. Reflector: Check for gaps, contradictions, revise if needed
+ * Implements a fast, credit-efficient reasoning stack for chat:
+ * 1. Thinking: Strategic plan, routing, and query decomposition.
+ * 2. Initial Search: Parallel vector search for memory/web seeds.
+ * 3. Node Expansion: Graph traversal and context enrichment.
+ * 4. Judge: Evaluate context sufficiency.
+ * 5. Reflect: Self-correction, gap detection, and contradiction check.
+ * 6. Synthesis: Final conversational answer generation.
  */
 
-const { buildRetrievalThought } = require('./retrieval-thought-system');
 const { buildHybridGraphRetrieval } = require('./hybrid-graph-retrieval');
+const { buildRetrievalThought, widenTemporalWindow } = require('./retrieval-thought-system');
+const db = require('../db');
 
 // Lazy require to avoid circular dependency
-function callLLM() {
-  return require('./intelligence-engine').callLLM;
+function getIntelligence() {
+  return require('./intelligence-engine');
 }
 
 class ReasoningPipeline {
   constructor() {
-    this.stages = ['router', 'planner', 'retriever', 'judge', 'synthesizer', 'reflector'];
+    this.stages = [
+      'thinking',
+      'initialSearch',
+      'nodeExpansion',
+      'judge',
+      'reflect',
+      'synthesis'
+    ];
   }
 
-  async run(context) {
-    console.log('[ReasoningPipeline] Starting pipeline for context:', context.query || context.mode);
+  async run(context, onStep) {
+    const emit = (data) => {
+      if (onStep) {
+        onStep(data);
+      }
+    };
+
+    console.log('[ReasoningPipeline] Starting pipeline for query:', context.query);
+    context.stageTrace = [];
+    context.allEvidence = [];
+    
+    const startTime = Date.now();
 
     for (const stage of this.stages) {
       try {
+        const stageStartTime = Date.now();
         console.log(`[ReasoningPipeline] Executing stage: ${stage}`);
-        context = await this[stage](context);
-        if (context.error) {
-          console.warn(`[ReasoningPipeline] Stage ${stage} failed:`, context.error);
-          break; // Skip to reflector or end
-        }
+        
+        const result = await this[stage](context, emit);
+        context = { ...context, ...result };
+        
+        const duration = Date.now() - stageStartTime;
       } catch (error) {
         console.error(`[ReasoningPipeline] Error in stage ${stage}:`, error);
         context.error = error.message;
-        break;
+        if (stage === 'synthesis') throw error; 
       }
     }
 
-    console.log('[ReasoningPipeline] Pipeline complete');
+    context.totalDuration = Date.now() - startTime;
     return context;
   }
 
   /**
-   * Router: Decide whether query is memory-first, web-first, or hybrid
+   * Stage 1: Thinking (Strategic Plan)
    */
-  async router(context) {
-    const { query, mode, candidate } = context;
+  async thinking(context, emit) {
+    const { query, options } = context;
+    const { callLLM } = getIntelligence();
 
-    // Simple heuristic: if query mentions "recent" or personal terms, memory-first
-    // If "search" or external info, web-first
-    // Else hybrid
-    const queryLower = (query || '').toLowerCase();
-    let routingMode = 'hybrid';
+    const emitStage = (step, status, overrides = {}) => {
+      emit({
+        step,
+        status,
+        label: overrides.label || step.replace(/_/g, ' '),
+        ...overrides
+      });
+    };
 
-    if (queryLower.includes('my') || queryLower.includes('i ') || queryLower.includes('recent') || mode === 'proactive') {
-      routingMode = 'memory-first';
-    } else if (queryLower.includes('search') || queryLower.includes('find online') || queryLower.includes('web')) {
-      routingMode = 'web-first';
-    }
-
-    context.routingMode = routingMode;
-    console.log(`[Router] Decided mode: ${routingMode}`);
-    return context;
-  }
-
-  /**
-   * Planner: Generate subquestions and decide search queries
-   */
-  async planner(context) {
-    const { query, routingMode } = context;
-
-    // Use retrieval-thought-system to build plan
-    const retrievalThought = await buildRetrievalThought({
-      query,
-      mode: routingMode,
-      candidate: context.candidate || {}
+    emitStage('routing', 'started');
+    const { runRouterStage } = require('./chat-engine');
+    const { baseThought, retrievalQuery, chatHistory } = await runRouterStage({ query, options });
+    
+    emitStage('routing', 'completed', {
+      detail: `Source mode: ${baseThought.source_mode || baseThought.strategy_mode || 'memory_only'}.`,
+      preview_items: [baseThought.source_mode, baseThought.time_scope?.label].filter(Boolean)
     });
 
-    context.plan = {
-      subquestions: retrievalThought.queries || [],
-      temporalWindows: retrievalThought.temporalWindows || [],
-      apps: retrievalThought.apps || [],
-      sourceTypes: retrievalThought.sourceTypes || []
+    emitStage('planning', 'started');
+    let plan = {
+      reasoning_plan: ['Analyze query', 'Retrieve context', 'Synthesize answer'],
+      refined_queries: baseThought.semantic_queries || [retrievalQuery],
+      web_queries: baseThought.web_queries || [],
+      evidence_criteria: 'Relevant memory nodes'
     };
 
-    // Fallback: if no subquestions, generate basic ones from query
-    if (context.plan.subquestions.length === 0) {
-      const words = query.toLowerCase().split(/\s+/).filter(w => w.length > 3);
-      context.plan.subquestions = words.slice(0, 3).map(w => `${query} related to ${w}`);
+    if (options?.apiKey) {
+      const prompt = `[System]
+You are an expert retrieval planner for a memory-native AI assistant. 
+Decompose the user query into a formal execution plan.
+
+[User Query]
+${retrievalQuery}
+
+[Router Output]
+${JSON.stringify(baseThought, null, 2)}
+
+[Instruction]
+Return a strict JSON object:
+{
+  "reasoning_plan": ["step 1", "step 2"],
+  "refined_queries": ["query 1", "query 2"],
+  "web_queries": ["query 1"],
+  "evidence_criteria": "description"
+}
+Return only valid JSON.`;
+
+      const llmPlan = await callLLM(prompt, options.apiKey, 0.2, { 
+        economy: true, 
+        task: 'routing',
+        maxTokens: 600
+      });
+      if (llmPlan) plan = llmPlan;
     }
 
-    console.log(`[Planner] Generated plan with ${context.plan.subquestions.length} subquestions`);
-    return context;
+    emitStage('planning', 'completed', {
+      detail: plan ? 'Created a formal execution plan.' : 'Using default plan.',
+      preview_items: plan?.reasoning_plan || []
+    });
+
+    return {
+      baseThought,
+      retrievalQuery,
+      chatHistory,
+      plan,
+      routingMode: baseThought.source_mode || 'hybrid',
+      memoryQueries: plan?.refined_queries || baseThought.semantic_queries || [retrievalQuery],
+      webQueries: plan?.web_queries || baseThought.web_queries || []
+    };
   }
 
   /**
-   * Retriever: Search memory/web, expand via edges
+   * Stage 2: Initial Search (Vector Search)
    */
-  async retriever(context) {
-    const { plan, routingMode } = context;
+  async initialSearch(context, emit) {
+    const { memoryQueries, routingMode, baseThought, options, retrievalQuery } = context;
+    if (routingMode === 'web_only') return { seeds: [], retrieved: { nodes: [] } };
 
-    // For now, focus on memory retrieval
-    const retrievalResults = [];
+    emit({ step: 'retrieving', status: 'started', label: 'Retrieving' });
+    
+    const { executeParallelRetrieval } = require('./chat-engine');
+    const retrieval = await executeParallelRetrieval(retrievalQuery, {
+      ...baseThought,
+      semantic_queries: memoryQueries
+    }, {
+      mode: 'chat',
+      app: options?.app,
+      date_range: baseThought.applied_date_range || options?.date_range,
+      retrieval_thought: baseThought,
+      passiveOnly: true 
+    }, emit);
 
-    for (const subquery of plan.subquestions) {
-      try {
-        const result = await buildHybridGraphRetrieval({
-          query: subquery,
-          mode: routingMode,
-          limit: 10
-        });
-        retrievalResults.push(...(result.nodes || []));
-      } catch (error) {
-        console.warn(`[Retriever] Error retrieving for ${subquery}:`, error.message);
-        // Continue with empty results
-      }
-    }
-
-    // Expand edges: get related nodes
-    const expanded = [];
-    for (const node of retrievalResults) {
-      // Simple expansion: get neighbors
-      expanded.push(node);
-      // TODO: Implement edge expansion
-    }
-
-    context.retrieved = {
-      nodes: expanded,
-      edges: [], // TODO
-      webResults: routingMode === 'web-first' ? [] : null // TODO: Integrate web search
-    };
-
-    console.log(`[Retriever] Retrieved ${context.retrieved.nodes.length} nodes`);
-    return context;
+    return { seeds: retrieval.seed_nodes || [], retrieval, retrieved: { nodes: retrieval.evidence || [] } };
   }
 
   /**
-   * Judge: Score relevance, confidence, completeness
+   * Stage 3: Node Expansion (Graph Traversal)
    */
-  async judge(context) {
-    const { retrieved, query } = context;
+  async nodeExpansion(context, emit) {
+    let { retrieval, retrievalQuery, baseThought, options, routingMode, webQueries } = context;
+    
+    const { retrievalLooksSparse, executeParallelRetrieval, searchFreeWeb, fetchDrilldownEvidence } = require('./chat-engine');
 
-    // Simple scoring: relevance based on similarity, confidence on node count
-    let totalRelevance = 0;
-    let totalConfidence = 0;
-
-    for (const node of retrieved.nodes) {
-      // TODO: Implement proper scoring
-      totalRelevance += 0.8; // Placeholder
-      totalConfidence += node.confidence || 0.5;
+    if (routingMode !== 'web_only' && retrievalLooksSparse(retrieval)) {
+      retrieval = await executeParallelRetrieval(retrievalQuery, baseThought, {
+        mode: 'chat',
+        app: options?.app,
+        date_range: baseThought.applied_date_range || options?.date_range,
+        retrieval_thought: baseThought,
+        passiveOnly: false
+      }, emit);
     }
 
-    const avgRelevance = retrieved.nodes.length > 0 ? totalRelevance / retrieved.nodes.length : 0;
-    const avgConfidence = retrieved.nodes.length > 0 ? totalConfidence / retrieved.nodes.length : 0;
-    const completeness = Math.min(retrieved.nodes.length / 5, 1); // Scale with expected results
+    let webResults = [];
+    const { assessWebSearchNecessity } = require('./chat-engine');
+    const webAssessment = assessWebSearchNecessity(context.query, baseThought, retrieval);
+    if (webAssessment.shouldSearchWeb || routingMode === 'web_only') {
+      const wq = webQueries?.[0] || retrievalQuery;
+      emit({ step: 'web_search', status: 'started', label: 'Web search', detail: `Searching the web for: ${wq}` });
+      webResults = await searchFreeWeb(wq, 4);
+      emit({ step: 'web_search', status: 'completed', counts: { web_results: webResults.length } });
+    }
 
-    context.judgment = {
-      relevance: avgRelevance,
-      confidence: avgConfidence,
-      completeness: completeness,
-      sufficient: avgRelevance > 0.7 && completeness > 0.5
+    const drilldownEvidence = (retrieval.drilldown_refs || []).length
+      ? await fetchDrilldownEvidence(retrieval.drilldown_refs || [])
+      : [];
+
+    return { 
+      retrieval, 
+      webResults, 
+      drilldownEvidence,
+      expandedContext: [...(retrieval.evidence || []), ...webResults],
+      retrieved: { nodes: [...(retrieval.evidence || []), ...webResults] }
     };
-
-    console.log(`[Judge] Scored: relevance=${avgRelevance.toFixed(2)}, confidence=${avgConfidence.toFixed(2)}, sufficient=${context.judgment.sufficient}`);
-    return context;
   }
 
   /**
-   * Synthesizer: Produce final answer with evidence and uncertainty
+   * Stage 4: Judge (Evidence Evaluation)
    */
-  async synthesizer(context) {
-    const { query, retrieved, judgment } = context;
+  async judge(context, emit) {
+    const { retrievalQuery, expandedContext, options, plan } = context;
+    const { runJudgeStage } = require('./chat-engine');
 
-    if (!judgment.sufficient) {
-      context.synthesized = {
-        answer: 'Insufficient information to provide a confident response.',
-        evidence: [],
-        confidence: 0.3
-      };
-      return context;
-    }
+    emit({ step: 'judging', status: 'started', label: 'Judging' });
+    const judgment = await runJudgeStage({ 
+      query: retrievalQuery, 
+      plan, 
+      evidence: expandedContext, 
+      apiKey: options?.apiKey 
+    });
+    
+    emit({ 
+      step: 'judging', 
+      status: 'completed', 
+      detail: judgment.reason,
+      status: judgment.sufficient ? 'completed' : 'retry'
+    });
 
-    // Use LLM to synthesize
-    const prompt = `Based on the following retrieved information, answer the query: "${query}"
-
-Retrieved nodes:
-${retrieved.nodes.map(n => `- ${n.title || n.summary}`).join('\n')}
-
-Provide a concise answer with evidence and confidence level.`;
-
-    const llmResponse = await callLLM(prompt, { maxTokens: 500 });
-
-    context.synthesized = {
-      answer: llmResponse.text || 'Unable to synthesize answer.',
-      evidence: retrieved.nodes.slice(0, 3), // Top evidence
-      confidence: judgment.confidence,
-      trace: {
-        goal: query,
-        assumptions: ['Retrieved info is relevant'],
-        evidence: retrieved.nodes,
-        conclusion: llmResponse.text,
-        confidence: judgment.confidence
-      }
-    };
-
-    console.log(`[Synthesizer] Generated answer with confidence ${judgment.confidence.toFixed(2)}`);
-    return context;
+    return { judgment };
   }
 
   /**
-   * Reflector: Check for missing links, contradictions, revise
+   * Stage 5: Reflect (Self-Correction)
    */
-  async reflector(context) {
-    const { synthesized, judgment } = context;
+  async reflect(context, emit) {
+    const { retrievalQuery, expandedContext, options, judgment } = context;
+    const { callLLM } = getIntelligence();
 
-    // Check for contradictions or gaps
-    const contradictions = []; // TODO: Detect contradictions in evidence
-    const missingLinks = judgment.completeness < 0.8 ? ['More context needed'] : [];
+    if (!options?.apiKey) return { reflection: { approved: true, ok: true } };
 
-    if (contradictions.length > 0 || missingLinks.length > 0) {
-      console.log(`[Reflector] Found issues: contradictions=${contradictions.length}, missing=${missingLinks.length}`);
-      // Revise: Perhaps re-run retriever with broader query
-      context.reflection = {
-        contradictions,
-        missingLinks,
-        revised: true // Flag for future revision
-      };
-      // For now, just log
+    emit({ step: 'reflecting', status: 'started', label: 'Reflecting' });
+    
+    const contextSnippet = expandedContext.slice(0, 15).map(e => String(e.text || e.title || '').slice(0, 200)).join('\n');
+
+    const prompt = `[System]
+You are a critical reflector. Analyze the retrieved evidence and query.
+Identify any contradictions or missing links in the context that might lead to a wrong answer.
+
+[User Query]
+${retrievalQuery}
+
+[Evidence]
+${contextSnippet}
+
+[Instruction]
+Return strict JSON:
+{
+  "approved": boolean,
+  "critique": "detailed feedback",
+  "reason": "summary"
+}
+Return only valid JSON.`;
+
+    const reflection = await callLLM(prompt, options.apiKey, 0.1, {
+      economy: true,
+      task: 'routing',
+      maxTokens: 500
+    });
+
+    emit({ step: 'reflecting', status: 'completed', detail: reflection?.reason || 'Self-reflection complete.' });
+    
+    const res = reflection || { approved: true };
+    return { reflection: { ...res, ok: res.approved } };
+  }
+
+  /**
+   * Stage 6: Synthesis (Final Answer)
+   */
+  async synthesis(context, emit) {
+    const { query, retrieval, chatHistory, options, drilldownEvidence, webResults, reflection } = context;
+    const { runSynthesizerStage, runReflectorStage, buildGroundedFallbackAnswer } = require('./chat-engine');
+
+    emit({ step: 'synthesis', status: 'started', label: 'Synthesis' });
+
+    const standingNotes = options?.standing_notes || options?.core_memory || '';
+    
+    let content = null;
+    if (options?.apiKey) {
+      content = await runSynthesizerStage({
+        query,
+        retrieval,
+        chatHistory,
+        standingNotes,
+        drilldownEvidence,
+        webResults,
+        apiKey: options?.apiKey,
+        reflectorFeedback: reflection?.approved ? null : reflection
+      });
     } else {
-      context.reflection = { ok: true };
+      content = buildGroundedFallbackAnswer(query, retrieval, drilldownEvidence);
     }
 
-    console.log('[Reflector] Reflection complete');
-    return context;
+    const finalReflection = options?.apiKey ? await runReflectorStage({
+      query,
+      evidence: [...(retrieval.evidence || []), ...webResults],
+      answer: content,
+      apiKey: options?.apiKey
+    }) : { approved: true, ok: true };
+
+    emit({ step: 'synthesis', status: 'completed' });
+
+    const synthesized = {
+      answer: content,
+      evidence: (retrieval.evidence || []).slice(0, 3),
+      confidence: 0.8
+    };
+
+    return { content, reflection: finalReflection, synthesized };
   }
 }
 

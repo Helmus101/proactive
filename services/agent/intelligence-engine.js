@@ -9,7 +9,6 @@ function graphDerivation() {
 }
 const { upsertMemoryNode, updateMemoryNode, upsertMemoryEdge, upsertRetrievalDoc } = require('./graph-store');
 const { generateEmbedding, cosineSimilarity } = require('../embedding-engine');
-const { ReasoningPipeline } = require('./reasoning-pipeline');
 
 const DEEPSEEK_ENDPOINT = 'https://api.deepseek.com/v1/chat/completions';
 let lastAiParseLogAt = 0;
@@ -1023,6 +1022,7 @@ async function buildGlobalGraph() {
 }
 
 async function runReasoningPipeline(context) {
+  const { ReasoningPipeline } = require('./reasoning-pipeline');
   const pipeline = new ReasoningPipeline();
   return await pipeline.run(context);
 }
