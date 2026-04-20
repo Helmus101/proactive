@@ -276,6 +276,121 @@ async function detectWeakStudyConcept(cloudRows, now) {
   return out;
 }
 
+async function detectRelationshipIntelligence(semanticRows, episodeRows, recentEvents, now) {
+  const out = [];
+
+  // 1. Birthdays
+  for (const row of semanticRows || []) {
+    if (row.subtype !== 'person') continue;
+    const metadata = asObj(row.metadata);
+    const birthday = metadata.birthday; // Expected: "MM-DD" or "YYYY-MM-DD"
+    if (birthday) {
+      const today = new Date(now);
+      const bDate = new Date(birthday);
+      if (!isNaN(bDate.getTime())) {
+        if (bDate.getMonth() === today.getMonth() && bDate.getDate() === today.getDate()) {
+          out.push(candidateBase({
+            opportunityType: 'birthday_reminder',
+            seedNodeId: row.id,
+            title: `It's ${row.title}'s birthday!`,
+            triggerSummary: `Birthday signal detected for ${row.title} from contact metadata.`,
+            confidence: 0.98,
+            reasonCodes: ['birthday_metadata', 'relationship_intelligence'],
+            timeAnchor: 'today',
+            candidateActions: [`Send birthday message to ${row.title}`, `Plan a call with ${row.title}`],
+            sourceRefs: sourceRefsFromRow(row),
+            canonicalTarget: normalizeTarget(row.title),
+            score: 0.98
+          }));
+        }
+      }
+    }
+  }
+
+  for (const event of recentEvents || []) {
+    const title = (event.window_title || event.text || '').toLowerCase();
+    if (event.type === 'calendar' && title.includes('birthday')) {
+      const nameMatch = title.match(/(.+)['’]s birthday/) || title.match(/birthday of (.+)/) || title.match(/birthday:? (.+)/);
+      const name = nameMatch ? nameMatch[1].trim() : 'Contact';
+      out.push(candidateBase({
+        opportunityType: 'birthday_reminder',
+        seedNodeId: event.id,
+        title: `Birthday: ${name}`,
+        triggerSummary: `Detected birthday calendar event: ${event.window_title || event.text}`,
+        confidence: 0.92,
+        reasonCodes: ['birthday_calendar_event', 'relationship_intelligence'],
+        timeAnchor: 'today',
+        candidateActions: [`Reach out to ${name}`],
+        sourceRefs: [event.id],
+        canonicalTarget: normalizeTarget(name),
+        score: 0.92
+      }));
+    }
+  }
+
+  // 2. News Mentions
+  const newsDomains = ['techcrunch.com', 'nytimes.com', 'theverge.com', 'wired.com', 'bloomberg.com', 'forbes.com', 'wsj.com'];
+  for (const event of recentEvents || []) {
+    const meta = asObj(event.metadata);
+    const domain = (meta.domain || '').toLowerCase();
+    if (newsDomains.some(d => domain.includes(d))) {
+      const eventTitle = event.window_title || event.text || '';
+      if (!eventTitle) continue;
+      for (const person of semanticRows || []) {
+        if (person.subtype !== 'person') continue;
+        const name = person.title;
+        if (name && name.length > 3 && eventTitle.includes(name)) {
+          out.push(candidateBase({
+            opportunityType: 'person_news',
+            seedNodeId: person.id,
+            title: `News about ${name}`,
+            triggerSummary: `Detected "${name}" in a news article: "${eventTitle}" on ${domain}.`,
+            confidence: 0.85,
+            reasonCodes: ['person_news_mention', 'relationship_intelligence'],
+            timeAnchor: 'now',
+            candidateActions: [`Share news with ${name}`, `Read about ${name}`],
+            sourceRefs: [event.id, ...sourceRefsFromRow(person)],
+            canonicalTarget: normalizeTarget(name),
+            score: 0.84
+          }));
+        }
+      }
+    }
+  }
+
+  // 3. Article Sharing
+  const recentLinks = recentEvents.filter(e => (e.type === 'link' || e.type === 'browser') && asObj(e.metadata).url);
+  for (const linkEvent of recentLinks.slice(0, 10)) {
+    const linkTitle = linkEvent.window_title || linkEvent.text || '';
+    if (!linkTitle || linkTitle.length < 10) continue;
+    const url = asObj(linkEvent.metadata).url;
+
+    for (const person of semanticRows || []) {
+      if (person.subtype !== 'person') continue;
+      const meta = asObj(person.metadata);
+      const topics = parseList(meta.topics || []);
+      const matchedTopic = topics.find(t => linkTitle.toLowerCase().includes(String(t).toLowerCase()));
+      if (matchedTopic) {
+        out.push(candidateBase({
+          opportunityType: 'article_share',
+          seedNodeId: person.id,
+          title: `Share with ${person.title}`,
+          triggerSummary: `Found article matching ${person.title}'s interest in "${matchedTopic}": ${linkTitle}`,
+          confidence: 0.8,
+          reasonCodes: ['topic_interest_match', 'relationship_intelligence'],
+          timeAnchor: 'today',
+          candidateActions: [`Share article with ${person.title}`],
+          sourceRefs: [linkEvent.id, ...sourceRefsFromRow(person)],
+          canonicalTarget: normalizeTarget(person.title),
+          score: 0.8
+        }));
+      }
+    }
+  }
+
+  return out;
+}
+
 function enrichWithRecentRecall(candidates, recentEvents) {
   const rows = Array.isArray(recentEvents) ? recentEvents : [];
   return (candidates || []).map((candidate) => {
@@ -341,6 +456,7 @@ async function mineProactiveOpportunities(now = Date.now(), options = {}) {
   candidates.push(...await detectDeadlineRisk([...semanticRows, ...episodeRows], now));
   candidates.push(...await detectDormantContacts(semanticRows, now));
   candidates.push(...await detectWeakStudyConcept(cloudRows, now));
+  candidates.push(...await detectRelationshipIntelligence(semanticRows, episodeRows, recentEvents, now));
 
   const recalled = enrichWithRecentRecall(candidates, recentEvents);
   const deduped = dedupeCandidates(recalled);
@@ -365,6 +481,7 @@ module.exports = {
     detectDeadlineRisk,
     detectDormantContacts,
     detectWeakStudyConcept,
+    detectRelationshipIntelligence,
     dedupeCandidates,
     enrichWithRecentRecall,
     normalizeTarget

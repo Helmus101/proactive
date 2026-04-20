@@ -93,6 +93,28 @@ async function testWeakConceptDetector() {
   assert.strictEqual(out[0].opportunity_type, 'weak_repeated_study_concept');
 }
 
+async function testRelationshipIntelligenceDetector() {
+  const semanticRows = [{
+    id: 'sem_person_birthday',
+    subtype: 'person',
+    title: 'Bob',
+    metadata: JSON.stringify({
+      birthday: new Date().toISOString().slice(0, 10), // today
+      topics: ['AI', 'Robots']
+    })
+  }];
+  const recentEvents = [{
+    id: 'evt_link_1',
+    type: 'link',
+    window_title: 'AI is taking over',
+    metadata: JSON.stringify({ url: 'https://techcrunch.com/ai' })
+  }];
+  const out = await __test__.detectRelationshipIntelligence(semanticRows, [], recentEvents, Date.now());
+  assert.ok(out.length >= 2); // 1 birthday + 1 article share
+  assert.ok(out.some(o => o.opportunity_type === 'birthday_reminder'));
+  assert.ok(out.some(o => o.opportunity_type === 'article_share'));
+}
+
 function testDedupeCollapse() {
   const deduped = __test__.dedupeCandidates([
     { opportunity_type: 'unfinished_work_loop', canonical_target: 'project alpha', score: 0.61 },
@@ -111,6 +133,7 @@ async function main() {
   await testDeadlineRiskDetector();
   await testDormantContactDetector();
   await testWeakConceptDetector();
+  await testRelationshipIntelligenceDetector();
   testDedupeCollapse();
   console.log('opportunity-miner.test.js passed');
 }

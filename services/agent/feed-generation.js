@@ -574,12 +574,19 @@ function mapOpportunityTypeToSeedType(opportunityType = '') {
   if (value.includes('followup') || value.includes('contact')) return 'person_followup';
   if (value.includes('deadline')) return 'deadline_risk';
   if (value.includes('study')) return 'study_followthrough';
+  if (value === 'person_news') return 'person_news';
+  if (value === 'birthday_reminder') return 'birthday_reminder';
+  if (value === 'article_share') return 'article_share';
   return 'task_execution';
 }
 
 function mapOpportunityToSeed(candidate = {}) {
   const title = trim(candidate.title || candidate.trigger_summary || 'Open opportunity', 100);
-  const category = /followup|contact/.test(String(candidate.opportunity_type || '').toLowerCase()) ? 'followup' : 'work';
+  const oppType = String(candidate.opportunity_type || '').toLowerCase();
+  let category = 'work';
+  if (/followup|contact/.test(oppType)) category = 'followup';
+  if (/relationship_intelligence|person_news|birthday_reminder|article_share/.test(oppType)) category = 'relationship';
+  
   const type = mapOpportunityTypeToSeedType(candidate.opportunity_type);
   const triggerSummary = trim(candidate.trigger_summary || candidate.time_anchor || title, 180);
   return {
@@ -632,6 +639,7 @@ function isImportantActionSeed(seed = {}) {
   const trigger = String(seed.trigger_summary || '').toLowerCase();
   if (type === 'task_execution' || type === 'decision_followthrough') return true;
   if (looksStudyOpportunity(seed)) return true;
+  if (seed.category === 'relationship') return true;
   if (type === 'cloud_hypothesis' && /open loop|unresolved|repeated/.test(trigger)) return true;
   if (/\bdeadline|due|urgent|priority|follow through|unresolved|action\b/.test(`${title} ${trigger}`)) return true;
   return false;
@@ -952,12 +960,14 @@ async function buildSuggestionFromSeed(seed, apiKey, now, options = {}) {
 
   const graphSpecifics = extractGraphSpecifics(seed, graphContext);
   const isStudySeed = looksStudyOpportunity(seed);
-  const suggestionCategory = isStudySeed ? 'study' : (seed.category === 'followup' ? 'followup' : 'work');
+  let suggestionCategory = isStudySeed ? 'study' : (seed.category === 'followup' ? 'followup' : 'work');
+  if (seed.category === 'relationship') suggestionCategory = 'relationship';
 
   const prompt = `
   You are generating one proactive suggestion from a user's memory graph.
-  There are two kinds of suggestions:
+  There are three kinds of suggestions:
   - STUDY: drill/review/resume a specific concept, session, or assignment. Category = "study".
+  - RELATIONSHIP: follow-up, connecting, sharing articles, birthdays, and noticing news about people. Category = "relationship".
   - WORK/FOLLOWUP: close an open loop in work, communication, or planning. Category = "work" or "followup".
   This seed is type: ${suggestionCategory.toUpperCase()}.
 
@@ -985,9 +995,9 @@ async function buildSuggestionFromSeed(seed, apiKey, now, options = {}) {
 
   Rules:
   - One immediate action only.
-  - Use a direct coach voice: blunt, clear, no fluff, no cheerleading.
+  - Use a direct coach voice: blunt, clear, no fluff, no cheerleading. For RELATIONSHIP category, use a "Relationship Coach" voice: warm but professional, suggesting ways to maintain and grow connections.
   - The action must be specific enough that the user could do it next.
-  - Make it deep and concrete, not generic.
+  - Make it deep and concrete, not generic. For relationship suggestions, mention the specific person's name and the specific article/event found.
   - The title must sound like a reality check plus a concrete target.
   - The body must be exactly 2 short sentences:
     1) call out the specific risk/pattern from evidence
