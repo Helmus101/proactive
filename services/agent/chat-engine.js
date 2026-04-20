@@ -1034,6 +1034,14 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
         reflectorFeedback: synthIteration > 1 ? reflection : null
       });
 
+      // Confidence gate: skip Reflector if judgment is highly confident
+      if (synthIteration === 1 && Number(judgment?.confidence_score) > 0.85) {
+        reflection.approved = true;
+        reflection.reason = 'Confidence gate passed (>0.85). Skipping reflector.';
+        retrieval.reflection = reflection;
+        break;
+      }
+
       // 6. Reflector Stage
       emitStage('reflecting', 'started', { label: 'Reflecting' });
       reflection = await runReflectorStage({ query, evidence: [...(retrieval.evidence || []), ...webResults], answer: content, apiKey });

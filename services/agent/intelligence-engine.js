@@ -384,6 +384,17 @@ Content: ${String(node.canonical_text || '').slice(0, 5000)}
 }
 
 async function runEnrichmentJob(apiKey) {
+  // Activity check: skip if no new events have been ingested since the last run
+  const lastTsRow = await db.getQuery("SELECT value FROM kv_cache WHERE key = 'last_enrichment_event_ts'").catch(() => null);
+  const lastTs = lastTsRow ? lastTsRow.value : '1970-01-01T00:00:00.000Z';
+  
+  const currentMaxTsRow = await db.getQuery("SELECT MAX(timestamp) as max_ts FROM events").catch(() => null);
+  const currentMaxTs = currentMaxTsRow?.max_ts || lastTs;
+
+  if (lastTs === currentMaxTs && lastTs !== '1970-01-01T00:00:00.000Z') {
+    return { skipped: true, reason: 'no_new_activity' };
+  }
+
   const result = await graphDerivation().deriveGraphFromEvents({
     versionSeed: 'current'
   });
@@ -394,7 +405,7 @@ async function runEnrichmentJob(apiKey) {
   const nodesToEnrich = await db.allQuery(
     `SELECT id, layer, title, summary, canonical_text FROM memory_nodes 
      WHERE layer IN (${placeholders}) AND (summary NOT LIKE '• %' OR summary IS NULL)
-     ORDER BY confidence DESC LIMIT 50`,
+     ORDER BY confidence DESC LIMIT 5`,
     layersToEnrich
   ).catch(() => []);
 
@@ -420,6 +431,12 @@ async function runEnrichmentJob(apiKey) {
       console.warn(`[runEnrichmentJob] Failed to enrich node ${node.id}:`, e.message);
     }
   }
+
+  // Update high-water mark for next run
+  await db.runQuery(
+    "INSERT OR REPLACE INTO kv_cache (key, value, type, created_at) VALUES (?, ?, ?, ?)",
+    ['last_enrichment_event_ts', currentMaxTs, 'internal_state', new Date().toISOString()]
+  ).catch(() => null);
   
   return result;
 }
@@ -1031,6 +1048,7 @@ module.exports = {
   callDeepSeek,
   callLLM,
   detectTasks,
+  generateNodeTLDR,
   runEpisodeJob,
   runEnrichmentJob,
   runSemanticSummaryWindow,
