@@ -1,7 +1,7 @@
 const db = require('../db');
 const { ingestRawEvent } = require('../ingestion');
 const { callLLM } = require('./intelligence-engine');
-const { buildHybridGraphRetrieval } = require('./hybrid-graph-retrieval');
+const { buildHybridGraphRetrieval, formatContext, estimateTokensHeuristic } = require('./hybrid-graph-retrieval');
 const { buildRetrievalThought, widenTemporalWindow, inferSurfaceFamilies } = require('./retrieval-thought-system');
 
 function safeJsonParse(value, fallback) {
@@ -16,14 +16,14 @@ function uniq(items = [], limit = 12) {
   return Array.from(new Set((items || []).filter(Boolean))).slice(0, limit);
 }
 
-function normalizeChatHistoryWindow(history = [], limit = 30) {
+function normalizeChatHistoryWindow(history = [], limit = 10) {
   if (!Array.isArray(history)) return [];
   return history
     .filter((item) => item && typeof item.content === 'string')
     .slice(-Math.max(1, limit))
     .map((item) => ({
       role: item.role === 'assistant' ? 'assistant' : 'user',
-      content: String(item.content || '').trim().slice(0, 1200),
+      content: String(item.content || '').trim().slice(0, 600),
       ts: item.ts || null
     }))
     .filter((item) => item.content);
@@ -743,6 +743,16 @@ async function executeParallelRetrieval(baseQuery, baseThought, options, onProgr
   const expanded_nodes = mergeById(successfulResults.map((r) => r.expanded_nodes));
   const seed_nodes = mergeById(successfulResults.map((r) => r.seed_nodes));
 
+  const budget = baseThought.context_budget_tokens || 2000;
+  const contextText = formatContext({
+    budget,
+    primarySeeds: seed_nodes.slice(0, 10),
+    hierarchicalExpandedNodes: [], // We don't easily have these separated after merge
+    seeds: seed_nodes,
+    expandedNodes: expanded_nodes,
+    edgePaths: successfulResults.flatMap((r) => r.edge_paths)
+  });
+
   return {
     ...successfulResults[0],
     retrieval_run_id: successfulResults.map((r) => r.retrieval_run_id).join(','),
@@ -759,7 +769,7 @@ async function executeParallelRetrieval(baseQuery, baseThought, options, onProgr
     edge_paths: successfulResults.flatMap((r) => r.edge_paths),
     drilldown_refs: Array.from(new Set(successfulResults.flatMap((r) => r.drilldown_refs))),
     lazy_source_refs: Array.from(new Set(successfulResults.flatMap((r) => r.lazy_source_refs.map((x) => x.ref)))).map((ref) => ({ ref })),
-    contextText: successfulResults.map((r) => r.contextText).join('\n\n---\n\n')
+    contextText
   };
 }
 
@@ -1174,15 +1184,20 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   };
 }
 
+function isCreditSaverMode() {
+  return String(process.env.CREDIT_SAVER_MODE || process.env.DEEPSEEK_CREDIT_SAVER || '').toLowerCase() === 'true';
+}
+
 async function runRouterStage({ query, options }) {
-  const chatHistory = normalizeChatHistoryWindow(options?.chat_history, 30);
+  const chatHistory = normalizeChatHistoryWindow(options?.chat_history, 10);
   const retrievalQuery = buildQueryWithChatContext(query, chatHistory);
 
   const baseThought = await buildRetrievalThought({
     query: retrievalQuery,
     mode: 'chat',
     dateRange: options?.date_range,
-    app: options?.app
+    app: options?.app,
+    economy: options?.economy || isCreditSaverMode()
   });
 
   return {
@@ -1195,23 +1210,13 @@ async function runRouterStage({ query, options }) {
 async function runPlannerStage({ query, routerOutput, apiKey }) {
   if (!apiKey) return null;
   const prompt = `[System]
-You are an expert retrieval planner for a memory-native AI assistant. 
-Your goal is to take a user query and a router's initial strategy, and produce a formal, multi-step execution plan.
-Analyze the query for specific entities, timeframes, and intent.
-
-[User Query]
+Expert retrieval planner. Goal: Take query + router strategy, produce execution plan.
+[Query]
 ${query}
-
-[Router Output]
-${JSON.stringify(routerOutput, null, 2)}
-
+[Router]
+${JSON.stringify(routerOutput)}
 [Instruction]
-Return a strict JSON object with the following fields:
-- reasoning_plan: A list of logical steps to solve the problem.
-- refined_queries: A list of 3-5 high-quality, specific search queries for memory retrieval.
-- evidence_criteria: What specific details or facts are required to consider the search successful?
-
-Return only valid JSON.`;
+Return JSON: {"reasoning_plan": ["step1",...], "refined_queries": ["q1",...], "evidence_criteria": "string"}`;
 
   try {
     const plan = await callLLM(prompt, apiKey, 0.22, { maxTokens: 800, task: 'routing' });
@@ -1228,26 +1233,15 @@ async function runJudgeStage({ query, plan, evidence, apiKey }) {
   const evidenceSnippet = (evidence || []).slice(0, 25).map(e => `[${e.layer || e.type}] ${String(e.text || e.title || '').slice(0, 400)}`).join('\n---\n');
 
   const prompt = `[System]
-You are a retrieval judge evaluating if the current memory/web context is sufficient to accurately answer the user's query.
-
-[User Query]
+Retrieval judge. Goal: Evaluate if context is sufficient to answer.
+[Query]
 ${query}
-
 [Plan]
-${JSON.stringify(plan, null, 2)}
-
-[Retrieved Evidence]
+${JSON.stringify(plan)}
+[Evidence]
 ${evidenceSnippet}
-
 [Instruction]
-Return a strict JSON object:
-- sufficient: boolean
-- confidence_score: 0.0 to 1.0
-- missing_information: Description of what is still missing (if insufficient)
-- suggested_queries: 2-3 improved search queries to find the missing info (if insufficient)
-- reason: Brief explanation of the verdict.
-
-Return only valid JSON.`;
+Return JSON: {"sufficient": bool, "confidence_score": 0.0-1.0, "missing_information": "string", "suggested_queries": ["q1",...], "reason": "string"}`;
 
   try {
     const judgment = await callLLM(prompt, apiKey, 0.1, { maxTokens: 600, task: 'routing' });
@@ -1263,26 +1257,15 @@ async function runReflectorStage({ query, evidence, answer, apiKey }) {
   const evidenceSnippet = (evidence || []).slice(0, 20).map(e => `[${e.layer || e.type}] ${String(e.text || e.title || '').slice(0, 250)}`).join('\n');
 
   const prompt = `[System]
-You are a critical reflector critique the draft answer against the provided evidence and user query.
-Check for hallucinations (facts not in evidence), tone, and completeness.
-
-[User Query]
+Critical reflector. Critique draft vs evidence/query. Check hallucinations, tone, completeness.
+[Query]
 ${query}
-
 [Evidence]
 ${evidenceSnippet}
-
-[Draft Answer]
+[Draft]
 ${answer}
-
 [Instruction]
-Return a strict JSON object:
-- approved: boolean (true if answer is grounded and accurate)
-- critique: Specific feedback on what is wrong or missing.
-- suggestions: How to improve or fix the answer.
-- reason: Brief summary of the critique.
-
-Return only valid JSON.`;
+Return JSON: {"approved": bool, "critique": "string", "suggestions": "string", "reason": "string"}`;
 
   try {
     const reflection = await callLLM(prompt, apiKey, 0.1, { maxTokens: 800, task: 'routing' });
@@ -1293,36 +1276,64 @@ Return only valid JSON.`;
 }
 
 async function runSynthesizerStage({ query, retrieval, chatHistory, standingNotes, drilldownEvidence, webResults, apiKey, reflectorFeedback = null }) {
-  const priorityEvidence = buildPriorityEvidenceLines(retrieval, drilldownEvidence, 20);
+  const budget = retrieval?.retrieval_plan?.context_budget_tokens || 2000;
+  let usedTokens = 0;
+  const contextLines = [];
+  const seenText = new Set();
+
+  const addLine = (line) => {
+    const textKey = line.trim();
+    if (!textKey || seenText.has(textKey)) return;
+    const tokens = estimateTokensHeuristic(line);
+    if (usedTokens + tokens > budget) return;
+    contextLines.push(line);
+    usedTokens += tokens;
+    seenText.add(textKey);
+  };
+
+  // 1. Core context from retrieval (already somewhat deduplicated)
+  if (retrieval.contextText) {
+    retrieval.contextText.split('\n').forEach(addLine);
+  }
+
+  // 2. Priority evidence
+  const evidence = Array.isArray(retrieval?.evidence) ? retrieval.evidence : [];
+  [...evidence]
+    .sort((a, b) => Number(b.score || 0) - Number(a.score || 0))
+    .slice(0, 15)
+    .forEach(item => {
+      addLine(`- [${item.layer || 'memory'}] ${String(item.text || item.title || '').replace(/\s+/g, ' ').trim().slice(0, 500)}`);
+    });
+
+  // 3. Drilldown / Raw evidence
+  (drilldownEvidence || []).slice(0, 10).forEach(row => {
+    addLine(`- [raw:${row.source_type || 'event'}] ${String(row.text || row.title || '').replace(/\s+/g, ' ').trim().slice(0, 1000)}`);
+  });
+
+  // 4. Web Results
+  (webResults || []).slice(0, 5).forEach(item => {
+    addLine(`- [web] ${item.title}: ${item.snippet} (${item.url})`);
+  });
 
   const prompt = `[System]
-You are Weave's memory-native assistant.
-Answer naturally and directly in a conversational style.
-Be grounded, direct, and concise.
-Do not invent facts.
+Weave assistant. Conversational, grounded, direct, concise. No invented facts.
 
-[Retrieved memory context]
-${retrieval.contextText || 'None'}
+[Grounded Context]
+${contextLines.join('\n') || 'None'}
 
-[Standing notes]
-${standingNotes || 'None'}
-
-[Conversation history]
+[Conversation History]
 ${formatChatHistoryForPrompt(chatHistory)}
 
-[Priority evidence]
-${priorityEvidence.join('\n') || 'None'}
+[Standing Notes]
+${standingNotes || 'None'}
 
-[Web results]
-${webResults.length ? webResults.map((item) => `- ${item.title || item.url}\n  ${item.url}\n  ${item.snippet || ''}`).join('\n') : 'None'}
-
-${reflectorFeedback ? `[Reflector Feedback]\nThe previous draft was rejected for: ${reflectorFeedback.critique}\nSuggestion: ${reflectorFeedback.suggestions}\nPlease fix these issues in the final response.` : ''}
+${reflectorFeedback ? `[Reflector Feedback]\nRejected for: ${reflectorFeedback.critique}\nSuggestion: ${reflectorFeedback.suggestions}\nFix in the final response.` : ''}
 
 [User question]
 ${query}`;
 
   try {
-    const content = await callLLM(prompt, apiKey, 0.22, { task: 'synthesis' });
+    const content = await callLLM(prompt, apiKey, 0.22, { task: 'synthesis', maxTokens: 1200 });
     return content || "I couldn't produce an answer from the current memory context.";
   } catch (llmError) {
     return buildGroundedFallbackAnswer(query, retrieval, drilldownEvidence);
