@@ -709,14 +709,14 @@ const GOOGLE_SYNC_OVERLAP_MS = 5 * 60 * 1000;
 const GOOGLE_SYNC_FUTURE_DRIFT_MS = 5 * 60 * 1000;
 const DEFAULT_SENSOR_SETTINGS = {
   enabled: true, // Auto-enable for continuous capture
-  intervalMinutes: 0.5, // 30 seconds
+  intervalMinutes: 15, // 15 minutes
   maxEvents: 200 // Increase for more frequent captures
 };
 
 function getSensorSettings() {
   const stored = store.get('sensorSettings') || {};
-  // Force fixed 30-second capture interval
-  const intervalMinutes = 0.5;
+  // Force fixed 15-minute capture interval
+  const intervalMinutes = 15;
   const maxEvents = Math.max(50, parseInt(stored.maxEvents, 10) || DEFAULT_SENSOR_SETTINGS.maxEvents);
   return {
     enabled: stored.enabled !== undefined ? Boolean(stored.enabled) : DEFAULT_SENSOR_SETTINGS.enabled,
@@ -10198,8 +10198,8 @@ ipcMain.handle('save-sensor-settings', async (event, settings) => {
     ...getSensorSettings(),
     ...(settings || {})
   };
-  // Keep interval fixed to every 30 seconds regardless of incoming payload.
-  next.intervalMinutes = 0.5;
+  // Keep interval fixed to every 15 minutes regardless of incoming payload.
+  next.intervalMinutes = 15;
   store.set('sensorSettings', next);
   startSensorCaptureLoop();
   return getSensorStatus();
