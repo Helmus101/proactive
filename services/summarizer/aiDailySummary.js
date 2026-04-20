@@ -150,7 +150,7 @@ Respond with ONLY a valid JSON array. No markdown. No explanation:
   }
 ]`;
 
-  const parsed = await callLLM(prompt, apiKey, 0.4);
+  const parsed = await callLLM(prompt, apiKey, 0.4, { maxTokens: 500, economy: true });
   return parsed || [];
 }
 
@@ -236,7 +236,7 @@ RESPOND WITH ONLY JSON:
   "topics": ["Project X"],
   "intent_clusters": ["job_search"]
 }`;
-  return callLLM(prompt, apiKey, 0.3);
+  return callLLM(prompt, apiKey, 0.3, { maxTokens: 450, economy: true });
 }
 
 /**
@@ -262,7 +262,7 @@ Include evidence_id (the event id).
 
 RESPOND WITH ONLY JSON ARRAY:
 [{ "title": "...", "priority": "high", "category": "Relationship", "reason": "...", "context_path": "...", "evidence_id": "...", "action_type": "prepare" }]`;
-  return callLLM(prompt, apiKey, 0.4);
+  return callLLM(prompt, apiKey, 0.4, { maxTokens: 450, economy: true });
 }
 
 /**
@@ -287,7 +287,7 @@ Include evidence_id.
 
 RESPOND WITH ONLY JSON ARRAY:
 [{ "title": "...", "priority": "medium", "category": "Work", "reason": "...", "evidence_id": "...", "action_type": "review" }]`;
-  return callLLM(prompt, apiKey, 0.3);
+  return callLLM(prompt, apiKey, 0.3, { maxTokens: 450, economy: true });
 }
 
 /**
@@ -297,7 +297,7 @@ async function generateLeisureSubAgent(today, userProfile, historicalSummaries, 
   const prompt = `Based on user style (${userProfile.leisure_style || 'unknown'}) and history, suggest 1 leisure action for tonight.
 RESPOND WITH ONLY JSON ARRAY:
 [{ "title": "...", "priority": "low", "category": "Leisure", "reason": "...", "action_type": "schedule" }]`;
-  return callLLM(prompt, apiKey, 0.5);
+  return callLLM(prompt, apiKey, 0.5, { maxTokens: 450, economy: true });
 }
 
 /**
@@ -307,7 +307,7 @@ async function extractIntelligenceSubAgent(today, todayEvents, historicalSummari
   const prompt = `Extract behavioral patterns and preferences from today's events (${today}).
 RESPOND WITH ONLY JSON:
 { "patterns": ["..."], "preferences": ["..."] }`;
-  return callLLM(prompt, apiKey, 0.2);
+  return callLLM(prompt, apiKey, 0.2, { maxTokens: 450, economy: true });
 }
 
 module.exports = { buildDayContext, generateAISummariesForDays, generateTodaySummaryWithContext };

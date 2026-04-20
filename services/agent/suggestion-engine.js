@@ -640,7 +640,7 @@ GRAPH EDGES:
 ${edgeDigest || 'No edge traces available.'}
 `;
 
-  const rawTopFive = await callLLM(phase1Prompt, llmConfig, 0.22).catch(() => null);
+  const rawTopFive = await callLLM(phase1Prompt, llmConfig, 0.22, { maxTokens: 450, economy: true }).catch(() => null);
   const topFiveItems = Array.isArray(rawTopFive) ? rawTopFive.filter(i => typeof i === 'string') : [];
 
   if (!topFiveItems.length) return [];
@@ -685,7 +685,7 @@ SPECIFITY RULES:
 - Avoid weak language: no "maybe", "could", "consider", or "might".
 `;
 
-  const aiRows = await callLLM(phase2Prompt, llmConfig, 0.22).catch(() => null);
+  const aiRows = await callLLM(phase2Prompt, llmConfig, 0.22, { maxTokens: 500, economy: true }).catch(() => null);
   const rows = Array.isArray(aiRows) ? aiRows.slice(0, 10) : [];
   const selected = rows.filter((row) => !isWeakTitle(row?.title || ''));
   if (!selected.length) return [];
@@ -849,7 +849,7 @@ ${standingNotes || 'None'}
 
 MEMORY CONTEXT:
 ${memoryContext || '- No memory context available; return []'} `;
-  const payload = await callLLM(prompt, llmConfig, 0.24).catch(() => null);
+  const payload = await callLLM(prompt, llmConfig, 0.24, { maxTokens: 550, economy: true }).catch(() => null);
   const rows = Array.isArray(payload) ? payload : [];
   if (!rows.length) return [];
 

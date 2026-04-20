@@ -143,10 +143,24 @@ function tryParseJsonLoose(raw = '') {
   return null;
 }
 
-async function callDeepSeek(prompt, apiKey, temperature = 0.3) {
+function isCreditSaverMode() {
+  return String(process.env.CREDIT_SAVER_MODE || process.env.DEEPSEEK_CREDIT_SAVER || '').toLowerCase() === 'true';
+}
+
+function getLLMMaxTokens(options = {}, defaultValue = 900) {
+  const economy = Boolean(options?.economy) || isCreditSaverMode();
+  const explicit = Number(options?.maxTokens || 0);
+  if (explicit > 0) return explicit;
+  if (economy) return Math.min(600, defaultValue);
+  return defaultValue;
+}
+
+async function callDeepSeek(prompt, apiKey, temperature = 0.3, options = {}) {
   try {
     if (!apiKey) return null;
-    const cacheKey = crypto.createHash('sha1').update(`${temperature}|${String(prompt || '').slice(0, 7000)}`).digest('hex');
+    const rawPrompt = String(prompt || '').trim();
+    const promptText = rawPrompt.slice(0, 14000);
+    const cacheKey = crypto.createHash('sha1').update(`${temperature}|${promptText.slice(0, 7000)}|${getLLMMaxTokens(options, 900)}`).digest('hex');
     
     // Check SQLite cache
     const cachedRow = await db.getQuery('SELECT value, created_at FROM kv_cache WHERE key = ? AND type = ?', [cacheKey, 'llm_response']);
@@ -160,9 +174,9 @@ async function callDeepSeek(prompt, apiKey, temperature = 0.3) {
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
       body: JSON.stringify({
         model: 'deepseek-chat',
-        messages: [{ role: 'user', content: prompt }],
+        messages: [{ role: 'user', content: promptText }],
         temperature,
-        max_tokens: 2048
+        max_tokens: getLLMMaxTokens(options, 1200)
       })
     });
     const responseText = await response.text();
@@ -218,9 +232,9 @@ function normalizeLLMConfig(configOrApiKey = null) {
   return cfg;
 }
 
-async function callOllama(prompt, config = {}, temperature = 0.3) {
+async function callOllama(prompt, config = {}, temperature = 0.3, options = {}) {
   try {
-    const cacheKey = crypto.createHash('sha1').update(`ollama|${config.model}|${temperature}|${String(prompt || '').slice(0, 7000)}`).digest('hex');
+    const cacheKey = crypto.createHash('sha1').update(`ollama|${config.model}|${temperature}|${String(prompt || '').slice(0, 7000)}|${getLLMMaxTokens(options, 900)}`).digest('hex');
     
     // Check SQLite cache
     const cachedRow = await db.getQuery('SELECT value, created_at FROM kv_cache WHERE key = ? AND type = ?', [cacheKey, 'llm_response']);
@@ -243,7 +257,8 @@ async function callOllama(prompt, config = {}, temperature = 0.3) {
         stream: false,
         format: 'json',
         options: {
-          temperature
+          temperature,
+          max_tokens: getLLMMaxTokens(options, 900)
         },
         messages: [
           { role: 'user', content: prompt }
@@ -287,13 +302,13 @@ async function callOllama(prompt, config = {}, temperature = 0.3) {
   }
 }
 
-async function callLLM(prompt, configOrApiKey = null, temperature = 0.3) {
+async function callLLM(prompt, configOrApiKey = null, temperature = 0.3, options = {}) {
   const config = normalizeLLMConfig(configOrApiKey);
   if (!config) return null;
   if (config.provider === 'ollama') {
-    return callOllama(prompt, config, temperature);
+    return callOllama(prompt, config, temperature, options);
   }
-  return callDeepSeek(prompt, config.apiKey, temperature);
+  return callDeepSeek(prompt, config.apiKey, temperature, options);
 }
 
 async function detectTasks(items = [], configOrApiKey = null) {
@@ -305,7 +320,7 @@ Items:
 ${itemsList.slice(0, 30).map((item, index) => `Item ${index + 1}: ${JSON.stringify(item).slice(0, 1200)}`).join('\n')}
 
 Return only valid JSON, nothing else.`;
-  const payload = await callLLM(prompt, normalizeLLMConfig(configOrApiKey), 0.2);
+  const payload = await callLLM(prompt, normalizeLLMConfig(configOrApiKey), 0.2, { maxTokens: 500, economy: true });
   if (!payload || !Array.isArray(payload.tasks)) return [];
   return payload.tasks.filter(Boolean).map((item, idx) => {
     const title = String(item.title || item.name || item.summary || item.text || '').trim();
@@ -342,7 +357,7 @@ Title: ${String(node.title || '').slice(0, 240)}
 Summary: ${String(node.summary || '').slice(0, 500)}
 Content: ${String(node.canonical_text || '').slice(0, 5000)}
 `;
-  const payload = await callLLM(prompt, normalizeLLMConfig(apiKey), 0.2);
+  const payload = await callLLM(prompt, normalizeLLMConfig(apiKey), 0.2, { maxTokens: 450, economy: true });
   if (payload && Array.isArray(payload.tldr)) {
     const limit = isEpisode ? 20 : 3;
     return payload.tldr.slice(0, limit).map(b => `• ${b.replace(/^•\s*/, '')}`).join('\n');

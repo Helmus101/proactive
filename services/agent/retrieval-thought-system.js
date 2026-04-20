@@ -548,14 +548,16 @@ async function buildMultiAngleQueryBundle(baseText, {
   appScope = [],
   sourceScope = [],
   mode = 'chat',
-  deepScan = false
+  deepScan = false,
+  economy = false
 } = {}) {
   const apiKey = process.env.DEEPSEEK_API_KEY;
   const cleaned = stripEmbeddingWeakTerms(stripQuestionFormatting(baseText));
+  const economyMode = Boolean(economy) || String(process.env.CREDIT_SAVER_MODE || '').toLowerCase() === 'true';
   let finalQueries = [];
   let llmSourceMode = null;
 
-  if (apiKey) {
+  if (apiKey && !economyMode) {
     const prompt = `
     You are a retrieval query generator and router for an AI memory system. 
     Your goal is to:
@@ -576,7 +578,7 @@ async function buildMultiAngleQueryBundle(baseText, {
     User Query: "${baseText.replace(/"/g, '\\"')}"
     `;
     try {
-      const result = await callLLM(prompt, apiKey, 0.3);
+      const result = await callLLM(prompt, apiKey, 0.3, { maxTokens: 500, economy: economyMode });
       if (result && Array.isArray(result.queries)) {
         finalQueries = result.queries.slice(0, 15);
       }

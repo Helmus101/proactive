@@ -880,12 +880,14 @@ async function buildHybridGraphRetrieval({
     }
   }
 
+  const economyMode = Boolean(options?.economy) || String(process.env.CREDIT_SAVER_MODE || '').toLowerCase() === 'true';
   const basePlan = options.retrieval_thought || await buildRetrievalThought({
     query,
     mode: options.mode || 'chat',
     candidate: options.candidate || null,
     dateRange: options.date_range || null,
-    app: options.app || null
+    app: options.app || null,
+    economy: economyMode
   });
   const retrievalPlan = {
     ...basePlan,
@@ -896,9 +898,9 @@ async function buildHybridGraphRetrieval({
       source_types: options.source_types || basePlan.filters?.source_types || null,
       prioritize_screen_capture: prioritizeScreenCapture
     },
-    seed_limit: seedLimit || basePlan.seed_limit || DEFAULT_SEED_LIMIT,
-    hop_limit: hopLimit || basePlan.hop_limit || DEFAULT_HOP_LIMIT,
-    context_budget_tokens: basePlan.context_budget_tokens || (options.mode === 'suggestion' ? 1200 : 2000),
+    seed_limit: economyMode ? Math.min(seedLimit || basePlan.seed_limit || DEFAULT_SEED_LIMIT, 15) : (seedLimit || basePlan.seed_limit || DEFAULT_SEED_LIMIT),
+    hop_limit: economyMode ? Math.min(hopLimit || basePlan.hop_limit || DEFAULT_HOP_LIMIT, 5) : (hopLimit || basePlan.hop_limit || DEFAULT_HOP_LIMIT),
+    context_budget_tokens: basePlan.context_budget_tokens || (options.mode === 'suggestion' ? (economyMode ? 900 : 1200) : (economyMode ? 1200 : 2000)),
     search_queries: basePlan.search_queries || basePlan.semantic_queries || [],
     search_queries_messages: basePlan.search_queries_messages || basePlan.message_queries || [],
     web_queries: basePlan.web_queries || basePlan.query_sets?.web_queries || [],
@@ -933,7 +935,7 @@ async function buildHybridGraphRetrieval({
   
   // Consolidate and rank all search results picking the top 10
   const consolidatedSeeds = reciprocalRankFusion(semanticRankings);
-  const primarySeeds = consolidatedSeeds.slice(0, 10);
+  const primarySeeds = consolidatedSeeds.slice(0, economyMode ? 8 : 10);
   
   emit('primary_search_results', 'completed', {
     count: primarySeeds.length,
@@ -953,9 +955,9 @@ async function buildHybridGraphRetrieval({
 
   emit('expansion_stage', 'started', { label: 'Expand', detail: 'Traversing graph for supporting evidence...' });
   emit('traversal_started', 'started', { mode: retrievalPlan.entry_mode || 'hybrid' });
-  const coreRanking = await coreDownRanking(finalNodeRows, retrievalPlan, 80, semanticSeeds);
+  const coreRanking = await coreDownRanking(finalNodeRows, retrievalPlan, economyMode ? 60 : 80, semanticSeeds);
   const coreToRawRanking = (options.strategy === 'core_to_raw' || retrievalPlan.strategy === 'core_to_raw')
-    ? await recursiveDownTraversal(finalNodeRows, retrievalPlan, 60)
+    ? await recursiveDownTraversal(finalNodeRows, retrievalPlan, economyMode ? 40 : 60)
     : [];
   const recencyRanking = (retrievalPlan.mode === 'queryless' && !passiveOnly)
     ? await querylessRecentDocs(retrievalPlan.filters, 24)
@@ -996,7 +998,7 @@ async function buildHybridGraphRetrieval({
 
   // Agentic Review Loop
   const apiKey = process.env.DEEPSEEK_API_KEY || options.apiKey;
-  if (apiKey && seeds.length > 0) {
+  if (apiKey && seeds.length > 0 && !economyMode) {
     emit('agentic_review', 'started', { detail: 'Reviewing retrieved context for sufficiency...' });
     const review = await agenticReviewContext(query, seeds.slice(0, 5), apiKey);
     
@@ -1037,7 +1039,7 @@ async function buildHybridGraphRetrieval({
     .slice(0, 6)
     .map(r => ({ ...r, node_id: r.id }));
     
-  const graph = await expandGraph([...seeds, ...coreNodesForExpansion], retrievalPlan.hop_limit, MAX_EXPANDED, finalNodeRows);
+  const graph = await expandGraph([...seeds, ...coreNodesForExpansion], retrievalPlan.hop_limit, economyMode ? 300 : MAX_EXPANDED, finalNodeRows);
   emit('expansion_stage', 'completed', { label: 'Expand', detail: `Expanded to ${graph.expandedNodes.length} connected nodes.` });
   const primaryNodes = seeds.map((seed) => ({
     id: seed.node_id || seed.event_id || seed.key,

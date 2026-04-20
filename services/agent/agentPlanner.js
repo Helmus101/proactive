@@ -416,11 +416,12 @@ Rules:
       : prompt;
     const requestBody = {
       model: providerConfig.model,
+      max_tokens: 450,
+      temperature: 0.1,
       messages: [
         { role: 'system', content: 'You are a precise macOS accessibility automation planner. Respond with JSON actions only.' },
         { role: 'user', content: userContent }
       ],
-      temperature: 0.1,
       response_format: { type: 'json_object' }
     };
     const url = providerConfig.provider === 'openai'
