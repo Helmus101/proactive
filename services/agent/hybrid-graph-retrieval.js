@@ -6,9 +6,11 @@ const {
 } = require('./retrieval-thought-system');
 const {
   asObj,
-  logRetrievalRun
+  logRetrievalRun,
+  updateMemoryNode,
+  upsertRetrievalDoc
 } = require('./graph-store');
-const { callLLM } = require('./intelligence-engine');
+const { callLLM, generateNodeTLDR } = require('./intelligence-engine');
 
 const DEFAULT_SEED_LIMIT = 25;
 const DEFAULT_HOP_LIMIT = 10;
@@ -940,6 +942,36 @@ async function buildHybridGraphRetrieval({
   // Consolidate and rank all search results picking the top 10
   const consolidatedSeeds = reciprocalRankFusion(semanticRankings);
   const primarySeeds = consolidatedSeeds.slice(0, economyMode ? 8 : 10);
+
+  // Lazy enrichment for top seeds that lack a bulleted summary
+  const apiKey = process.env.DEEPSEEK_API_KEY || options.apiKey;
+  if (apiKey) {
+    for (const seed of primarySeeds) {
+      if (seed.source_type === 'node' && seed.node_id) {
+        const node = finalNodeRows.find(n => n.id === seed.node_id);
+        if (node && (!node.summary || !node.summary.startsWith('• '))) {
+          const tldr = await generateNodeTLDR(node, apiKey);
+          if (tldr) {
+            node.summary = tldr;
+            // Update in-memory seed text/summary so LLM benefits
+            seed.summary = tldr;
+            seed.text = `${node.title}\n${tldr}`;
+            
+            // Persist to DB and Retrieval Index
+            await updateMemoryNode(node.id, { summary: tldr }).catch(() => null);
+            await upsertRetrievalDoc({
+              docId: `node:${node.id}`,
+              sourceType: 'node',
+              nodeId: node.id,
+              timestamp: node.timestamp || new Date().toISOString(),
+              text: `${node.title}\n${tldr}`,
+              metadata: { layer: node.layer, title: node.title }
+            }).catch(() => null);
+          }
+        }
+      }
+    }
+  }
   
   emit('primary_search_results', 'completed', {
     count: primarySeeds.length,
@@ -1001,7 +1033,6 @@ async function buildHybridGraphRetrieval({
   emit('node_found', 'completed', { count: seeds.length, preview_items: seeds.slice(0, 3).map(s => s.text?.split('\n')[0] || s.node_id) });
 
   // Agentic Review Loop
-  const apiKey = process.env.DEEPSEEK_API_KEY || options.apiKey;
   if (apiKey && seeds.length > 0 && !economyMode) {
     emit('agentic_review', 'started', { detail: 'Reviewing retrieved context for sufficiency...' });
     const review = await agenticReviewContext(query, seeds.slice(0, 5), apiKey);
