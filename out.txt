@@ -1,0 +1,4512 @@
+Initializing SQLite database at: /home/engine/.proactive/proactive_graph.db
+[ReasoningPipeline] Starting pipeline for query: Did I finish the backend design?
+[ReasoningPipeline] Executing stage: thinking
+Step: { step: 'routing', status: 'started', label: 'routing' }
+Step: {
+  step: 'routing',
+  status: 'completed',
+  label: 'routing',
+  detail: 'Source mode: memory_only.',
+  preview_items: [ 'memory_only', 'all_time' ]
+}
+Step: { step: 'planning', status: 'started', label: 'planning' }
+Step: {
+  step: 'planning',
+  status: 'completed',
+  label: 'planning',
+  detail: 'Using default plan.',
+  preview_items: []
+}
+[ReasoningPipeline] Executing stage: initialSearch
+Step: { step: 'retrieving', status: 'started', label: 'Retrieving' }
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did I finish the backend design?'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did I finish the backend design'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did current status and progress'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did backend'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did general activity context'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did significance and patterns'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did general activity'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did recent context'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did implementation details'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did related activity'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did overview'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did background'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did next concrete step'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did open loop'
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+[ReasoningPipeline] Executing stage: nodeExpansion
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did I finish the backend design?'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did I finish the backend design'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did current status and progress'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did backend'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did general activity context'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did significance and patterns'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did general activity'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did recent context'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did implementation details'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did related activity'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did overview'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did background'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did next concrete step'
+}
+Step: {
+  step: 'query_generated',
+  status: 'completed',
+  label: 'query generated',
+  query: 'Did open loop'
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'candidates_loaded',
+  status: 'completed',
+  label: 'candidates loaded',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'started',
+  label: 'Search',
+  detail: 'Finding primary memory seeds...'
+}
+Step: {
+  step: 'vector_search_started',
+  status: 'started',
+  label: 'vector search started',
+  query_count: 13
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+Step: {
+  step: 'primary_search_results',
+  status: 'completed',
+  label: 'primary search results',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'iterative_expansion',
+  status: 'completed',
+  label: 'iterative expansion',
+  count: 0,
+  detail: 'Expanded graph from top 10 seeds following hierarchical sequence.'
+}
+Step: {
+  step: 'seeds_identified',
+  status: 'completed',
+  label: 'seeds identified',
+  count: 0
+}
+Step: {
+  step: 'search_stage',
+  status: 'completed',
+  label: 'Search',
+  detail: 'Found 0 primary memory seeds.'
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'started',
+  label: 'Expand',
+  detail: 'Traversing graph for supporting evidence...'
+}
+Step: {
+  step: 'traversal_started',
+  status: 'started',
+  label: 'traversal started',
+  mode: 'hybrid'
+}
+Step: {
+  step: 'node_found',
+  status: 'completed',
+  label: 'node found',
+  count: 0,
+  preview_items: []
+}
+Step: {
+  step: 'expansion_stage',
+  status: 'completed',
+  label: 'Expand',
+  detail: 'Expanded to 0 connected nodes.'
+}
+[ReasoningPipeline] Executing stage: judge
+Step: { step: 'judging', status: 'started', label: 'Judging' }
+Step: {
+  step: 'judging',
+  status: 'completed',
+  detail: 'No API key or no evidence for judging.'
+}
+[ReasoningPipeline] Executing stage: reflect
+[ReasoningPipeline] Executing stage: synthesis
+Step: { step: 'synthesis', status: 'started', label: 'Synthesis' }
+Step: { step: 'synthesis', status: 'completed' }
+Step: {
+  step: 'memory_writeback',
+  status: 'completed',
+  label: 'Write-back',
+  detail: 'Stored this chat turn back into memory as raw chat events.',
+  counts: {},
+  preview_items: []
+}
+
+--- Final Response ---
+I couldn't produce an answer from the current memory context.
+
+--- Trace ---
+{
+  "thinking_summary": "Planned for state using semantic retrieval in summary mode. Execution strategy: memory_only. Memory support was weak, so the answer may rely on limited evidence.",
+  "strategy": {
+    "strategy_mode": "memory_only",
+    "source_mode": "memory_only",
+    "entry_mode": "hybrid",
+    "summary_vs_raw": "summary",
+    "time_scope": "all_time",
+    "app_scope": [
+      "Cursor",
+      "Figma"
+    ],
+    "source_scope": [],
+    "web_gate_reason": "Memory retrieval should be sufficient unless the internal evidence is weak.",
+    "answer_basis": "memory_only",
+    "text": [
+      "Strategy mode: memory_only",
+      "Entry mode: hybrid",
+      "Summary mode: summary",
+      "Time scope: all_time",
+      "App scope: Cursor, Figma",
+      "Web gate: Memory retrieval should be sufficient unless the internal evidence is weak.",
+      "Answer basis: memory_only"
+    ]
+  },
+  "router": {
+    "source_mode": "memory_only",
+    "router_reason": "The request appears focused on personal activity, memory, or prior context.",
+    "time_scope": {
+      "label": "all_time",
+      "source": "none",
+      "range": null
+    },
+    "summary_vs_raw": "summary"
+  },
+  "filters": [
+    {
+      "label": "App filter",
+      "value": "Cursor"
+    }
+  ],
+  "search_queries": {
+    "context": [
+      "Did I finish the backend design?"
+    ],
+    "messages": [],
+    "lexical": [
+      "finish",
+      "backend",
+      "design"
+    ],
+    "web": [
+      "Did I finish the backend design",
+      "Did current status and progress",
+      "Did backend",
+      "Did general activity context",
+      "Did significance and patterns",
+      "Did general activity",
+      "Did recent context",
+      "Did implementation details",
+      "Did related activity",
+      "Did overview",
+      "Did background",
+      "Did next concrete step",
+      "Did open loop"
+    ]
+  },
+  "results_summary": {
+    "headline": "Found little or no matching memory in the requested scope.",
+    "details": [
+      "No strong memory cluster was found.",
+      "Iterative flow: identified 0 top-tier seeds via RRF consolidation.",
+      "Hierarchical expansion: added 0 neighbors from top seeds.",
+      "Screen queries: Did open loop."
+    ],
+    "seed_count": 0,
+    "primary_count": 0,
+    "support_count": 0,
+    "evidence_node_count": 0,
+    "evidence_count": 0
+  },
+  "planner": null,
+  "judge": {
+    "sufficient": true,
+    "reason": "No API key or no evidence for judging."
+  },
+  "reflector": {
+    "approved": true
+  },
+  "data_sources": [],
+  "connection_candidates": [],
+  "seed_results": [],
+  "primary_nodes": [],
+  "support_nodes": [],
+  "evidence_nodes": [],
+  "graph_expansion_results": [],
+  "web_search_used": false,
+  "web_results_summary": [],
+  "memory_sources": [],
+  "web_sources": [],
+  "generated_queries": {
+    "query_bundle": {
+      "intent": "state",
+      "entity": "Did",
+      "clusters": [
+        "general_activity"
+      ],
+      "semantic_queries": [
+        "Did I finish the backend design",
+        "Did current status and progress",
+        "Did backend",
+        "Did general activity context",
+        "Did significance and patterns",
+        "Did general activity",
+        "Did recent context",
+        "Did implementation details",
+        "Did related activity",
+        "Did overview",
+        "Did background"
+      ],
+      "source_mode": "memory"
+    },
+    "semantic": [
+      "Did I finish the backend design?"
+    ],
+    "messages": [],
+    "web": [
+      "Did I finish the backend design",
+      "Did current status and progress",
+      "Did backend",
+      "Did general activity context",
+      "Did significance and patterns",
+      "Did general activity",
+      "Did recent context",
+      "Did implementation details",
+      "Did related activity",
+      "Did overview",
+      "Did background",
+      "Did next concrete step",
+      "Did open loop"
+    ],
+    "lexical_terms": [
+      "finish",
+      "backend",
+      "design"
+    ],
+    "debug": {
+      "intent": "state",
+      "clusters": [
+        "general_activity"
+      ],
+      "entities": [
+        "Did"
+      ]
+    }
+  },
+  "lexical_terms": [
+    "finish",
+    "backend",
+    "design"
+  ],
+  "web_results": [],
+  "answer_basis": "memory_only",
+  "temporal_reasoning": [
+    "No temporal window inferred from the user phrasing."
+  ],
+  "query_sets": {
+    "memory_queries": [
+      "Did I finish the backend design",
+      "Did current status and progress",
+      "Did backend",
+      "Did general activity context",
+      "Did significance and patterns",
+      "Did general activity",
+      "Did recent context",
+      "Did implementation details",
+      "Did related activity",
+      "Did overview",
+      "Did background",
+      "Did next concrete step",
+      "Did open loop"
+    ],
+    "message_queries": [],
+    "web_queries": [
+      "Did I finish the backend design",
+      "Did current status and progress",
+      "Did backend",
+      "Did general activity context",
+      "Did significance and patterns",
+      "Did general activity",
+      "Did recent context",
+      "Did implementation details",
+      "Did related activity",
+      "Did overview",
+      "Did background",
+      "Did next concrete step",
+      "Did open loop"
+    ]
+  },
+  "stage_trace": [
+    {
+      "step": "routing",
+      "status": "started",
+      "label": "routing"
+    },
+    {
+      "step": "routing",
+      "status": "completed",
+      "label": "routing",
+      "detail": "Source mode: memory_only.",
+      "preview_items": [
+        "memory_only",
+        "all_time"
+      ]
+    },
+    {
+      "step": "planning",
+      "status": "started",
+      "label": "planning"
+    },
+    {
+      "step": "planning",
+      "status": "completed",
+      "label": "planning",
+      "detail": "Using default plan.",
+      "preview_items": []
+    },
+    {
+      "step": "retrieving",
+      "status": "started",
+      "label": "Retrieving"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did I finish the backend design?"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did I finish the backend design"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did current status and progress"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did backend"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did general activity context"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did significance and patterns"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did general activity"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did recent context"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did implementation details"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did related activity"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did overview"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did background"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did next concrete step"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did open loop"
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did I finish the backend design?"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did I finish the backend design"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did current status and progress"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did backend"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did general activity context"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did significance and patterns"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did general activity"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did recent context"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did implementation details"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did related activity"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did overview"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did background"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did next concrete step"
+    },
+    {
+      "step": "query_generated",
+      "status": "completed",
+      "label": "query generated",
+      "query": "Did open loop"
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "candidates_loaded",
+      "status": "completed",
+      "label": "candidates loaded",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "started",
+      "label": "Search",
+      "detail": "Finding primary memory seeds..."
+    },
+    {
+      "step": "vector_search_started",
+      "status": "started",
+      "label": "vector search started",
+      "query_count": 13
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "primary_search_results",
+      "status": "completed",
+      "label": "primary search results",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "iterative_expansion",
+      "status": "completed",
+      "label": "iterative expansion",
+      "count": 0,
+      "detail": "Expanded graph from top 10 seeds following hierarchical sequence."
+    },
+    {
+      "step": "seeds_identified",
+      "status": "completed",
+      "label": "seeds identified",
+      "count": 0
+    },
+    {
+      "step": "search_stage",
+      "status": "completed",
+      "label": "Search",
+      "detail": "Found 0 primary memory seeds."
+    },
+    {
+      "step": "expansion_stage",
+      "status": "started",
+      "label": "Expand",
+      "detail": "Traversing graph for supporting evidence..."
+    },
+    {
+      "step": "traversal_started",
+      "status": "started",
+      "label": "traversal started",
+      "mode": "hybrid"
+    },
+    {
+      "step": "node_found",
+      "status": "completed",
+      "label": "node found",
+      "count": 0,
+      "preview_items": []
+    },
+    {
+      "step": "expansion_stage",
+      "status": "completed",
+      "label": "Expand",
+      "detail": "Expanded to 0 connected nodes."
+    },
+    {
+      "step": "judging",
+      "status": "started",
+      "label": "Judging"
+    },
+    {
+      "step": "judging",
+      "status": "completed",
+      "detail": "No API key or no evidence for judging."
+    },
+    {
+      "step": "synthesis",
+      "status": "started",
+      "label": "Synthesis"
+    },
+    {
+      "step": "synthesis",
+      "status": "completed"
+    },
+    {
+      "step": "memory_writeback",
+      "status": "completed",
+      "label": "Write-back",
+      "detail": "Stored this chat turn back into memory as raw chat events.",
+      "counts": {},
+      "preview_items": []
+    }
+  ],
+  "initial_date_range": null,
+  "applied_date_range": null,
+  "widened_date_range": null,
+  "date_filter_status": "not_used",
+  "layers": []
+}

@@ -2,6 +2,7 @@ const db = require('../db');
 const { ingestRawEvent } = require('../ingestion');
 const { callLLM } = require('./intelligence-engine');
 const { buildHybridGraphRetrieval } = require('./hybrid-graph-retrieval');
+const { ReasoningPipeline } = require('./reasoning-pipeline');
 const { buildRetrievalThought, widenTemporalWindow, inferSurfaceFamilies } = require('./retrieval-thought-system');
 
 function safeJsonParse(value, fallback) {
@@ -510,7 +511,6 @@ function buildThinkingResultsSummary(retrieval, drilldownEvidence = []) {
     details.push(`Initial seed search found ${retrieval.seed_results.length} ranked seed results before graph expansion.`);
   }
 
-  // Add iterative flow details if available in stageTrace
   const stageTrace = retrieval?.stage_trace || [];
   const primarySearchEvents = stageTrace.filter(s => s.step === 'primary_search_results');
   if (primarySearchEvents.length) {
@@ -561,7 +561,6 @@ async function buildThinkingTrace({ query, retrieval, drilldownEvidence = [] }) 
   const strategy = buildThinkingStrategy(retrieval, drilldownEvidence);
   const resultsSummary = buildThinkingResultsSummary(retrieval, drilldownEvidence);
 
-  // Add Deep Search indicator if recursion was used
   if (retrieval?.retrieval_plan?.recursion_depth > 0) {
     resultsSummary.details.push("Performed recursive 'Deep Search' expansion from high-confidence anchor nodes.");
   }
@@ -697,11 +696,9 @@ async function executeParallelRetrieval(baseQuery, baseThought, options, onProgr
   ].filter(Boolean);
   const queries = Array.from(new Set(bundle)).slice(0, 15);
 
-  // Detect when a query requires deep context (e.g., long-term relationship, patterns)
   const requiresDeepContext = /\b(relationship|pattern|over the last|long-term|habit|habitual|recurring|years?|months?)\b/i.test(baseQuery);
   const recursionDepth = (requiresDeepContext && !options.passiveOnly) ? 1 : 0;
 
-  // Parallel multi-agent dispatch
   const results = await Promise.allSettled(queries.map((q) => buildHybridGraphRetrieval({
     query: q,
     options: {
@@ -774,7 +771,6 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     } catch (_) {}
   };
 
-  // Normalize API key: prefer explicit param, then environment, then options; treat empty string as absent
   if (!apiKey) {
     apiKey = process.env.DEEPSEEK_API_KEY || options?.apiKey || null;
   }
@@ -785,7 +781,6 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     return event;
   };
 
-  // Persist user chat turn as a raw event
   await ingestRawEvent({
     type: 'ChatMessage',
     source: 'Chat',
@@ -797,270 +792,36 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     }
   }).catch(e => console.warn('Failed to persist user chat turn:', e));
 
-  // 1. Router Stage
-  emitStage('routing', 'started', { label: 'Routing' });
-  const { baseThought, retrievalQuery, chatHistory } = await runRouterStage({ query, options });
-  emitStage('routing', 'completed', {
-    label: 'Routing',
-    detail: formatStageDetail([
-      `Source mode: ${baseThought.source_mode || baseThought.strategy_mode || 'memory_only'}.`,
-      baseThought.router_reason || baseThought.web_gate_reason || ''
-    ], 'Planned source routing.'),
-    counts: {
-      memory_queries: Number(baseThought.query_sets?.memory_queries?.length || baseThought.semantic_queries?.length || 0),
-      message_queries: Number(baseThought.query_sets?.message_queries?.length || baseThought.message_queries?.length || 0),
-      web_queries: Number(baseThought.query_sets?.web_queries?.length || baseThought.web_queries?.length || 0)
-    },
-    preview_items: [
-      baseThought.source_mode || baseThought.strategy_mode || 'memory_only',
-      baseThought.time_scope?.label || null,
-      baseThought.summary_vs_raw || null
-    ].filter(Boolean)
+  const pipeline = new ReasoningPipeline();
+  const pipelineResult = await pipeline.run({
+    query,
+    options: { ...options, apiKey },
+  }, (data) => {
+    stageTrace.push(data);
+    onStep?.(data);
   });
 
-  emitStage('query_generation', 'completed', {
-    label: 'Query generation',
-    detail: formatStageDetail([
-      `Prepared ${baseThought.query_sets?.memory_queries?.length || baseThought.semantic_queries?.length || 0} memory queries,`,
-      `${baseThought.query_sets?.message_queries?.length || baseThought.message_queries?.length || 0} message queries,`,
-      `and ${baseThought.query_sets?.web_queries?.length || baseThought.web_queries?.length || 0} web fallback queries.`
-    ], 'Prepared retrieval queries.'),
-    counts: {
-      memory_queries: Number(baseThought.query_sets?.memory_queries?.length || baseThought.semantic_queries?.length || 0),
-      message_queries: Number(baseThought.query_sets?.message_queries?.length || baseThought.message_queries?.length || 0),
-      web_queries: Number(baseThought.query_sets?.web_queries?.length || baseThought.web_queries?.length || 0)
-    },
-    preview_items: [
-      ...((baseThought.query_sets?.memory_queries || baseThought.semantic_queries || []).slice(0, 2)),
-      ...((baseThought.query_sets?.web_queries || baseThought.web_queries || []).slice(0, 1))
-    ]
-  });
+  const {
+    retrieval = {},
+    content = "I encountered an error during reasoning.",
+    retrievalQuery,
+    chatHistory,
+    drilldownEvidence = [],
+    webResults = [],
+    reflection = { approved: true }
+  } = pipelineResult;
 
-  // 2. Planner Stage
-  emitStage('planning', 'started', { label: 'Planning' });
-  let plan = await runPlannerStage({ query: retrievalQuery, routerOutput: baseThought, apiKey });
-  emitStage('planning', 'completed', {
-    label: 'Planning',
-    detail: plan ? 'Created a formal execution plan with refined queries.' : 'Using default routing plan.',
-    preview_items: plan?.reasoning_plan || []
-  });
-
-  // 3. Retriever Stage (with Judge loop)
-  let retrieval = {
-    retrieval_plan: baseThought,
-    router: {
-      source_mode: baseThought.source_mode || baseThought.strategy_mode || 'memory_only',
-      router_reason: baseThought.router_reason || baseThought.web_gate_reason || '',
-      time_scope: baseThought.time_scope || null,
-      summary_vs_raw: baseThought.summary_vs_raw || 'summary'
-    },
-    query_sets: baseThought.query_sets || {
-      memory_queries: baseThought.semantic_queries || [],
-      message_queries: baseThought.message_queries || [],
-      web_queries: baseThought.web_queries || []
-    },
-    generated_queries: {
-      semantic: baseThought.semantic_queries || [],
-      messages: baseThought.message_queries || [],
-      web: baseThought.web_queries || [],
-      lexical_terms: baseThought.lexical_terms || []
-    },
-    seed_nodes: [],
-    seed_results: [],
-    primary_nodes: [],
-    support_nodes: [],
-    evidence_nodes: [],
-    expanded_nodes: [],
-    graph_expansion_results: [],
-    edge_paths: [],
-    evidence: [],
-    evidence_count: 0,
-    contextText: ''
-  };
-  let webResults = [];
-  let drilldownEvidence = [];
-  let judgment = { sufficient: false };
-  let iteration = 0;
-  const maxIterations = 2;
-
-  while (!judgment.sufficient && iteration < maxIterations) {
-    iteration++;
-    emitStage('retrieving', 'started', { label: iteration > 1 ? `Re-retrieving (Attempt ${iteration})` : 'Retrieving' });
-
-    // Use refined queries if available and it's not the first pass or if they exist
-    const currentThought = (iteration > 1 && judgment.suggested_queries)
-      ? { ...baseThought, semantic_queries: judgment.suggested_queries }
-      : (plan?.refined_queries ? { ...baseThought, semantic_queries: plan.refined_queries } : baseThought);
-
-    if ((currentThought.source_mode || currentThought.strategy_mode) !== 'web_only') {
-      retrieval = await executeParallelRetrieval(retrievalQuery, currentThought, {
-        mode: 'chat',
-        app: options?.app,
-        date_range: currentThought.applied_date_range || options?.date_range,
-        source_types: options?.source_types,
-        retrieval_thought: currentThought,
-        passiveOnly: iteration === 1
-      }, emit);
-
-      if (iteration === 1 && retrievalLooksSparse(retrieval)) {
-        retrieval = await executeParallelRetrieval(retrievalQuery, currentThought, {
-          mode: 'chat',
-          app: options?.app,
-          date_range: currentThought.applied_date_range || options?.date_range,
-          source_types: options?.source_types,
-          retrieval_thought: currentThought,
-          passiveOnly: false
-        }, emit);
-      }
-
-      // Widen if still sparse
-      const canWiden = Boolean(currentThought?.initial_date_range || currentThought?.filters?.app) && !currentThought?.fallback_policy?.attempted;
-      if (canWiden && retrievalLooksSparse(retrieval)) {
-        const widenedRange = currentThought.initial_date_range ? widenTemporalWindow(currentThought.initial_date_range) : null;
-        let widenedApps = null;
-        if (currentThought.filters?.app) {
-          const families = inferSurfaceFamilies(retrievalQuery, '', currentThought.filters.app);
-          if (families.includes('communication')) widenedApps = ['Gmail', 'Slack', 'Messages', 'WhatsApp', 'Signal'];
-          else if (families.includes('coding')) widenedApps = ['GitHub', 'Cursor', 'Xcode', 'VSCode'];
-          else if (families.includes('browser')) widenedApps = ['Chrome', 'Safari', 'Arc'];
-        }
-
-        if (widenedRange || widenedApps) {
-          const widenedThought = {
-            ...currentThought,
-            filters: { ...(currentThought.filters || {}), date_range: widenedRange || currentThought.filters?.date_range, app: widenedApps || currentThought.filters?.app },
-            applied_date_range: widenedRange || currentThought.applied_date_range,
-            widened_date_range: widenedRange,
-            date_filter_status: 'widened',
-            fallback_policy: { ...(currentThought.fallback_policy || { mode: 'widen_once' }), attempted: true, widened: true }
-          };
-          retrieval = await executeParallelRetrieval(retrievalQuery, widenedThought, {
-            mode: 'chat',
-            app: widenedApps || options?.app,
-            date_range: widenedRange || currentThought.applied_date_range,
-            source_types: options?.source_types,
-            retrieval_thought: widenedThought
-          }, onStep);
-        }
-      }
-
-      emitStage('ranking', 'completed', {
-        label: 'Ranking and packing',
-        detail: `Packed ${retrieval.evidence_count || 0} evidence items from primary nodes, support nodes, and downward evidence.`,
-        counts: retrieval.packed_context_stats || {
-          evidence: Number(retrieval.evidence_count || 0)
-        },
-        preview_items: (retrieval.evidence || []).slice(0, 3).map((item) => item.text || item.id)
-      });
-    } else {
-      emitStage('ranking', 'skipped', {
-        label: 'Ranking and packing',
-        detail: 'Skipped memory context packing because the request is web-only.'
-      });
-    }
-
-    const webAssessment = assessWebSearchNecessity(query, currentThought, retrieval);
-    const shouldSearchWeb = webAssessment.shouldSearchWeb || (currentThought.source_mode || currentThought.strategy_mode) === 'web_only';
-    
-    if (shouldSearchWeb) {
-      const webSearchQuery = (judgment.suggested_queries?.[0]) || (currentThought?.semantic_queries?.[0]) || query;
-      emitStage('web_search', 'started', {
-        label: 'Web search',
-        detail: `${webAssessment.reason} Searching the web using: ${webSearchQuery}`
-      });
-      webResults = await searchFreeWeb(webSearchQuery, 4);
-      emitStage('web_search', 'completed', {
-        label: 'Web search',
-        detail: webResults.length ? `Retrieved ${webResults.length} public web results.` : 'No web results were returned.',
-        counts: { web_results: webResults.length },
-        preview_items: webResults.slice(0, 3).map((item) => item.title || item.url)
-      });
-    } else {
-      emitStage('web_search', 'skipped', {
-        label: 'Web search',
-        detail: webAssessment.reason
-      });
-    }
-
-    drilldownEvidence = (retrieval.drilldown_refs || []).length
-      ? await fetchDrilldownEvidence(retrieval.drilldown_refs || [])
-      : [];
-
-    // 4. Judge Stage
-    emitStage('judging', 'started', { label: 'Judging' });
-    judgment = await runJudgeStage({ query: retrievalQuery, plan, evidence: [...(retrieval.evidence || []), ...webResults], apiKey });
-    emitStage('judging', 'completed', {
-      label: 'Judging',
-      detail: judgment.reason,
-      status: judgment.sufficient ? 'completed' : 'retry'
-    });
-
-    if (judgment.sufficient || !apiKey) break;
-  }
-
-  // Final metadata updates for retrieval object
   retrieval.stage_trace = stageTrace;
-  retrieval.web_search_used = webResults.length > 0;
-  retrieval.web_results = webResults;
-  retrieval.web_sources = webResults.map(r => r.url).filter(Boolean);
-  retrieval.plan = plan;
-  retrieval.judgment = judgment;
+  retrieval.web_search_used = (webResults || []).length > 0;
+  retrieval.web_results = webResults || [];
+  retrieval.web_sources = (webResults || []).map(r => r.url).filter(Boolean);
+  retrieval.plan = pipelineResult.plan;
+  retrieval.judgment = pipelineResult.judgment;
+  retrieval.reflection = reflection;
 
-  const thinkingTrace = await buildThinkingTrace({ query, retrieval, drilldownEvidence });
-  const standingNotes = String(options?.standing_notes || options?.core_memory || '').trim();
-
-  // 5. Synthesizer Stage (with Reflector loop)
-  let content = '';
-  let reflection = { approved: false };
-  let synthIteration = 0;
-  const maxSynthIterations = 2;
-
-  if (!apiKey) {
-    emitStage('synthesis', 'started', { label: 'Synthesis' });
-    content = buildGroundedFallbackAnswer(query, retrieval, drilldownEvidence);
-    reflection.approved = true;
-  } else {
-    while (!reflection.approved && synthIteration < maxSynthIterations) {
-      synthIteration++;
-      emitStage('synthesis', 'started', { label: synthIteration > 1 ? `Re-synthesizing (Attempt ${synthIteration})` : 'Synthesis', detail: 'Reasoning over the packed context bundle to draft the answer.' });
-      content = await runSynthesizerStage({
-        query,
-        retrieval,
-        chatHistory,
-        standingNotes,
-        drilldownEvidence,
-        webResults,
-        apiKey,
-        reflectorFeedback: synthIteration > 1 ? reflection : null
-      });
-
-      // 6. Reflector Stage
-      emitStage('reflecting', 'started', { label: 'Reflecting' });
-      reflection = await runReflectorStage({ query, evidence: [...(retrieval.evidence || []), ...webResults], answer: content, apiKey });
-      retrieval.reflection = reflection;
-      emitStage('reflecting', 'completed', {
-        label: 'Reflecting',
-        detail: reflection.reason,
-        status: reflection.approved ? 'completed' : 'retry'
-      });
-
-      if (reflection.approved) break;
-    }
-  }
-
-  emitStage('synthesis', 'completed', {
-    label: 'Synthesis',
-    detail: webResults.length ? 'Generated the answer from memory plus web support.' : 'Generated the answer from memory context.',
-    counts: {
-      evidence: Number(retrieval.evidence_count || 0),
-      web_results: Number(webResults.length || 0)
-    }
-  });
-
-  // Update thinkingTrace again to include reflection if it happened
+  const thinkingTrace = await buildThinkingTrace({ query, retrieval, drilldownEvidence: drilldownEvidence || [] });
   thinkingTrace.reflector = reflection;
 
-  // Persist assistant chat turn as a raw event
   await ingestRawEvent({
     type: 'ChatMessage',
     source: 'Chat',
@@ -1071,15 +832,17 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       timestamp: new Date().toISOString()
     }
   }).catch(e => console.warn('Failed to persist assistant chat turn:', e));
+
   emitStage('memory_writeback', 'completed', {
     label: 'Write-back',
     detail: 'Stored this chat turn back into memory as raw chat events.'
   });
 
-  const correctionMatch = content.match(/<memory_correction>([\s\S]*?)<\/memory_correction>/i);
+  let finalContent = content;
+  const correctionMatch = finalContent.match(/<memory_correction>([\s\S]*?)<\/memory_correction>/i);
   if (correctionMatch && correctionMatch[1]) {
     const correctionText = correctionMatch[1].trim();
-    content = content.replace(/<memory_correction>[\s\S]*?<\/memory_correction>/i, '').trim();
+    finalContent = finalContent.replace(/<memory_correction>[\s\S]*?<\/memory_correction>/i, '').trim();
 
     const { upsertMemoryNode, stableHash } = require('./graph-store');
     const correctionId = `core_corr_${stableHash(correctionText)}`;
@@ -1097,43 +860,41 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     }).catch(e => console.error('Failed to write core memory correction:', e));
   }
 
-  // Handle new memory management tools via XML tags
   const { dispatchTool } = require('./tool-dispatcher');
-
-  const searchMatch = content.match(/<memory_search>([\s\S]*?)<\/memory_search>/i);
+  const searchMatch = finalContent.match(/<memory_search>([\s\S]*?)<\/memory_search>/i);
   if (searchMatch && searchMatch[1]) {
     const queryText = searchMatch[1].trim();
-    content = content.replace(/<memory_search>[\s\S]*?<\/memory_search>/i, '').trim();
+    finalContent = finalContent.replace(/<memory_search>[\s\S]*?<\/memory_search>/i, '').trim();
     await dispatchTool({ tool: 'memory_search', input: { query: queryText } }).catch(() => null);
   }
 
-  const drilldownMatch = content.match(/<memory_drilldown>([\s\S]*?)<\/memory_drilldown>/i);
+  const drilldownMatch = finalContent.match(/<memory_drilldown>([\s\S]*?)<\/memory_drilldown>/i);
   if (drilldownMatch && drilldownMatch[1]) {
     const nodeId = drilldownMatch[1].trim();
-    content = content.replace(/<memory_drilldown>[\s\S]*?<\/memory_drilldown>/i, '').trim();
+    finalContent = finalContent.replace(/<memory_drilldown>[\s\S]*?<\/memory_drilldown>/i, '').trim();
     await dispatchTool({ tool: 'memory_drilldown', input: { node_id: nodeId } }).catch(() => null);
   }
 
-  const updateMatch = content.match(/<memory_update>([\s\S]*?)<\/memory_update>/i);
+  const updateMatch = finalContent.match(/<memory_update>([\s\S]*?)<\/memory_update>/i);
   if (updateMatch && updateMatch[1]) {
     try {
       const input = JSON.parse(updateMatch[1].trim());
-      content = content.replace(/<memory_update>[\s\S]*?<\/memory_update>/i, '').trim();
+      finalContent = finalContent.replace(/<memory_update>[\s\S]*?<\/memory_update>/i, '').trim();
       await dispatchTool({ tool: 'memory_update', input }).catch(() => null);
     } catch (_) {}
   }
 
-  const linkMatch = content.match(/<memory_link>([\s\S]*?)<\/memory_link>/i);
+  const linkMatch = finalContent.match(/<memory_link>([\s\S]*?)<\/memory_link>/i);
   if (linkMatch && linkMatch[1]) {
     try {
       const input = JSON.parse(linkMatch[1].trim());
-      content = content.replace(/<memory_link>[\s\S]*?<\/memory_link>/i, '').trim();
+      finalContent = finalContent.replace(/<memory_link>[\s\S]*?<\/memory_link>/i, '').trim();
       await dispatchTool({ tool: 'memory_link', input }).catch(() => null);
     } catch (_) {}
   }
 
   return {
-    content,
+    content: finalContent,
     thinking_trace: thinkingTrace,
     retrieval: {
       ...retrieval,
@@ -1189,7 +950,6 @@ async function runPlannerStage({ query, routerOutput, apiKey }) {
   const prompt = `[System]
 You are an expert retrieval planner for a memory-native AI assistant. 
 Your goal is to take a user query and a router's initial strategy, and produce a formal, multi-step execution plan.
-Analyze the query for specific entities, timeframes, and intent.
 
 [User Query]
 ${query}
@@ -1209,7 +969,6 @@ Return only valid JSON.`;
     const plan = await callLLM(prompt, apiKey, 0.22, { maxTokens: 800, task: 'routing' });
     return plan;
   } catch (e) {
-    console.error('[Planner] Stage failed:', e.message);
     return null;
   }
 }
@@ -1323,5 +1082,18 @@ ${query}`;
 
 module.exports = {
   answerChatQuery,
-  buildThinkingTrace
+  buildThinkingTrace,
+  normalizeChatHistoryWindow,
+  buildQueryWithChatContext,
+  runRouterStage,
+  runPlannerStage,
+  runJudgeStage,
+  runReflectorStage,
+  runSynthesizerStage,
+  retrievalLooksSparse,
+  executeParallelRetrieval,
+  searchFreeWeb,
+  fetchDrilldownEvidence,
+  assessWebSearchNecessity,
+  buildGroundedFallbackAnswer
 };
