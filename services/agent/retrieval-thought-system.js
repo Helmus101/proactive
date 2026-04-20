@@ -800,7 +800,7 @@ function shouldDefaultRecentWindow(text, mode, normalizedDateRange) {
   if (mode !== 'chat' || normalizedDateRange) return false;
   const lower = safeText(text).toLowerCase();
   if (/\b(exact|verbatim|quote|quoted|precise|wording)\b/.test(lower)) return false;
-  return /\b(status|progress|update|where do things stand|how is .* going|what did i work on|what's the status|waitlist|project|task|work)\b/.test(lower);
+  return true;
 }
 
 function buildDefaultRecentWindow(now = new Date()) {
@@ -844,8 +844,8 @@ function inferRouterDecision(text, llmSourceMode, webGate) {
     sourceMode = 'memory_only';
     routerReason = 'The request is asking for a personal bio/profile grounded in memory and prior context.';
   } else if (llmSourceMode === 'web') {
-    sourceMode = 'web_only';
-    routerReason = 'The structured router classified this as external or current information.';
+    sourceMode = 'memory_then_web';
+    routerReason = 'The structured router classified this as external or current information, but memory is searched first and web corroboration follows if needed.';
   } else if (llmSourceMode === 'hybrid') {
     sourceMode = 'memory_then_web';
     routerReason = 'The structured router classified this as needing memory context plus external corroboration.';
@@ -853,8 +853,8 @@ function inferRouterDecision(text, llmSourceMode, webGate) {
     sourceMode = 'memory_then_web';
     routerReason = 'The request mixes personal context with current or public information.';
   } else if (asksCurrentWorld && !looksPersonal && !asksLifeContext) {
-    sourceMode = 'web_only';
-    routerReason = 'The request appears focused on current or public world knowledge.';
+    sourceMode = 'memory_then_web';
+    routerReason = 'The request appears focused on current or public world knowledge, so memory is searched first and web corroboration follows if needed.';
   } else if (looksPersonal || asksLifeContext) {
     sourceMode = 'memory_only';
     routerReason = 'The request appears focused on personal activity, memory, or prior context.';
@@ -1044,6 +1044,18 @@ async function buildRetrievalThought({
     message_queries: messageQueries,
     lexical_terms: lexicalTerms,
     query_sets: querySets,
+    search_phases: [
+      {
+        id: 'phase_1_initial_search',
+        label: 'Initial memory search',
+        description: 'Parse the query, apply time filters first, and search core, insight, semantic, episode, and raw layers.'
+      },
+      {
+        id: 'phase_2_node_expansion',
+        label: 'Node expansion + rerank',
+        description: 'Expand from the strongest nodes, gather connected evidence, and rerank before synthesis.'
+      }
+    ],
     query_bundle: structuredQueries?.query_bundle || null,
     query_debug: structuredQueries?.debug || {
       inferred_entities: extractNamedEntities(mergedText || query),

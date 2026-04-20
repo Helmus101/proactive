@@ -3,6 +3,8 @@
 class WeaveApp {
     constructor() {
         this.todos = [];
+        this.contacts = [];
+        this.selectedContact = null;
         this.currentFilter = 'all';
         this.activeView = 'today-view';
         this.expandedCards = new Set();
@@ -37,6 +39,7 @@ class WeaveApp {
         this.setupNavigation();
         this.setupSuggestions();
         await this.setupChat();
+        await this.setupContactsView();
         this.setupSettings();
         this.setupLibrary();
         window.electronAPI.onProactiveSuggestions?.((suggestions) => {
@@ -57,6 +60,7 @@ class WeaveApp {
         window.electronAPI.onMemoryGraphUpdate?.((payload) => this.handleMemoryGraphUpdate(payload));
         window.electronAPI.onVoiceCommandToggle?.((payload) => this.handleVoiceCommandToggle(payload));
         window.electronAPI.onVoiceSessionUpdate?.((payload) => this.handleVoiceSessionUpdate(payload));
+        window.electronAPI.onAutomationResult?.((payload) => this.handleAutomationResult(payload));
         await this.loadInitialData();
         setInterval(() => this.updateChatSyncStatus(), 10000);
     }
@@ -177,7 +181,9 @@ class WeaveApp {
             this.renderFullMemoryGraph();
             this.scrollChatToBottom();
         }
-
+        if (viewId === 'contacts-view') {
+            this.loadContacts(); // Refresh contacts when view is opened
+        }
         if (viewId === 'settings-view') {
             this.loadSettingsData();
         }
@@ -516,6 +522,9 @@ class WeaveApp {
                 .map((a) => a.label)
                 .filter((label) => this.isConcreteActionLabel(label))
             : [];
+        const providerLabel = String(todo.provider || '').toLowerCase();
+        const showDeepSeek = providerLabel === 'deepseek';
+        const showAI = Boolean(todo.ai_generated || todo.ai_doable || todo.ai_draft || showDeepSeek);
 
         return `
                 <article class="suggestion-card liquid-card${isStudy ? ' suggestion-study' : ''}" data-id="${this.escapeHtml(todo.id)}" tabindex="0" style="animation-delay:${index * 40}ms;">
@@ -526,6 +535,8 @@ class WeaveApp {
                         <div class="suggestion-content">
                             <div class="suggestion-title-row">
                                 <span class="suggestion-type-label">${isStudy ? 'study' : this.escapeHtml(todo.category || 'work')}</span>
+                                ${showAI ? '<span class="ai-source-badge ai">AI</span>' : ''}
+                                ${showDeepSeek ? '<span class="ai-source-badge deepseek">DeepSeek</span>' : ''}
                                 ${aiCanAutomate ? '<span class="suggestion-auto-badge">AI can automate</span>' : ''}
                             </div>
                             <div class="suggestion-title">${this.escapeHtml(todo.title)}</div>
@@ -588,6 +599,11 @@ class WeaveApp {
                         <span class="material-symbols-outlined">wb_sunny</span>
                     </div>
                     <div class="suggestion-content">
+                        <div class="suggestion-title-row" style="margin-bottom: 6px;">
+                            <span class="suggestion-type-label">brief</span>
+                            <span class="ai-source-badge ai">AI</span>
+                            <span class="ai-source-badge deepseek">DeepSeek</span>
+                        </div>
                         <div class="suggestion-title">Morning Brief • ${this.escapeHtml(latest.dateLabel || '')}</div>
                         <div class="suggestion-description">${this.escapeHtml(subtitle || 'Your daily 5-minute kickoff is ready.')}</div>
                     </div>
@@ -797,6 +813,171 @@ const filtered = this.todos.filter((todo) => {
         return `${pct}% intent confidence`;
     }
 
+    async loadContacts() {
+        try {
+            const { detectAndScoreContacts } = await import('../services/agent/contact-detector.js');
+            this.contacts = await detectAndScoreContacts();
+            this.renderContactsList();
+            console.log(`[App] Loaded ${this.contacts.length} contacts`);
+        } catch (error) {
+            console.warn('[App] Failed to load contacts:', error);
+            this.contacts = [];
+        }
+    }
+
+    renderContactsList() {
+        const itemsContainer = document.getElementById('contacts-items');
+        if (!itemsContainer) return;
+
+        if (!this.contacts || this.contacts.length === 0) {
+            itemsContainer.innerHTML = `
+                <div class="empty-state" style="text-align: center; padding: 40px 20px;">
+                    <div class="empty-icon" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;">
+                        <span class="material-symbols-outlined">group</span>
+                    </div>
+                    <div class="empty-text">No contacts found</div>
+                    <div class="empty-sub" style="font-size: 12px; color: var(--text-tertiary); margin-top: 8px;">Add email, calendar, or person records to detect contacts</div>
+                </div>
+            `;
+            return;
+        }
+
+        const sorted = this.contacts.sort((a, b) => (b.strength || 0) - (a.strength || 0));
+        
+        itemsContainer.innerHTML = sorted.map((contact, idx) => {
+            const lastContact = contact.last_contact_at ? new Date(contact.last_contact_at).toLocaleDateString() : 'Never';
+            const statusIcon = contact.is_overdue_followup ? '⚠️' : contact.is_weak_tie ? '📉' : '✓';
+            
+            return `
+                <div class="contact-item ${idx === 0 ? 'active' : ''}" data-contact-id="${contact.id}">
+                    <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 4px;">
+                        <div class="contact-name">${statusIcon} ${contact.name}</div>
+                    </div>
+                    <div class="contact-meta">Last: ${lastContact}</div>
+                    <div class="strength-bar">
+                        <div class="strength-bar-fill" style="width: ${(contact.strength || 0) * 100}%"></div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        // Add click handlers
+        document.querySelectorAll('.contact-item').forEach((item) => {
+            item.addEventListener('click', () => {
+                document.querySelectorAll('.contact-item').forEach(i => i.classList.remove('active'));
+                item.classList.add('active');
+                const id = item.dataset.contactId;
+                const contact = this.contacts.find(c => c.id === id);
+                if (contact) this.showContactDetail(contact);
+            });
+        });
+
+        // Show first contact by default
+        if (sorted.length > 0) {
+            this.showContactDetail(sorted[0]);
+        }
+    }
+
+    showContactDetail(contact) {
+        const detailPanel = document.getElementById('contact-detail');
+        if (!detailPanel) return;
+
+        const daysSince = Math.floor(contact.days_since_contact || 0);
+        const strengthPercent = Math.round((contact.strength || 0) * 100);
+
+        let suggestedActionsHtml = '<h4>Suggested Actions</h4>';
+        
+        if (contact.is_overdue_followup) {
+            suggestedActionsHtml += `<button class="action-btn">📧 Send Follow-up (${daysSince} days)</button>`;
+        }
+        if (contact.is_weak_tie) {
+            suggestedActionsHtml += `<button class="action-btn">👋 Reconnect (weak tie)</button>`;
+        }
+        if (contact.birthday) {
+            const today = new Date();
+            const [bMonth, bDay] = contact.birthday.slice(5, 10).split('-');
+            const bDate = new Date(today.getFullYear(), parseInt(bMonth) - 1, parseInt(bDay));
+            const daysUntil = Math.ceil((bDate - today) / (24 * 60 * 60 * 1000));
+            if (daysUntil >= 0 && daysUntil <= 7) {
+                suggestedActionsHtml += `<button class="action-btn">🎂 Birthday ${daysUntil === 0 ? 'Today!' : `in ${daysUntil} days`}</button>`;
+            }
+        }
+        suggestedActionsHtml += `<button class="action-btn">📎 Share Article</button>`;
+
+        detailPanel.innerHTML = `
+            <div class="contact-detail">
+                <h3>${contact.name}</h3>
+                
+                <div style="margin: 16px 0;">
+                    <div style="font-size: 12px; color: var(--text-tertiary); margin-bottom: 4px;">Contact Information</div>
+                    <div class="contact-info">
+                        ${contact.emails && contact.emails.length > 0 ? contact.emails.map(e => `<div>📧 ${e}</div>`).join('') : '<div style="opacity: 0.5;">No email</div>'}
+                        ${contact.phones && contact.phones.length > 0 ? contact.phones.map(p => `<div>📞 ${p}</div>`).join('') : ''}
+                        ${contact.birthday ? `<div>🎂 ${contact.birthday}</div>` : ''}
+                    </div>
+                </div>
+
+                <div style="margin: 16px 0;">
+                    <div style="font-size: 12px; color: var(--text-tertiary); margin-bottom: 4px;">Relationship Strength</div>
+                    <div class="relationship-score">
+                        <div style="font-weight: 600; color: var(--text-primary);">${strengthPercent}% Strength</div>
+                        <div class="relationship-score-bar">
+                            <div class="relationship-score-fill" style="width: ${strengthPercent}%"></div>
+                        </div>
+                        <div style="font-size: 12px; color: var(--text-secondary); margin-top: 8px;">
+                            ${contact.interaction_count || 0} interactions
+                            ${contact.is_weak_tie ? ' • Weak tie' : ''}
+                            ${contact.is_overdue_followup ? ' • Overdue follow-up' : ''}
+                            ${contact.recommendation ? ' • ' + contact.recommendation : ''}
+                        </div>
+                    </div>
+                </div>
+
+                ${contact.interests && contact.interests.length > 0 ? `
+                <div style="margin: 16px 0;">
+                    <div style="font-size: 12px; color: var(--text-tertiary); margin-bottom: 4px;">Shared Interests</div>
+                    <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+                        ${contact.interests.slice(0, 6).map(interest => `
+                            <span style="background: var(--accent-blue-subtle); color: var(--accent-blue-strong); padding: 4px 8px; border-radius: 4px; font-size: 12px;">
+                                ${interest}
+                            </span>
+                        `).join('')}
+                    </div>
+                </div>
+                ` : ''}
+
+                <div class="suggested-actions">
+                    ${suggestedActionsHtml}
+                </div>
+            </div>
+        `;
+    }
+
+    async setupContactsView() {
+        // Setup search
+        const searchInput = document.getElementById('contacts-search');
+        if (searchInput) {
+            searchInput.addEventListener('input', () => {
+                const query = searchInput.value.toLowerCase();
+                document.querySelectorAll('.contact-item').forEach(item => {
+                    const name = item.querySelector('.contact-name').textContent.toLowerCase();
+                    item.style.display = name.includes(query) ? '' : 'none';
+                });
+            });
+        }
+
+        // Setup sync button
+        const syncBtn = document.getElementById('sync-contacts-btn');
+        if (syncBtn) {
+            syncBtn.addEventListener('click', async () => {
+                syncBtn.classList.add('syncing');
+                await this.loadContacts();
+                syncBtn.classList.remove('syncing');
+            });
+        }
+
+        await this.loadContacts();
+    }
 
     async updateChatSyncStatus() {
         const statusEl = document.getElementById('chat-sync-status');
@@ -949,12 +1130,56 @@ Would you like me to continue with more detail?` : content;
         }
 
         // Final pass: render concise rich text (no markdown headings).
+        const uiBlocks = typeof rawPayload === 'object' && rawPayload !== null ? (rawPayload.ui_blocks || []) : [];
         message.innerHTML = this.renderAssistantHTML(bounded, retrieval, includeThinkingTrace ? thinkingTrace : null);
-        this.scrollChatToBottom();
 
+        // Append interactive action cards if present
+        if (uiBlocks.length > 0) {
+            const blocksContainer = document.createElement('div');
+            blocksContainer.className = 'ui-blocks-container';
+            blocksContainer.innerHTML = uiBlocks.map((block) => this.renderUICard(block)).join('');
+            message.appendChild(blocksContainer);
+            blocksContainer.querySelectorAll('[data-action]').forEach((btn) => {
+                btn.addEventListener('click', () => {
+                    try {
+                        const actionData = JSON.parse(btn.dataset.actionData || '{}');
+                        this.handleChatCardAction(btn.dataset.action, actionData);
+                    } catch (_) {}
+                });
+            });
+        }
+
+        this.scrollChatToBottom();
         this.pushMessageToActiveChat('assistant', bounded, retrieval, thinkingTrace);
         this.renderChatHistory();
     }
+
+    renderUICard(block) {
+        const title = this.escapeHtml(block.title || '');
+        const body = this.escapeHtml(block.body || '');
+        const icon = block.type === 'error' ? '✗' : '✓';
+        const actions = Array.isArray(block.actions) ? block.actions : [];
+        const actionsHtml = actions.map((a) => {
+            const safeData = this.escapeHtml(JSON.stringify(a.data || {}));
+            return `<button class="ui-card-btn" data-action="${this.escapeHtml(a.action)}" data-action-data="${safeData}">${this.escapeHtml(a.label)}</button>`;
+        }).join('');
+        return `<div class="ui-card ui-card--${this.escapeHtml(block.type || 'info')}">
+            <div class="ui-card-header"><span class="ui-card-icon">${icon}</span><span class="ui-card-title">${title}</span></div>
+            ${body ? `<div class="ui-card-body">${body}</div>` : ''}
+            ${actionsHtml ? `<div class="ui-card-actions">${actionsHtml}</div>` : ''}
+        </div>`;
+    }
+
+    handleChatCardAction(action, data) {
+        if (action === 'view_contact') {
+            this.showView('contacts-view');
+        } else if (action === 'view_automations') {
+            this.showView('settings-view');
+        } else if (action === 'open_url' && data.url) {
+            window.open(data.url, '_blank', 'noopener');
+        }
+    }
+
     appendThinkingPanel() {
         const wrapper = document.createElement("div");
         const bootstrapStages = [
@@ -1149,6 +1374,8 @@ Would you like me to continue with more detail?` : content;
     renderThinkingTraceCard(thinkingTrace, retrieval = null) {
         if (!thinkingTrace && !retrieval) return '';
         const trace = thinkingTrace || {};
+        const provider = String(trace?.provider || retrieval?.provider || '').toLowerCase();
+        const sourceBadges = `${provider === 'deepseek' ? '<span class="ai-source-badge deepseek">DeepSeek</span>' : ''}${trace || retrieval ? '<span class="ai-source-badge ai">AI</span>' : ''}`;
         const filters = Array.isArray(trace.filters) ? trace.filters : [];
         const contextQueries = Array.isArray(trace?.search_queries?.context) ? trace.search_queries.context : [];
         const messageQueries = Array.isArray(trace?.search_queries?.messages) ? trace.search_queries.messages : [];
@@ -1220,6 +1447,10 @@ Would you like me to continue with more detail?` : content;
             ${expandedResults.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Edge expansion</div><div class="thinking-trace-list">${expandedResults.map((item) => `<div>${this.escapeHtml(item.title || item.id)}</div>`).join('')}</div></div>` : ''}
             ${trace?.web_search_used && webResults.length ? `<div class="thinking-trace-subgroup"><div class="thinking-trace-subtitle">Web results</div><div class="thinking-trace-list">${webResults.map((item) => `<div>${this.escapeHtml(item.title || item.url || '')}${item.url ? ` — ${this.escapeHtml(item.url)}` : ''}</div>`).join('')}</div></div>` : ''}
         `;
+        const reasoningChain = Array.isArray(trace?.reasoning_chain) ? trace.reasoning_chain : [];
+        const reasoningHtml = reasoningChain.length
+            ? `<div class="thinking-trace-list">${reasoningChain.map((item) => `<div><strong>${this.escapeHtml((item.stage || '').replace(/_/g, ' '))}</strong> — ${this.escapeHtml(item.summary || '')}${item.detail ? `: ${this.escapeHtml(item.detail)}` : ''}</div>`).join('')}</div>`
+            : '<div class="thinking-trace-empty">No reasoning chain was captured.</div>';
         const routerHtml = `
             <div class="thinking-trace-body">${this.escapeHtml(router?.router_reason || trace?.thinking_summary || 'No retrieval summary available.')}</div>
             <div class="thinking-trace-list" style="margin-top:8px;">
@@ -1256,11 +1487,16 @@ Would you like me to continue with more detail?` : content;
                 <summary>
                     <span>Thinking context</span>
                     <span class="thinking-trace-summary">${this.escapeHtml(summaryBits.join(' • ') || 'Open to inspect the retrieval path.')}</span>
+                    ${sourceBadges ? `<span class="ai-section-legend" style="margin-left:auto;">${sourceBadges}</span>` : ''}
                 </summary>
                 <div class="thinking-trace-sections">
                     <div class="thinking-trace-penetration">
                         ${penetrationHtml}
                     </div>
+                    <section class="thinking-trace-section">
+                        <div class="thinking-trace-section-title">Reasoning steps</div>
+                        ${reasoningHtml}
+                    </section>
                     <section class="thinking-trace-section">
                         <div class="thinking-trace-section-title">Router decision</div>
                         ${routerHtml}
@@ -2831,6 +3067,32 @@ Would you like me to continue with more detail?` : content;
                 if (window.electronAPI?.saveChatSessionsToMemory) window.electronAPI.saveChatSessionsToMemory(trimmed);
             }
         } catch (e) { }
+    }
+
+    handleAutomationResult(payload = {}) {
+        if (!this.chatMessages) return;
+        const name = payload.name || 'Automation';
+        const content = payload.content || '';
+        const uiBlocks = payload.ui_blocks || [];
+        const notice = document.createElement('div');
+        notice.className = 'message assistant';
+        notice.innerHTML = this.renderAssistantHTML(`[Scheduled: ${name}]\n${content}`, null, null);
+        if (uiBlocks.length > 0) {
+            const blocksContainer = document.createElement('div');
+            blocksContainer.className = 'ui-blocks-container';
+            blocksContainer.innerHTML = uiBlocks.map((block) => this.renderUICard(block)).join('');
+            notice.appendChild(blocksContainer);
+            blocksContainer.querySelectorAll('[data-action]').forEach((btn) => {
+                btn.addEventListener('click', () => {
+                    try {
+                        const actionData = JSON.parse(btn.dataset.actionData || '{}');
+                        this.handleChatCardAction(btn.dataset.action, actionData);
+                    } catch (_) {}
+                });
+            });
+        }
+        this.chatMessages.appendChild(notice);
+        this.scrollChatToBottom();
     }
 
 

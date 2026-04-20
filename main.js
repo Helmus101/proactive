@@ -1,7 +1,22 @@
-process.stdout.on('error', (err) => {
-  if (err.code === 'EIO') return;
-  throw err;
-});
+const ignorePipeError = (err) => {
+  const code = String(err?.code || '');
+  if (code === 'EPIPE' || code === 'EIO' || code === 'ERR_STREAM_DESTROYED') return true;
+  return false;
+};
+
+if (process.stdout && typeof process.stdout.on === 'function') {
+  process.stdout.on('error', (err) => {
+    if (ignorePipeError(err)) return;
+    throw err;
+  });
+}
+
+if (process.stderr && typeof process.stderr.on === 'function') {
+  process.stderr.on('error', (err) => {
+    if (ignorePipeError(err)) return;
+    throw err;
+  });
+}
 
 const { app, BrowserWindow, ipcMain, session, desktopCapturer, systemPreferences, screen, globalShortcut, powerMonitor } = require('electron');
 const crypto = require('crypto');
@@ -7129,6 +7144,8 @@ ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
   try {
     const { answerChatQuery } = require('./services/agent/chat-engine');
     const proactiveMemory = store.get('proactiveMemory') || { core: '' };
+    const historicalSummaries = store.get('historicalSummaries') || {};
+    const searchIndex = store.get('searchIndex') || { people: {}, topics: {} };
     const normalizedChatHistory = Array.isArray(options?.chat_history)
       ? options.chat_history
           .filter((item) => item && typeof item.content === 'string')
@@ -7145,7 +7162,9 @@ ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
       options: {
         ...options,
         chat_history: normalizedChatHistory,
-        standing_notes: proactiveMemory.core || ''
+        standing_notes: proactiveMemory.core || '',
+        historical_summaries: historicalSummaries,
+        search_index: searchIndex
       },
       onStep: (data) => {
         try { event.sender.send('chat-step', data); } catch (_) {}
@@ -9221,6 +9240,99 @@ ipcMain.handle('log-automation', async (event, record) => {
   }
 });
 
+// ── User-defined Scheduled Automations ────────────────────────────────────────
+
+ipcMain.handle('list-automations', async () => {
+  try {
+    const db = require('./services/db');
+    const rows = await db.allQuery(
+      `SELECT id, name, description, prompt, interval_minutes, enabled, last_run_at, next_run_at, created_at FROM scheduled_automations ORDER BY created_at DESC`,
+      []
+    );
+    return { success: true, automations: rows };
+  } catch (e) {
+    console.error('Failed to list automations:', e);
+    return { success: false, automations: [] };
+  }
+});
+
+ipcMain.handle('delete-automation', async (_event, automationId) => {
+  try {
+    const db = require('./services/db');
+    await db.runQuery(`DELETE FROM scheduled_automations WHERE id = ?`, [automationId]);
+    return { success: true };
+  } catch (e) {
+    console.error('Failed to delete automation:', e);
+    return { success: false };
+  }
+});
+
+ipcMain.handle('toggle-automation', async (_event, automationId, enabled) => {
+  try {
+    const db = require('./services/db');
+    await db.runQuery(`UPDATE scheduled_automations SET enabled = ? WHERE id = ?`, [enabled ? 1 : 0, automationId]);
+    return { success: true };
+  } catch (e) {
+    return { success: false };
+  }
+});
+
+// Automation scheduler: polls every minute for due automations
+let automationSchedulerTimer = null;
+function startAutomationScheduler() {
+  if (automationSchedulerTimer) return;
+  automationSchedulerTimer = setInterval(async () => {
+    try {
+      const db = require('./services/db');
+      const now = new Date().toISOString();
+      const due = await db.allQuery(
+        `SELECT * FROM scheduled_automations WHERE enabled = 1 AND (next_run_at IS NULL OR next_run_at <= ?)`,
+        [now]
+      ).catch(() => []);
+
+      for (const automation of due) {
+        try {
+          const { answerChatQuery } = require('./services/agent/chat-engine');
+          const apiKey = process.env.DEEPSEEK_API_KEY;
+          const result = await answerChatQuery(automation.prompt, [], { apiKey, standing_notes: '' });
+
+          // Persist result to memory as a raw event
+          const { ingestRawEvent } = require('./services/ingestion');
+          await ingestRawEvent({
+            type: 'automation_result',
+            source: 'scheduled_automation',
+            text: `[Automation: ${automation.name}] ${result?.content || ''}`,
+            metadata: { automation_id: automation.id, automation_name: automation.name }
+          }).catch(() => null);
+
+          // Push to renderer if window is open
+          if (mainWindow && mainWindow.webContents) {
+            mainWindow.webContents.send('automation-result', {
+              automation_id: automation.id,
+              name: automation.name,
+              content: result?.content || '',
+              ui_blocks: result?.ui_blocks || [],
+              ran_at: now
+            });
+          }
+        } catch (runErr) {
+          console.error(`[Automation] Failed to run "${automation.name}":`, runErr.message);
+        }
+
+        // Schedule next run regardless of success/failure
+        const nextRun = new Date(Date.now() + automation.interval_minutes * 60 * 1000).toISOString();
+        await db.runQuery(
+          `UPDATE scheduled_automations SET last_run_at = ?, next_run_at = ? WHERE id = ?`,
+          [now, nextRun, automation.id]
+        ).catch(() => null);
+      }
+    } catch (e) {
+      console.error('[AutomationScheduler] Tick error:', e.message);
+    }
+  }, 60 * 1000); // check every minute
+  console.log('[AutomationScheduler] Started');
+}
+
 ipcMain.handle('sync-google-data', async () => {
   return await fullGoogleSync();
 });
@@ -10410,6 +10522,9 @@ app.whenReady().then(async () => {
   
   // Initialize memory graph processing
   startMemoryGraphProcessing();
+
+  // Start user-defined automation scheduler
+  startAutomationScheduler();
 
   // ── Auto-trigger initial sync on first launch ──────────────────────────
   const syncDone = store.get('initialSyncDone') || false;

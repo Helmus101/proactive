@@ -17,9 +17,9 @@ const MAX_CACHE_SIZE = 500;
 
 const DEFAULT_CACHE_TTL = 24 * 60 * 60 * 1000; // 24h
 const TASK_TTLS = {
-  suggestion: 1 * 60 * 60 * 1000,   // 1h
-  routing: 12 * 60 * 60 * 1000,    // 12h
-  synthesis: 24 * 60 * 60 * 1000,  // 24h
+  suggestion: 4 * 60 * 60 * 1000,   // 4h (was 1h) - increase cache hit rate
+  routing: 24 * 60 * 60 * 1000,     // 24h (was 12h) - longer cache for routing logic
+  synthesis: 48 * 60 * 60 * 1000,   // 48h (was 24h) - longer cache for synthesis
   default: 24 * 60 * 60 * 1000
 };
 

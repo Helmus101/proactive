@@ -43,7 +43,12 @@ const TOOL_SCHEMAS = {
   memory_search: ['query'],
   memory_drilldown: ['node_id'],
   memory_update: ['node_id', 'updates'],
-  memory_link: ['from_id', 'to_id', 'relationship']
+  memory_link: ['from_id', 'to_id', 'relationship'],
+  memory_create: ['layer', 'subtype', 'title', 'summary'],
+  contact_create: ['name'],
+  contact_update: ['name', 'updates'],
+  automation_create: ['name', 'prompt', 'interval_minutes'],
+  automation_list: []
 };
 
 function validateToolRequest(request = {}) {
@@ -97,6 +102,18 @@ function evaluateToolPolicy(request = {}, policyContext = {}) {
 
   if (tool === 'memory_search' || tool === 'memory_drilldown') {
     return { decision: 'auto_allow', risk_level: 'low', reason: 'read_only_memory_action' };
+  }
+
+  if (tool === 'memory_create' || tool === 'contact_create' || tool === 'contact_update') {
+    return { decision: 'auto_allow', risk_level: 'low', reason: 'user_initiated_write' };
+  }
+
+  if (tool === 'automation_create') {
+    return { decision: 'auto_allow', risk_level: 'low', reason: 'user_initiated_automation' };
+  }
+
+  if (tool === 'automation_list') {
+    return { decision: 'auto_allow', risk_level: 'low', reason: 'read_only_automation_query' };
   }
 
   return { decision: 'auto_allow', risk_level: 'low', reason: 'safe_by_default' };
@@ -293,6 +310,78 @@ async function dispatchTool(request = {}, runtime = {}) {
       traceLabel: input.trace_label || 'Manual LLM link'
     });
     result = { status: 'success', output: { linked: true } };
+  } else if (tool === 'memory_create') {
+    const { stableHash: sh } = require('./graph-store');
+    const nodeId = `manual_${input.layer}_${sh(`${input.subtype}:${input.title}`)}`;
+    const created = await upsertMemoryNode({
+      id: nodeId,
+      layer: input.layer,
+      subtype: input.subtype,
+      title: input.title,
+      summary: input.summary,
+      confidence: input.confidence || 0.9,
+      status: 'active',
+      metadata: input.metadata || {},
+      source_refs: []
+    });
+    result = { status: 'success', output: { node_id: nodeId, created } };
+  } else if (tool === 'contact_create') {
+    const { stableHash: sh } = require('./graph-store');
+    const name = String(input.name || '').trim();
+    const nodeId = `person_${sh(name.toLowerCase())}`;
+    const metadata = {
+      name,
+      email: input.email || null,
+      phone: input.phone || null,
+      notes: input.notes || null,
+      created_via: 'chat'
+    };
+    await upsertMemoryNode({
+      id: nodeId,
+      layer: 'semantic',
+      subtype: 'person',
+      title: name,
+      summary: input.notes || `Contact: ${name}`,
+      confidence: 0.95,
+      status: 'active',
+      metadata,
+      source_refs: []
+    });
+    result = { status: 'success', output: { node_id: nodeId, name, metadata } };
+  } else if (tool === 'contact_update') {
+    const name = String(input.name || '').trim();
+    const rows = await db.allQuery(
+      `SELECT id, metadata FROM memory_nodes WHERE layer='semantic' AND subtype='person' AND LOWER(title) LIKE LOWER(?) LIMIT 3`,
+      [`%${name}%`]
+    ).catch(() => []);
+    if (!rows.length) {
+      result = { status: 'error', error: `Contact not found: ${name}` };
+    } else {
+      const row = rows[0];
+      let existing = {};
+      try { existing = JSON.parse(row.metadata || '{}'); } catch (_) {}
+      const merged = Object.assign({}, existing, input.updates || {});
+      await updateMemoryNode(row.id, { metadata: merged });
+      result = { status: 'success', output: { node_id: row.id, name, updated_fields: Object.keys(input.updates || {}) } };
+    }
+  } else if (tool === 'automation_create') {
+    const crypto = require('crypto');
+    const autoId = `auto_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+    const now = new Date().toISOString();
+    const intervalMinutes = Math.max(1, parseInt(input.interval_minutes, 10) || 60);
+    const nextRunAt = new Date(Date.now() + intervalMinutes * 60 * 1000).toISOString();
+    await db.runQuery(
+      `INSERT INTO scheduled_automations (id, name, description, prompt, interval_minutes, enabled, next_run_at, created_at, metadata)
+       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+      [autoId, input.name, input.description || '', input.prompt, intervalMinutes, nextRunAt, now, JSON.stringify(input.metadata || {})]
+    );
+    result = { status: 'success', output: { automation_id: autoId, name: input.name, interval_minutes: intervalMinutes, next_run_at: nextRunAt } };
+  } else if (tool === 'automation_list') {
+    const rows = await db.allQuery(
+      `SELECT id, name, description, interval_minutes, enabled, last_run_at, next_run_at, created_at FROM scheduled_automations ORDER BY created_at DESC LIMIT 50`,
+      []
+    ).catch(() => []);
+    result = { status: 'success', output: { automations: rows } };
   } else {
     result = { status: 'error', error: `Tool not implemented: ${tool}` };
   }

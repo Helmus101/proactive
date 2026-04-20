@@ -471,7 +471,7 @@ async function loadMemoryNodeCandidates(filters = {}) {
     .filter((row) => rowMatchesFilters(row, filters));
 }
 
-async function vectorSearchNodes(nodeRows, semanticQueries = []) {
+async function vectorSearchNodes(nodeRows, semanticQueries = [], perQueryLimit = 30) {
   const rankings = [];
   for (const query of semanticQueries || []) {
     const queryEmbedding = await generateEmbedding(query, process.env.OPENAI_API_KEY);
@@ -508,7 +508,7 @@ async function vectorSearchNodes(nodeRows, semanticQueries = []) {
       })
       .filter((row) => row.base_score > 0)
       .sort((a, b) => (b.base_score || 0) - (a.base_score || 0))
-      .slice(0, 30);
+      .slice(0, Math.max(6, perQueryLimit || 30));
     rankings.push(ranked);
   }
   return rankings;
@@ -971,6 +971,19 @@ async function buildHybridGraphRetrieval({
     fallback_policy: basePlan.fallback_policy || { mode: 'widen_once', attempted: false, widened: false }
   };
 
+  const isChatMode = String(options.mode || retrievalPlan.mode || 'chat') === 'chat';
+  const strictFunnel = economyMode || isChatMode;
+  const perQueryVectorLimit = strictFunnel ? 16 : 30;
+  const primarySeedLimit = strictFunnel ? 6 : (economyMode ? 8 : 10);
+  const coreDownLimit = strictFunnel ? 42 : (economyMode ? 60 : 80);
+  const coreToRawLimit = strictFunnel ? 24 : (economyMode ? 40 : 60);
+  const recencyLimit = strictFunnel ? 14 : 24;
+  const recursiveAnchorLimit = strictFunnel ? 2 : 3;
+  const rerankEvidenceCap = strictFunnel ? 60 : 100;
+  const packedEvidenceCap = strictFunnel ? 90 : 150;
+  const drilldownCap = strictFunnel ? 220 : 400;
+  const graphExpansionCap = strictFunnel ? 180 : (economyMode ? 300 : MAX_EXPANDED);
+
   const nodeRows = await loadMemoryNodeCandidates(retrievalPlan.filters);
   emit('candidates_loaded', 'completed', { count: nodeRows.length });
   
@@ -990,11 +1003,11 @@ async function buildHybridGraphRetrieval({
   emit('vector_search_started', 'started', { query_count: (retrievalPlan.search_queries || []).length });
   const semanticRankings = retrievalPlan.mode === 'queryless'
     ? []
-    : await vectorSearchNodes(finalNodeRows, retrievalPlan.semantic_queries || retrievalPlan.search_queries || []);
+    : await vectorSearchNodes(finalNodeRows, retrievalPlan.semantic_queries || retrievalPlan.search_queries || [], perQueryVectorLimit);
   
   // Consolidate and rank all search results picking the top 10
   const consolidatedSeeds = reciprocalRankFusion(semanticRankings);
-  const primarySeeds = consolidatedSeeds.slice(0, economyMode ? 8 : 10);
+  const primarySeeds = consolidatedSeeds.slice(0, primarySeedLimit);
 
   // Lazy enrichment for top seeds that lack a bulleted summary
   const apiKey = process.env.DEEPSEEK_API_KEY || options.apiKey;
@@ -1044,12 +1057,12 @@ async function buildHybridGraphRetrieval({
 
   emit('expansion_stage', 'started', { label: 'Expand', detail: 'Traversing graph for supporting evidence...' });
   emit('traversal_started', 'started', { mode: retrievalPlan.entry_mode || 'hybrid' });
-  const coreRanking = await coreDownRanking(finalNodeRows, retrievalPlan, economyMode ? 60 : 80, semanticSeeds);
+  const coreRanking = await coreDownRanking(finalNodeRows, retrievalPlan, coreDownLimit, semanticSeeds);
   const coreToRawRanking = (options.strategy === 'core_to_raw' || retrievalPlan.strategy === 'core_to_raw')
-    ? await recursiveDownTraversal(finalNodeRows, retrievalPlan, economyMode ? 40 : 60)
+    ? await recursiveDownTraversal(finalNodeRows, retrievalPlan, coreToRawLimit)
     : [];
   const recencyRanking = (retrievalPlan.mode === 'queryless' && !passiveOnly)
-    ? await querylessRecentDocs(retrievalPlan.filters, 24)
+    ? await querylessRecentDocs(retrievalPlan.filters, recencyLimit)
     : [];
 
   const alpha = options.alpha !== undefined ? options.alpha : (retrievalPlan.alpha !== undefined ? retrievalPlan.alpha : 0.7);
@@ -1064,11 +1077,11 @@ async function buildHybridGraphRetrieval({
     emit('deep_search', 'started', { label: 'Deep search', detail: 'Expanding from anchor nodes...' });
     const anchorNodes = fused
       .filter(row => (row.layer === 'core' || row.layer === 'insight') && row.fused_score > 0.6)
-      .slice(0, 3);
+      .slice(0, recursiveAnchorLimit);
     
     if (anchorNodes.length > 0) {
       const recursionQueries = anchorNodes.map(node => node.text.slice(0, 300));
-      const recursionRankings = await vectorSearchNodes(finalNodeRows, recursionQueries);
+      const recursionRankings = await vectorSearchNodes(finalNodeRows, recursionQueries, perQueryVectorLimit);
       if (recursionRankings.length > 0) {
         fused = alphaBlendedSearch(
           [...lexicalRanking, ...rawEventLexicalRanking],
@@ -1127,7 +1140,7 @@ async function buildHybridGraphRetrieval({
     .slice(0, 6)
     .map(r => ({ ...r, node_id: r.id }));
     
-  const graph = await expandGraph([...seeds, ...coreNodesForExpansion], retrievalPlan.hop_limit, economyMode ? 300 : MAX_EXPANDED, finalNodeRows);
+  const graph = await expandGraph([...seeds, ...coreNodesForExpansion], retrievalPlan.hop_limit, graphExpansionCap, finalNodeRows);
   emit('expansion_stage', 'completed', { label: 'Expand', detail: `Expanded to ${graph.expandedNodes.length} connected nodes.` });
   const primaryNodes = seeds.map((seed) => ({
     id: seed.node_id || seed.event_id || seed.key,
@@ -1225,7 +1238,7 @@ async function buildHybridGraphRetrieval({
   });
 
   // Spiral retrieval ordering: Insights -> Semantics -> Episodes
-  let evidenceRows = reranked.slice(0, 100);
+  let evidenceRows = reranked.slice(0, rerankEvidenceCap);
   if ((retrievalPlan.strategy_mode || retrievalPlan.strategy || options.strategy) === 'spiral') {
     // insights from expanded graph
     const insightNodes = graph.expandedNodes.filter((n) => n.layer === 'insight');
@@ -1257,7 +1270,7 @@ async function buildHybridGraphRetrieval({
     // fallback: append remaining reranked rows preserving their order
     for (const r of evidenceRows) pushRow(r, r.key || r.node_id || r.id);
 
-    evidenceRows = ordered.slice(0, 100);
+    evidenceRows = ordered.slice(0, rerankEvidenceCap);
   }
 
   const prioritizedEvidenceRows = [];
@@ -1307,7 +1320,7 @@ async function buildHybridGraphRetrieval({
   }));
   evidenceRows.forEach((row) => pushEvidenceRow(row));
 
-  const evidence = prioritizedEvidenceRows.slice(0, 150).map((row) => ({
+  const evidence = prioritizedEvidenceRows.slice(0, packedEvidenceCap).map((row) => ({
     id: row.node_id || row.event_id || row.key,
     node_id: row.node_id || null,
     event_id: row.event_id || null,
@@ -1372,7 +1385,7 @@ async function buildHybridGraphRetrieval({
     ...sourceRefEvidenceRows.map((row) => row.event_id || row.key)
   ].filter(Boolean);
 
-  const drilldownRefs = Array.from(new Set(allSourceRefIds)).slice(0, 400);
+  const drilldownRefs = Array.from(new Set(allSourceRefIds)).slice(0, drilldownCap);
 
   return {
     retrieval_run_id: retrievalRunId,

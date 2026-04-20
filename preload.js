@@ -140,5 +140,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onMorningBriefUpdated: (cb) => ipcRenderer.on('morning-brief-updated', (_e, brief) => cb(brief)),
   onVoiceCommandToggle: (cb) => ipcRenderer.on('voice-command-toggle', (_e, payload) => cb(payload)),
   onVoiceSessionUpdate: (cb) => ipcRenderer.on('voice-session-update', (_e, payload) => cb(payload)),
-  removeAllListeners:   (channel) => ipcRenderer.removeAllListeners(channel)
+  removeAllListeners:   (channel) => ipcRenderer.removeAllListeners(channel),
+
+  // ── Scheduled Automations ─────────────────────────────────────────────────
+  listAutomations:    ()                         => ipcRenderer.invoke('list-automations'),
+  deleteAutomation:   (id)                       => ipcRenderer.invoke('delete-automation', id),
+  toggleAutomation:   (id, enabled)              => ipcRenderer.invoke('toggle-automation', id, enabled),
+  onAutomationResult: (cb)                       => ipcRenderer.on('automation-result', (_e, data) => cb(data))
 });

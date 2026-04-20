@@ -1,5 +1,11 @@
 const db = require('../db');
 
+// Lazy require to avoid circular dependencies
+function contactDetector() {
+  // eslint-disable-next-line global-require
+  return require('./contact-detector');
+}
+
 function asObj(value) {
   if (!value) return {};
   if (typeof value === 'object') return value;
@@ -44,18 +50,264 @@ function sourceRefsFromRow(row) {
   return parseList(row?.source_refs);
 }
 
-async function fetchMemoryRows(layer, extraWhere = '', params = []) {
+const DEFAULT_SOCIAL_STRATEGY = {
+  tiers: {
+    inner_circle: { half_life_days: 7, priority: 1.0 },
+    network: { half_life_days: 14, priority: 0.78 },
+    leads: { half_life_days: 3, priority: 0.92 }
+  },
+  default_tier: 'network',
+  temperature_threshold: 0.42,
+  core_goal: 'maintain strong trusted relationships while creating useful opportunities'
+};
+
+function safeLower(value) {
+  return String(value || '').toLowerCase();
+}
+
+function isLikelyCommunicationEvent(row = {}) {
+  const type = safeLower(row.type);
+  const app = safeLower(row.app);
+  const source = safeLower(row.source);
+  return /message|email|mail|calendar|meeting|slack|teams/.test(`${type} ${app} ${source}`);
+}
+
+function lexicalSentimentScore(text = '') {
+  const t = safeLower(text);
+  if (!t) return 0;
+  const positive = ['thanks', 'great', 'awesome', 'glad', 'appreciate', 'excited', 'love', 'nice', 'helpful', 'happy'];
+  const negative = ['urgent', 'blocked', 'delay', 'late', 'frustrated', 'disappointed', 'issue', 'problem', 'concern', 'cannot'];
+  let score = 0;
+  for (const token of positive) if (t.includes(token)) score += 1;
+  for (const token of negative) if (t.includes(token)) score -= 1;
+  return score;
+}
+
+function resolveTierForPerson(row = {}, strategy = DEFAULT_SOCIAL_STRATEGY) {
+  const metadata = asObj(row.metadata);
+  const explicit = safeLower(metadata.social_tier || metadata.relationship_tier || metadata.segment || metadata.group);
+  if (explicit.includes('inner')) return 'inner_circle';
+  if (explicit.includes('lead')) return 'leads';
+  if (explicit.includes('network')) return 'network';
+
+  const confidence = Number(row.confidence || metadata.importance || 0.5);
+  if (confidence >= 0.85) return 'inner_circle';
+  if (confidence <= 0.45) return 'leads';
+  return strategy.default_tier || 'network';
+}
+
+function computeSocialTemperature(daysSince, halfLifeDays = 7, priorityWeight = 1) {
+  const d = Math.max(0, Number(daysSince || 0));
+  const half = Math.max(1, Number(halfLifeDays || 7));
+  const base = Math.exp((-Math.log(2) * d) / half);
+  return Math.max(0, Math.min(1, base * Math.max(0.5, Number(priorityWeight || 1))));
+}
+
+async function loadSocialStrategy(options = {}) {
+  if (options && typeof options.social_strategy === 'object' && options.social_strategy) {
+    return {
+      ...DEFAULT_SOCIAL_STRATEGY,
+      ...options.social_strategy,
+      tiers: {
+        ...DEFAULT_SOCIAL_STRATEGY.tiers,
+        ...(options.social_strategy.tiers || {})
+      }
+    };
+  }
+
+  const row = await db.getQuery(
+    `SELECT value
+     FROM kv_cache
+     WHERE key IN ('core:social_strategy', 'social_strategy')
+     ORDER BY CASE key WHEN 'core:social_strategy' THEN 0 ELSE 1 END
+     LIMIT 1`
+  ).catch(() => null);
+
+  const parsed = asObj(row?.value);
+  return {
+    ...DEFAULT_SOCIAL_STRATEGY,
+    ...(parsed || {}),
+    tiers: {
+      ...DEFAULT_SOCIAL_STRATEGY.tiers,
+      ...((parsed && parsed.tiers) ? parsed.tiers : {})
+    }
+  };
+}
+
+function buildOutreachOptions({ name, hookText = '', strategy = DEFAULT_SOCIAL_STRATEGY, tier = 'network' } = {}) {
+  const person = String(name || 'this person').trim();
+  const safeHook = trim(hookText || 'a relevant update from your recent activity', 140);
+  const coreGoal = trim(strategy?.core_goal || DEFAULT_SOCIAL_STRATEGY.core_goal, 120);
+  const tierLabel = tier === 'inner_circle' ? 'inner circle' : (tier === 'leads' ? 'lead' : 'network');
+
+  return [
+    {
+      type: 'low_friction',
+      label: `Send quick check-in to ${person}`,
+      draft: `Hey ${person}, thought of you today after seeing something that reminded me of our recent thread. Hope your week is going well.`
+    },
+    {
+      type: 'value_add',
+      label: `Share relevant resource with ${person}`,
+      draft: `Saw this and thought of your interest in ${safeHook}. Want me to send the link over?`
+    },
+    {
+      type: 'the_ask',
+      label: `Send focused ask to ${person}`,
+      draft: `${person}, quick ask aligned with my current goal (${coreGoal}): could we do a short check-in this week to align on next steps?`
+    }
+  ].map((item) => ({ ...item, social_tier: tierLabel }));
+}
+
+function sentimentForPerson(peopleName = '', recentEvents = []) {
+  const first = safeLower(String(peopleName || '').split(' ')[0]);
+  const events = (recentEvents || [])
+    .filter((row) => isLikelyCommunicationEvent(row))
+    .filter((row) => {
+      if (!first || first.length < 3) return true;
+      const hay = `${row.text || ''} ${row.window_title || ''} ${asObj(row.metadata).activity_summary || ''}`.toLowerCase();
+      return hay.includes(first);
+    })
+    .slice(0, 10);
+
+  if (!events.length) {
+    return { trend: 'neutral', score: 0, samples: 0 };
+  }
+
+  const scores = events.map((row) => lexicalSentimentScore(`${row.text || ''} ${row.window_title || ''} ${asObj(row.metadata).activity_summary || ''}`));
+  const avg = scores.reduce((acc, n) => acc + n, 0) / Math.max(1, scores.length);
+  const firstHalf = scores.slice(0, Math.ceil(scores.length / 2));
+  const secondHalf = scores.slice(Math.ceil(scores.length / 2));
+  const firstAvg = firstHalf.reduce((acc, n) => acc + n, 0) / Math.max(1, firstHalf.length);
+  const secondAvg = secondHalf.reduce((acc, n) => acc + n, 0) / Math.max(1, secondHalf.length);
+  const gradient = secondAvg - firstAvg;
+
+  if (avg <= -0.8 || gradient <= -0.7) return { trend: 'negative', score: Number(avg.toFixed(2)), samples: scores.length };
+  if (avg >= 0.8 || gradient >= 0.7) return { trend: 'positive', score: Number(avg.toFixed(2)), samples: scores.length };
+  return { trend: 'neutral', score: Number(avg.toFixed(2)), samples: scores.length };
+}
+
+async function detectSocialHeatmapNudges(semanticRows, recentEvents, now, strategy) {
+  const out = [];
+  const threshold = Number(strategy?.temperature_threshold || DEFAULT_SOCIAL_STRATEGY.temperature_threshold);
+  for (const row of semanticRows || []) {
+    if (row.subtype !== 'person') continue;
+    const metadata = asObj(row.metadata);
+    const lastTs = parseTs(metadata.latest_interaction_at || row.updated_at || row.created_at);
+    if (!lastTs) continue;
+
+    const days = Math.max(0, (now - lastTs) / (24 * 60 * 60 * 1000));
+    const tier = resolveTierForPerson(row, strategy);
+    const tierCfg = strategy?.tiers?.[tier] || DEFAULT_SOCIAL_STRATEGY.tiers[tier] || DEFAULT_SOCIAL_STRATEGY.tiers.network;
+    const temp = computeSocialTemperature(days, tierCfg.half_life_days, tierCfg.priority);
+    if (temp > threshold) continue;
+
+    const contactName = trim(row.title || 'Contact', 80);
+    const sentiment = sentimentForPerson(contactName, recentEvents);
+    const riskBoost = sentiment.trend === 'negative' ? 0.08 : 0;
+    const hookText = (parseList(metadata.topics || []).slice(0, 1)[0]) || (parseList(metadata.interests || []).slice(0, 1)[0]) || 'recent topic you both touched';
+    const outreachOptions = buildOutreachOptions({ name: contactName, hookText, strategy, tier });
+
+    out.push({
+      ...candidateBase({
+        opportunityType: 'social_decay_nudge',
+        seedNodeId: row.id,
+        title: `Relationship cooling: ${contactName}`,
+        triggerSummary: `${contactName} is below social temperature threshold (${temp.toFixed(2)}). Last interaction ${Math.round(days)} days ago.`,
+        confidence: Math.min(0.97, 0.68 + (1 - temp) * 0.24 + riskBoost),
+        reasonCodes: ['social_heatmap_decay', `tier_${tier}`, sentiment.trend === 'negative' ? 'sentiment_risk' : 'sentiment_stable'],
+        timeAnchor: days >= 1 ? `last touch ${Math.round(days)}d ago` : 'today',
+        candidateActions: [
+          `Send check-in to ${contactName}`,
+          `Share relevant update with ${contactName}`
+        ],
+        sourceRefs: sourceRefsFromRow(row),
+        canonicalTarget: normalizeTarget(contactName),
+        score: Math.min(0.99, 0.7 + (1 - temp) * 0.22 + riskBoost)
+      }),
+      social_tier: tier,
+      social_temperature: Number(temp.toFixed(4)),
+      sentiment_gradient: sentiment,
+      outreach_options: outreachOptions
+    });
+  }
+  return out;
+}
+
+async function detectContextualValueHooks(semanticRows, recentEvents, now, strategy) {
+  const out = [];
+  const events = Array.isArray(recentEvents) ? recentEvents.slice(0, 40) : [];
+  for (const row of semanticRows || []) {
+    if (row.subtype !== 'person') continue;
+    const metadata = asObj(row.metadata);
+    const name = trim(row.title || 'Contact', 80);
+    const tier = resolveTierForPerson(row, strategy);
+    const interests = [
+      ...parseList(metadata.topics || []),
+      ...parseList(metadata.interests || []),
+      ...parseList(metadata.intent_clusters || [])
+    ].map((x) => String(x || '').toLowerCase()).filter(Boolean).slice(0, 8);
+    if (!interests.length) continue;
+
+    let matched = null;
+    let eventRef = null;
+    for (const event of events) {
+      const meta = asObj(event.metadata);
+      const hay = `${event.window_title || ''} ${event.text || ''} ${meta.activity_summary || ''}`.toLowerCase();
+      const hit = interests.find((interest) => interest.length >= 3 && hay.includes(interest));
+      if (hit) {
+        matched = hit;
+        eventRef = event;
+        break;
+      }
+    }
+    if (!matched || !eventRef) continue;
+
+    const sentiment = sentimentForPerson(name, recentEvents);
+    const hook = trim(eventRef.window_title || eventRef.text || asObj(eventRef.metadata).activity_summary || matched, 140);
+    const outreachOptions = buildOutreachOptions({ name, hookText: matched, strategy, tier });
+
+    out.push({
+      ...candidateBase({
+        opportunityType: 'contextual_value_hook',
+        seedNodeId: row.id,
+        title: `Value hook for ${name}: share ${matched}`,
+        triggerSummary: `You saw "${hook}" recently, and ${name} is linked to "${matched}" in memory.`,
+        confidence: Math.min(0.96, 0.7 + (tier === 'inner_circle' ? 0.1 : 0.04) + (sentiment.trend === 'negative' ? 0.05 : 0)),
+        reasonCodes: ['relational_value_hook', `tier_${tier}`, 'interest_match'],
+        timeAnchor: 'today',
+        candidateActions: [
+          `Share this resource with ${name}`,
+          `Send short note connecting it to ${matched}`
+        ],
+        sourceRefs: [eventRef.id, ...sourceRefsFromRow(row)].filter(Boolean),
+        canonicalTarget: normalizeTarget(name),
+        score: Math.min(0.98, 0.72 + (tier === 'inner_circle' ? 0.1 : 0.03))
+      }),
+      social_tier: tier,
+      value_hook: {
+        matched_interest: matched,
+        source_event_id: eventRef.id,
+        source_event_text: hook
+      },
+      outreach_options: outreachOptions
+    });
+  }
+  return out;
+}
+
+async function fetchMemoryRows(layer, extraWhere = '', params = [], limit = 300) {
   return db.allQuery(
     `SELECT id, layer, subtype, title, summary, canonical_text, confidence, status, source_refs, metadata, created_at, updated_at
      FROM memory_nodes
      WHERE layer = ? ${extraWhere}
-     LIMIT 300`,
-    [layer, ...params]
+     LIMIT ?`,
+    [layer, ...params, Math.max(20, Number(limit || 300))]
   ).catch(() => []);
 }
 
-async function fetchRecentEvents(now = Date.now(), limit = 100) {
-  const sinceIso = new Date(now - 24 * 60 * 60 * 1000).toISOString();
+async function fetchRecentEvents(now = Date.now(), limit = 100, windowHours = 24) {
+  const sinceIso = new Date(now - Math.max(1, Number(windowHours || 24)) * 60 * 60 * 1000).toISOString();
   return db.allQuery(
     `SELECT id, type, source, app, window_title, text, timestamp, metadata
      FROM events
@@ -64,6 +316,31 @@ async function fetchRecentEvents(now = Date.now(), limit = 100) {
      LIMIT ?`,
     [sinceIso, limit]
   ).catch(() => []);
+}
+
+function hasHighValueRecentSignal(events = []) {
+  const rows = Array.isArray(events) ? events : [];
+  for (const row of rows) {
+    const type = String(row.type || '').toLowerCase();
+    const app = String(row.app || '').toLowerCase();
+    const text = `${row.window_title || ''} ${row.text || ''}`.toLowerCase();
+    if (type.includes('calendar') && /(deadline|due|meeting|birthday|interview)/i.test(text)) return true;
+    if ((type.includes('message') || type.includes('email') || app.includes('slack') || app.includes('mail')) && /(follow up|reply|urgent|asap|pending)/i.test(text)) return true;
+    if (type.includes('task') && /(due|overdue|todo|blocked)/i.test(text)) return true;
+  }
+  return false;
+}
+
+function sampleRows(rows = [], limit = 120) {
+  return (rows || [])
+    .slice()
+    .sort((a, b) => {
+      const ta = parseTs(a.updated_at || a.created_at);
+      const tb = parseTs(b.updated_at || b.created_at);
+      if (tb !== ta) return tb - ta;
+      return Number(b.confidence || 0) - Number(a.confidence || 0);
+    })
+    .slice(0, Math.max(10, Number(limit || 120)));
 }
 
 async function fetchSupportingEdges(nodeId, limit = 6) {
@@ -500,37 +777,126 @@ function dedupeCandidates(candidates = []) {
   return Array.from(byKey.values());
 }
 
+async function detectContactOpportunities(now = Date.now()) {
+  try {
+    const detector = contactDetector();
+    const contacts = await detector.detectAndScoreContacts(now);
+    
+    const candidates = [];
+    
+    for (const contact of contacts) {
+      // Birthday reminder
+      if (contact.birthday) {
+        const [month, day] = contact.birthday.slice(5, 10).split('-');
+        const now_date = new Date(now);
+        const this_year = new Date(now_date.getFullYear(), parseInt(month) - 1, parseInt(day));
+        const days_until = Math.ceil((this_year - now) / (24 * 60 * 60 * 1000));
+        
+        if (days_until >= 0 && days_until <= 7) {
+          candidates.push({
+            opportunity_type: 'birthday_reminder',
+            title: `${contact.name}'s birthday is ${days_until === 0 ? 'today' : `in ${days_until} days`}`,
+            trigger_summary: `Send birthday message to ${contact.name}`,
+            canonical_target: contact.name,
+            confidence: 0.95,
+            score: 0.90,
+            seed_node_id: contact.id,
+            supporting_node_ids: contact.source_node_ids,
+            reason_codes: ['birthday']
+          });
+        }
+      }
+      
+      // Weak tie reconnection
+      if (contact.is_weak_tie) {
+        candidates.push({
+          opportunity_type: 'weak_tie_reconnect',
+          title: `Reconnect with ${contact.name} (weak tie)`,
+          trigger_summary: `Last contact: ${Math.floor(contact.days_since_contact)} days ago. Consider a casual check-in.`,
+          canonical_target: contact.name,
+          confidence: contact.strength,
+          score: 0.65,
+          seed_node_id: contact.id,
+          supporting_node_ids: contact.source_node_ids,
+          reason_codes: ['weak_tie']
+        });
+      }
+      
+      // Overdue follow-up
+      if (contact.is_overdue_followup) {
+        candidates.push({
+          opportunity_type: 'followup_reminder',
+          title: `Follow up with ${contact.name}`,
+          trigger_summary: `No contact for ${Math.floor(contact.days_since_contact)} days, but strong relationship.`,
+          canonical_target: contact.name,
+          confidence: 0.85,
+          score: 0.80,
+          seed_node_id: contact.id,
+          supporting_node_ids: contact.source_node_ids,
+          reason_codes: ['overdue_followup']
+        });
+      }
+    }
+    
+    return candidates;
+  } catch (error) {
+    console.warn('[OpportunityMiner] Contact detection failed:', error.message);
+    return [];
+  }
+}
+
 async function mineProactiveOpportunities(now = Date.now(), options = {}) {
-  const semanticRows = await fetchMemoryRows('semantic', `AND status != 'archived'`);
-  const cloudRows = await fetchMemoryRows('cloud', `AND status = 'open'`);
-  const episodeRows = await fetchMemoryRows('episode', `AND status != 'archived'`);
-  const recentEvents = await fetchRecentEvents(now, 120);
+  const socialStrategy = await loadSocialStrategy(options);
+  const forceDeepScan = Boolean(options.deep_scan || options.force_full_scan);
+  const baseRecentEvents = await fetchRecentEvents(now, forceDeepScan ? 120 : 40, forceDeepScan ? 24 : 6);
+  const eventTriggeredDeepScan = hasHighValueRecentSignal(baseRecentEvents);
+  const deepScan = forceDeepScan || eventTriggeredDeepScan;
+
+  const semanticRowsRaw = await fetchMemoryRows('semantic', `AND status != 'archived'`, [], deepScan ? 300 : 150);
+  const cloudRowsRaw = await fetchMemoryRows('cloud', `AND status = 'open'`, [], deepScan ? 180 : 80);
+  const episodeRowsRaw = await fetchMemoryRows('episode', `AND status != 'archived'`, [], deepScan ? 220 : 90);
+
+  const semanticRows = sampleRows(semanticRowsRaw, deepScan ? 260 : 120);
+  const cloudRows = sampleRows(cloudRowsRaw, deepScan ? 140 : 60);
+  const episodeRows = sampleRows(episodeRowsRaw, deepScan ? 180 : 70);
+  const recentEvents = baseRecentEvents;
 
   const candidates = [];
+  candidates.push(...await detectSocialHeatmapNudges(semanticRows, recentEvents, now, socialStrategy));
+  candidates.push(...await detectContextualValueHooks(semanticRows, recentEvents, now, socialStrategy));
   candidates.push(...await detectUnresolvedFollowups(semanticRows, now));
   candidates.push(...await detectUnfinishedLoops(semanticRows, now));
   candidates.push(...await detectDeadlineRisk([...semanticRows, ...episodeRows], now));
-  candidates.push(...await detectDormantContacts(semanticRows, now));
-  candidates.push(...await detectWeakStudyConcept(cloudRows, now));
-  candidates.push(...await detectRelationshipIntelligence(semanticRows, episodeRows, recentEvents, now));
+  candidates.push(...await detectContactOpportunities(now));
+
+  if (deepScan) {
+    candidates.push(...await detectDormantContacts(semanticRows, now));
+    candidates.push(...await detectWeakStudyConcept(cloudRows, now));
+    candidates.push(...await detectRelationshipIntelligence(semanticRows, episodeRows, recentEvents, now));
+  }
 
   const recalled = enrichWithRecentRecall(candidates, recentEvents);
   const deduped = dedupeCandidates(recalled);
-  const withEdges = await attachSupportingEdges(deduped, 4);
+  const withEdges = await attachSupportingEdges(deduped, deepScan ? 4 : 2);
 
-  const max = Math.max(3, Number(options.limit || 24));
+  const max = Math.max(3, Number(options.limit || (deepScan ? 24 : 12)));
   return withEdges
     .sort((a, b) => Number(b.score || 0) - Number(a.score || 0))
     .slice(0, max)
     .map((c) => ({
       ...c,
       score: Number((c.score || 0).toFixed(4)),
-      confidence: Number((c.confidence || 0).toFixed(4))
+      confidence: Number((c.confidence || 0).toFixed(4)),
+      social_strategy: {
+        default_tier: socialStrategy.default_tier,
+        temperature_threshold: Number(socialStrategy.temperature_threshold || DEFAULT_SOCIAL_STRATEGY.temperature_threshold)
+      }
     }));
 }
 
 module.exports = {
   mineProactiveOpportunities,
+  detectContactOpportunities,
   __test__: {
     detectUnresolvedFollowups,
     detectUnfinishedLoops,
@@ -540,6 +906,7 @@ module.exports = {
     detectRelationshipIntelligence,
     dedupeCandidates,
     enrichWithRecentRecall,
-    normalizeTarget
+    normalizeTarget,
+    detectContactOpportunities
   }
 };

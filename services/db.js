@@ -218,6 +218,21 @@ function initDB() {
         db.run(`CREATE INDEX IF NOT EXISTS idx_chat_messages_session_ts ON chat_messages(session_id, ts)`);
         db.run(`CREATE INDEX IF NOT EXISTS idx_kv_cache_type ON kv_cache(type)`);
 
+        db.run(`CREATE TABLE IF NOT EXISTS scheduled_automations (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          description TEXT,
+          prompt TEXT NOT NULL,
+          interval_minutes INTEGER NOT NULL DEFAULT 60,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          last_run_at TEXT,
+          next_run_at TEXT,
+          created_at TEXT,
+          metadata TEXT
+        )`);
+
+        db.run(`CREATE INDEX IF NOT EXISTS idx_scheduled_automations_next_run ON scheduled_automations(next_run_at, enabled)`);
+
         resolve();
       });
     } catch (e) {

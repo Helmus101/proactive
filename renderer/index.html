@@ -44,6 +44,9 @@
         <button class="nav-pill active" id="nav-today" data-view="today-view" title="Today">
             <span class="material-symbols-outlined">home</span>
         </button>
+        <button class="nav-pill" id="nav-contacts" data-view="contacts-view" title="Contacts">
+            <span class="material-symbols-outlined">group</span>
+        </button>
         <button class="nav-pill" id="nav-chat" data-view="chat-view" title="Chat">
             <span class="material-symbols-outlined">forum</span>
         </button>
@@ -71,7 +74,11 @@
                     <button class="context-chip" data-filter="personal">Personal</button>
                 </div>
 
-                <div style="padding: 8px 24px 0; display: flex; justify-content: flex-end;">
+                <div style="padding: 8px 24px 0; display: flex; justify-content: space-between; align-items: center; gap: 12px;">
+                    <div class="ai-section-legend">
+                        <span class="ai-source-badge ai">AI</span>
+                        <span class="ai-source-badge deepseek">DeepSeek</span>
+                    </div>
                     <button id="manual-generate-suggestions-btn" class="pill-btn" type="button">Generate Suggestions</button>
                 </div>
 
@@ -118,6 +125,37 @@
                     </div>
                 </div>
 
+            </section>
+
+            <!-- ───── CONTACTS VIEW ───── -->
+            <section id="contacts-view" class="view hidden">
+                <div class="contacts-container">
+                    <div class="contacts-list-panel">
+                        <div class="contacts-header">
+                            <h2>Contacts</h2>
+                            <button class="icon-btn" id="sync-contacts-btn" title="Sync Contacts">
+                                <span class="material-symbols-outlined">sync</span>
+                            </button>
+                        </div>
+                        <input type="search" id="contacts-search" class="contacts-search" placeholder="Search contacts..." />
+                        <div id="contacts-items" class="contacts-items">
+                            <div class="empty-state" style="text-align: center; padding: 40px 20px;">
+                                <div class="empty-icon" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;">
+                                    <span class="material-symbols-outlined">group</span>
+                                </div>
+                                <div class="empty-text">No contacts found</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="contact-detail-panel">
+                        <div id="contact-detail" class="contact-detail-empty">
+                            <div style="text-align: center; padding: 60px 20px; color: var(--text-tertiary);">
+                                Select a contact to view details and suggested actions
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </section>
             
             <!-- ───── SETTINGS VIEW ───── -->
@@ -284,7 +322,13 @@
                     </aside>
                     <div class="chat-main">
                         <div class="chat-main-header">
-                            <div class="settings-label" id="chat-thread-title">Current Chat</div>
+                            <div class="chat-title-wrap">
+                                <div class="settings-label" id="chat-thread-title">Current Chat</div>
+                                <div class="ai-section-legend">
+                                    <span class="ai-source-badge ai">AI</span>
+                                    <span class="ai-source-badge deepseek">DeepSeek</span>
+                                </div>
+                            </div>
                             <div style="display: flex; align-items: center; gap: 16px;">
                                 <div id="scanning-indicator" class="scanning-indicator">
                                     <div class="scanning-orbit">

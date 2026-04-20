@@ -35,6 +35,90 @@ function buildQueryWithChatContext(query, chatHistory = []) {
   return `${String(query || '').trim()}\n\nConversation context:\n${userTurns.map((item) => `- ${item}`).join('\n')}`;
 }
 
+function tokenizeQueryTerms(query = '') {
+  return String(query || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 3)
+    .slice(0, 24);
+}
+
+function searchSummaryRollups(query = '', summaries = {}, searchIndex = {}, limit = 6) {
+  const terms = tokenizeQueryTerms(query);
+  if (!terms.length || !summaries || typeof summaries !== 'object') return [];
+
+  const dateBoost = new Set();
+  const peopleIndex = searchIndex?.people || {};
+  const topicIndex = searchIndex?.topics || {};
+  for (const term of terms) {
+    const peopleDates = Array.isArray(peopleIndex[term]) ? peopleIndex[term] : [];
+    const topicDates = Array.isArray(topicIndex[term]) ? topicIndex[term] : [];
+    [...peopleDates, ...topicDates].forEach((d) => dateBoost.add(d));
+  }
+
+  const rows = Object.entries(summaries || {}).map(([date, summary]) => {
+    const narrative = String(summary?.narrative || '').toLowerCase();
+    const people = [
+      ...(Array.isArray(summary?.top_people) ? summary.top_people : []),
+      ...(Array.isArray(summary?.top_contacts) ? summary.top_contacts : [])
+    ].map((x) => String(x || '').toLowerCase());
+    const topics = [
+      ...(Array.isArray(summary?.topics) ? summary.topics : []),
+      ...(Array.isArray(summary?.tags) ? summary.tags : []),
+      ...(Array.isArray(summary?.intent_clusters) ? summary.intent_clusters : [])
+    ].map((x) => String(x || '').toLowerCase());
+
+    let score = dateBoost.has(date) ? 0.35 : 0;
+    for (const term of terms) {
+      if (narrative.includes(term)) score += 0.2;
+      if (people.some((p) => p.includes(term))) score += 0.25;
+      if (topics.some((t) => t.includes(term))) score += 0.2;
+    }
+
+    const recencyBonus = (() => {
+      const ts = Date.parse(`${date}T00:00:00Z`);
+      if (!Number.isFinite(ts)) return 0;
+      const days = (Date.now() - ts) / (24 * 60 * 60 * 1000);
+      if (days <= 3) return 0.3;
+      if (days <= 14) return 0.18;
+      if (days <= 30) return 0.1;
+      return 0;
+    })();
+
+    score += recencyBonus;
+
+    return {
+      date,
+      score,
+      narrative: String(summary?.narrative || '').trim(),
+      top_people: Array.isArray(summary?.top_people) ? summary.top_people : [],
+      topics: Array.isArray(summary?.topics) ? summary.topics : [],
+      intent_clusters: Array.isArray(summary?.intent_clusters) ? summary.intent_clusters : []
+    };
+  });
+
+  return rows
+    .filter((r) => r.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, Math.max(1, limit));
+}
+
+function formatSummaryContext(summaryHits = []) {
+  const hits = Array.isArray(summaryHits) ? summaryHits : [];
+  if (!hits.length) return '';
+  return hits
+    .slice(0, 6)
+    .map((item) => {
+      const people = (item.top_people || []).slice(0, 3).join(', ');
+      const topics = (item.topics || []).slice(0, 3).join(', ');
+      const narrative = String(item.narrative || '').replace(/\s+/g, ' ').trim().slice(0, 220);
+      return `- [${item.date}] ${narrative}${people ? ` | people: ${people}` : ''}${topics ? ` | topics: ${topics}` : ''}`;
+    })
+    .join('\n');
+}
+
 function formatChatHistoryForPrompt(chatHistory = []) {
   if (!chatHistory.length) return 'None';
   return chatHistory
@@ -495,7 +579,7 @@ function buildThinkingResultsSummary(retrieval, drilldownEvidence = []) {
     };
   }
   const seedCount = Number(retrieval?.seed_nodes?.length || 0);
-  const expandedCount = Number(retrieval?.expanded_nodes?.length || 0);
+  const expandedCount = Number(retrieval?.expanded_nodes?.length || retrieval?.graph_expansion_results?.length || 0);
   const evidenceCount = Number(retrieval?.evidence_count || retrieval?.evidence?.length || 0);
   const primaryCount = Number(retrieval?.primary_nodes?.length || seedCount);
   const supportCount = Number(retrieval?.support_nodes?.length || 0);
@@ -529,6 +613,9 @@ function buildThinkingResultsSummary(retrieval, drilldownEvidence = []) {
   if (Array.isArray(retrieval?.graph_expansion_results) && retrieval.graph_expansion_results.length) {
     details.push(`Graph expansion added ${retrieval.graph_expansion_results.length} connected nodes (${supportCount} support, ${evidenceNodeCount} evidence).`);
   }
+  if (Array.isArray(retrieval?.summary_hits) && retrieval.summary_hits.length) {
+    details.push(`Compressive memory: reused ${retrieval.summary_hits.length} daily summary snapshots before raw evidence expansion.`);
+  }
   if (drilldownEvidence.length) {
     details.push(`Loaded ${drilldownEvidence.length} raw evidence item${drilldownEvidence.length === 1 ? '' : 's'} for exact wording.`);
   }
@@ -547,6 +634,57 @@ function buildThinkingResultsSummary(retrieval, drilldownEvidence = []) {
     evidence_node_count: evidenceNodeCount,
     evidence_count: evidenceCount
   };
+}
+
+function buildReasoningChain(retrieval = {}) {
+  const plan = retrieval.retrieval_plan || {};
+  const judgment = retrieval.judgment || {};
+  const reflection = retrieval.reflection || {};
+  const sourceMode = String(plan.source_mode || plan.strategy_mode || 'memory_only').replace(/_/g, ' ');
+  const queryCount = {
+    memory: Number((retrieval?.query_sets?.memory_queries || plan?.query_sets?.memory_queries || retrieval?.generated_queries?.semantic || plan?.semantic_queries || []).length || 0),
+    messages: Number((retrieval?.query_sets?.message_queries || plan?.query_sets?.message_queries || retrieval?.generated_queries?.messages || plan?.message_queries || []).length || 0),
+    web: Number((retrieval?.query_sets?.web_queries || plan?.query_sets?.web_queries || retrieval?.generated_queries?.web || plan?.web_queries || []).length || 0)
+  };
+  const chain = [];
+  chain.push({
+    stage: 'hypothesis',
+    summary: `Classified the query as ${sourceMode} retrieval.`,
+    detail: plan.router_reason || plan.web_gate_reason || ''
+  });
+  chain.push({
+    stage: 'search_plan',
+    summary: `Prepared ${queryCount.memory} memory, ${queryCount.messages} message, and ${queryCount.web} web query variants.`,
+    detail: ''
+  });
+  const seedCount = Number(retrieval.seed_nodes?.length || 0);
+  const expandedCount = Number(retrieval.expanded_nodes?.length || retrieval.graph_expansion_results?.length || 0);
+  const evidenceCount = Number(retrieval.evidence_count || retrieval.evidence?.length || 0);
+  chain.push({
+    stage: 'expansion',
+    summary: `Retrieved ${seedCount} seed nodes and expanded to ${expandedCount} connected nodes, packing ${evidenceCount} evidence items.`,
+    detail: ''
+  });
+  if (judgment && Object.keys(judgment).length) {
+    chain.push({
+      stage: 'judge',
+      summary: `Judge confidence ${Number(judgment.confidence_score || 0).toFixed(2)} and sufficiency ${judgment.sufficient ? 'approved' : 'needs more evidence'}.`,
+      detail: judgment.reason || ''
+    });
+  }
+  chain.push({
+    stage: 'synthesis',
+    summary: `Drafted the response using ${retrieval.web_search_used ? 'memory plus web' : 'memory-only'} context.`,
+    detail: retrieval.web_search_used ? 'Web results were included in the answer.' : 'No external web results were needed.'
+  });
+  if (reflection && Object.keys(reflection).length) {
+    chain.push({
+      stage: 'reflection',
+      summary: reflection.approved ? 'Reflection approved the draft.' : 'Reflection requested revisions.',
+      detail: reflection.reason || ''
+    });
+  }
+  return chain;
 }
 
 async function buildThinkingTrace({ query, retrieval, drilldownEvidence = [] }) {
@@ -594,6 +732,8 @@ async function buildThinkingTrace({ query, retrieval, drilldownEvidence = [] }) 
       url: item.url
     })) : [],
     memory_sources: dataSources,
+    summary_hits: Array.isArray(retrieval?.summary_hits) ? retrieval.summary_hits : [],
+    summary_context: retrieval?.summary_context || '',
     web_sources: Array.isArray(retrieval?.web_sources) ? retrieval.web_sources : [],
     generated_queries: retrieval?.generated_queries || null,
     lexical_terms: Array.isArray(retrieval?.generated_queries?.lexical_terms) ? retrieval.generated_queries.lexical_terms : [],
@@ -601,7 +741,9 @@ async function buildThinkingTrace({ query, retrieval, drilldownEvidence = [] }) 
     answer_basis: strategy.answer_basis,
     temporal_reasoning: Array.isArray(retrieval?.temporal_reasoning) ? retrieval.temporal_reasoning : [],
     query_sets: retrieval?.query_sets || null,
+    search_phases: Array.isArray(retrieval?.retrieval_plan?.search_phases) ? retrieval.retrieval_plan.search_phases : [],
     stage_trace: Array.isArray(retrieval?.stage_trace) ? retrieval.stage_trace : [],
+    reasoning_chain: buildReasoningChain(retrieval),
     initial_date_range: retrieval?.initial_date_range || null,
     applied_date_range: retrieval?.applied_date_range || null,
     widened_date_range: retrieval?.widened_date_range || null,
@@ -808,10 +950,12 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   }).catch(e => console.warn('Failed to persist user chat turn:', e));
 
   // 1. Router Stage
-  emitStage('routing', 'started', { label: 'Routing' });
+  emitStage('routing', 'started', { label: 'Hypothesis', detail: 'Deciding whether this query should use memory, web, or hybrid retrieval.' });
   const { baseThought, retrievalQuery, chatHistory } = await runRouterStage({ query, options });
+  const summaryHits = searchSummaryRollups(query, options?.historical_summaries || {}, options?.search_index || {}, 6);
+  const summaryContext = formatSummaryContext(summaryHits);
   emitStage('routing', 'completed', {
-    label: 'Routing',
+    label: 'Hypothesis',
     detail: formatStageDetail([
       `Source mode: ${baseThought.source_mode || baseThought.strategy_mode || 'memory_only'}.`,
       baseThought.router_reason || baseThought.web_gate_reason || ''
@@ -824,12 +968,13 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     preview_items: [
       baseThought.source_mode || baseThought.strategy_mode || 'memory_only',
       baseThought.time_scope?.label || null,
-      baseThought.summary_vs_raw || null
+      baseThought.summary_vs_raw || null,
+      summaryHits.length ? `summary hits: ${summaryHits.length}` : null
     ].filter(Boolean)
   });
 
   emitStage('query_generation', 'completed', {
-    label: 'Query generation',
+    label: 'Search planning',
     detail: formatStageDetail([
       `Prepared ${baseThought.query_sets?.memory_queries?.length || baseThought.semantic_queries?.length || 0} memory queries,`,
       `${baseThought.query_sets?.message_queries?.length || baseThought.message_queries?.length || 0} message queries,`,
@@ -847,15 +992,15 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   });
 
   // 2. Planner Stage
-  emitStage('planning', 'started', { label: 'Planning' });
+  emitStage('planning', 'started', { label: 'Planner', detail: 'Generating a concise execution plan and refining key query terms.' });
   let plan = await runPlannerStage({ query: retrievalQuery, routerOutput: baseThought, apiKey });
   emitStage('planning', 'completed', {
-    label: 'Planning',
+    label: 'Planner',
     detail: plan ? 'Created a formal execution plan with refined queries.' : 'Using default routing plan.',
     preview_items: plan?.reasoning_plan || []
   });
 
-  // 3. Retriever Stage (with Judge loop)
+  // 3. Retriever Stage (always memory first, then web if needed)
   let retrieval = {
     retrieval_plan: baseThought,
     router: {
@@ -885,7 +1030,9 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     edge_paths: [],
     evidence: [],
     evidence_count: 0,
-    contextText: ''
+    contextText: '',
+    summary_hits: summaryHits,
+    summary_context: summaryContext
   };
   let webResults = [];
   let drilldownEvidence = [];
@@ -895,82 +1042,79 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
 
   while (!judgment.sufficient && iteration < maxIterations) {
     iteration++;
-    emitStage('retrieving', 'started', { label: iteration > 1 ? `Re-retrieving (Attempt ${iteration})` : 'Retrieving' });
+    emitStage('retrieving', 'started', { label: iteration > 1 ? `Phase 1: Initial memory search (Attempt ${iteration})` : 'Phase 1: Initial memory search', detail: 'Applying time-first filters, searching all memory layers, and collecting top candidates.' });
 
     // Use refined queries if available and it's not the first pass or if they exist
     const currentThought = (iteration > 1 && judgment.suggested_queries)
       ? { ...baseThought, semantic_queries: judgment.suggested_queries }
       : (plan?.refined_queries ? { ...baseThought, semantic_queries: plan.refined_queries } : baseThought);
 
-    if ((currentThought.source_mode || currentThought.strategy_mode) !== 'web_only') {
+    retrieval = await executeParallelRetrieval(retrievalQuery, currentThought, {
+      mode: 'chat',
+      app: options?.app,
+      date_range: currentThought.applied_date_range || options?.date_range,
+      source_types: options?.source_types,
+      retrieval_thought: currentThought,
+      passiveOnly: iteration === 1
+    }, emit);
+
+    if (iteration === 1 && retrievalLooksSparse(retrieval)) {
       retrieval = await executeParallelRetrieval(retrievalQuery, currentThought, {
         mode: 'chat',
         app: options?.app,
         date_range: currentThought.applied_date_range || options?.date_range,
         source_types: options?.source_types,
         retrieval_thought: currentThought,
-        passiveOnly: iteration === 1
+        passiveOnly: false
       }, emit);
+    }
 
-      if (iteration === 1 && retrievalLooksSparse(retrieval)) {
-        retrieval = await executeParallelRetrieval(retrievalQuery, currentThought, {
+    // Widen if still sparse
+    const canWiden = Boolean(currentThought?.initial_date_range || currentThought?.filters?.app) && !currentThought?.fallback_policy?.attempted;
+    if (canWiden && retrievalLooksSparse(retrieval)) {
+      const widenedRange = currentThought.initial_date_range ? widenTemporalWindow(currentThought.initial_date_range) : null;
+      let widenedApps = null;
+      if (currentThought.filters?.app) {
+        const families = inferSurfaceFamilies(retrievalQuery, '', currentThought.filters.app);
+        if (families.includes('communication')) widenedApps = ['Gmail', 'Slack', 'Messages', 'WhatsApp', 'Signal'];
+        else if (families.includes('coding')) widenedApps = ['GitHub', 'Cursor', 'Xcode', 'VSCode'];
+        else if (families.includes('browser')) widenedApps = ['Chrome', 'Safari', 'Arc'];
+      }
+
+      if (widenedRange || widenedApps) {
+        const widenedThought = {
+          ...currentThought,
+          filters: { ...(currentThought.filters || {}), date_range: widenedRange || currentThought.filters?.date_range, app: widenedApps || currentThought.filters?.app },
+          applied_date_range: widenedRange || currentThought.applied_date_range,
+          widened_date_range: widenedRange,
+          date_filter_status: 'widened',
+          fallback_policy: { ...(currentThought.fallback_policy || { mode: 'widen_once' }), attempted: true, widened: true }
+        };
+        retrieval = await executeParallelRetrieval(retrievalQuery, widenedThought, {
           mode: 'chat',
-          app: options?.app,
-          date_range: currentThought.applied_date_range || options?.date_range,
+          app: widenedApps || options?.app,
+          date_range: widenedRange || currentThought.applied_date_range,
           source_types: options?.source_types,
-          retrieval_thought: currentThought,
-          passiveOnly: false
-        }, emit);
+          retrieval_thought: widenedThought
+        }, onStep);
       }
+    }
 
-      // Widen if still sparse
-      const canWiden = Boolean(currentThought?.initial_date_range || currentThought?.filters?.app) && !currentThought?.fallback_policy?.attempted;
-      if (canWiden && retrievalLooksSparse(retrieval)) {
-        const widenedRange = currentThought.initial_date_range ? widenTemporalWindow(currentThought.initial_date_range) : null;
-        let widenedApps = null;
-        if (currentThought.filters?.app) {
-          const families = inferSurfaceFamilies(retrievalQuery, '', currentThought.filters.app);
-          if (families.includes('communication')) widenedApps = ['Gmail', 'Slack', 'Messages', 'WhatsApp', 'Signal'];
-          else if (families.includes('coding')) widenedApps = ['GitHub', 'Cursor', 'Xcode', 'VSCode'];
-          else if (families.includes('browser')) widenedApps = ['Chrome', 'Safari', 'Arc'];
-        }
+    emitStage('ranking', 'completed', {
+      label: 'Phase 2: Node expansion + rerank',
+      detail: `Packed ${retrieval.evidence_count || 0} evidence items from primary nodes, support nodes, and downward evidence.`,
+      counts: retrieval.packed_context_stats || {
+        evidence: Number(retrieval.evidence_count || 0)
+      },
+      preview_items: (retrieval.evidence || []).slice(0, 3).map((item) => item.text || item.id)
+    });
 
-        if (widenedRange || widenedApps) {
-          const widenedThought = {
-            ...currentThought,
-            filters: { ...(currentThought.filters || {}), date_range: widenedRange || currentThought.filters?.date_range, app: widenedApps || currentThought.filters?.app },
-            applied_date_range: widenedRange || currentThought.applied_date_range,
-            widened_date_range: widenedRange,
-            date_filter_status: 'widened',
-            fallback_policy: { ...(currentThought.fallback_policy || { mode: 'widen_once' }), attempted: true, widened: true }
-          };
-          retrieval = await executeParallelRetrieval(retrievalQuery, widenedThought, {
-            mode: 'chat',
-            app: widenedApps || options?.app,
-            date_range: widenedRange || currentThought.applied_date_range,
-            source_types: options?.source_types,
-            retrieval_thought: widenedThought
-          }, onStep);
-        }
-      }
-
-      emitStage('ranking', 'completed', {
-        label: 'Ranking and packing',
-        detail: `Packed ${retrieval.evidence_count || 0} evidence items from primary nodes, support nodes, and downward evidence.`,
-        counts: retrieval.packed_context_stats || {
-          evidence: Number(retrieval.evidence_count || 0)
-        },
-        preview_items: (retrieval.evidence || []).slice(0, 3).map((item) => item.text || item.id)
-      });
-    } else {
-      emitStage('ranking', 'skipped', {
-        label: 'Ranking and packing',
-        detail: 'Skipped memory context packing because the request is web-only.'
-      });
+    if (summaryContext) {
+      retrieval.contextText = `[Daily Summary Snapshots]\n${summaryContext}\n\n${retrieval.contextText || ''}`.trim();
     }
 
     const webAssessment = assessWebSearchNecessity(query, currentThought, retrieval);
-    const shouldSearchWeb = webAssessment.shouldSearchWeb || (currentThought.source_mode || currentThought.strategy_mode) === 'web_only';
+    const shouldSearchWeb = webAssessment.shouldSearchWeb;
     
     if (shouldSearchWeb) {
       const webSearchQuery = (judgment.suggested_queries?.[0]) || (currentThought?.semantic_queries?.[0]) || query;
@@ -997,10 +1141,10 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       : [];
 
     // 4. Judge Stage
-    emitStage('judging', 'started', { label: 'Judging' });
+    emitStage('judging', 'started', { label: 'Evidence test', detail: 'Checking whether the current memory and web evidence supports the answer.' });
     judgment = await runJudgeStage({ query: retrievalQuery, plan, evidence: [...(retrieval.evidence || []), ...webResults], apiKey });
     emitStage('judging', 'completed', {
-      label: 'Judging',
+      label: 'Evidence test',
       detail: judgment.reason,
       status: judgment.sufficient ? 'completed' : 'retry'
     });
@@ -1015,6 +1159,8 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   retrieval.web_sources = webResults.map(r => r.url).filter(Boolean);
   retrieval.plan = plan;
   retrieval.judgment = judgment;
+  retrieval.summary_hits = summaryHits;
+  retrieval.summary_context = summaryContext;
 
   const thinkingTrace = await buildThinkingTrace({ query, retrieval, drilldownEvidence });
   const standingNotes = String(options?.standing_notes || options?.core_memory || '').trim();
@@ -1032,7 +1178,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   } else {
     while (!reflection.approved && synthIteration < maxSynthIterations) {
       synthIteration++;
-      emitStage('synthesis', 'started', { label: synthIteration > 1 ? `Re-synthesizing (Attempt ${synthIteration})` : 'Synthesis', detail: 'Reasoning over the packed context bundle to draft the answer.' });
+      emitStage('synthesis', 'started', { label: synthIteration > 1 ? `Answer drafting (Attempt ${synthIteration})` : 'Answer drafting', detail: 'Reasoning over the packed context bundle to draft the answer.' });
       content = await runSynthesizerStage({
         query,
         retrieval,
@@ -1044,17 +1190,9 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
         reflectorFeedback: synthIteration > 1 ? reflection : null
       });
 
-      // Confidence gate: skip Reflector if judgment is highly confident
-      if (synthIteration === 1 && Number(judgment?.confidence_score) > 0.85) {
-        reflection.approved = true;
-        reflection.reason = 'Confidence gate passed (>0.85). Skipping reflector.';
-        retrieval.reflection = reflection;
-        break;
-      }
-
-      // 6. Reflector Stage
-      emitStage('reflecting', 'started', { label: 'Reflecting' });
-      reflection = await runReflectorStage({ query, evidence: [...(retrieval.evidence || []), ...webResults], answer: content, apiKey });
+      // 6. Reflector Stage (with confidence gating)
+      emitStage('reflecting', 'started', { label: 'Critique', detail: 'Reviewing the draft for completeness, accuracy, and hallucination risk.' });
+      reflection = await runReflectorStage({ query, evidence: [...(retrieval.evidence || []), ...webResults], answer: content, apiKey, confidenceScore: judgment?.confidence_score });
       retrieval.reflection = reflection;
       emitStage('reflecting', 'completed', {
         label: 'Reflecting',
@@ -1150,8 +1288,94 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     } catch (_) {}
   }
 
+  // New action tags
+  const uiBlocks = [];
+
+  const contactCreateMatch = content.match(/<contact_create>([\s\S]*?)<\/contact_create>/i);
+  if (contactCreateMatch && contactCreateMatch[1]) {
+    try {
+      const input = JSON.parse(contactCreateMatch[1].trim());
+      content = content.replace(/<contact_create>[\s\S]*?<\/contact_create>/i, '').trim();
+      const toolResult = await dispatchTool({ tool: 'contact_create', input }).catch(() => null);
+      if (toolResult?.status === 'success') {
+        uiBlocks.push({
+          type: 'info',
+          title: `Contact created: ${input.name}`,
+          body: [input.email, input.phone, input.notes].filter(Boolean).join(' · ') || 'No additional details.',
+          actions: [{ label: 'View contact', action: 'view_contact', data: { node_id: toolResult.output?.node_id, name: input.name } }]
+        });
+      }
+    } catch (_) {}
+  }
+
+  const contactUpdateMatch = content.match(/<contact_update>([\s\S]*?)<\/contact_update>/i);
+  if (contactUpdateMatch && contactUpdateMatch[1]) {
+    try {
+      const input = JSON.parse(contactUpdateMatch[1].trim());
+      content = content.replace(/<contact_update>[\s\S]*?<\/contact_update>/i, '').trim();
+      const toolResult = await dispatchTool({ tool: 'contact_update', input }).catch(() => null);
+      if (toolResult?.status === 'success') {
+        uiBlocks.push({
+          type: 'info',
+          title: `Contact updated: ${input.name}`,
+          body: `Updated: ${(toolResult.output?.updated_fields || []).join(', ')}`,
+          actions: [{ label: 'View contact', action: 'view_contact', data: { node_id: toolResult.output?.node_id, name: input.name } }]
+        });
+      }
+    } catch (_) {}
+  }
+
+  const memCreateMatch = content.match(/<memory_create>([\s\S]*?)<\/memory_create>/i);
+  if (memCreateMatch && memCreateMatch[1]) {
+    try {
+      const input = JSON.parse(memCreateMatch[1].trim());
+      content = content.replace(/<memory_create>[\s\S]*?<\/memory_create>/i, '').trim();
+      const toolResult = await dispatchTool({ tool: 'memory_create', input }).catch(() => null);
+      if (toolResult?.status === 'success') {
+        uiBlocks.push({
+          type: 'info',
+          title: `Saved to memory: ${input.title}`,
+          body: input.summary,
+          actions: []
+        });
+      }
+    } catch (_) {}
+  }
+
+  const autoCreateMatch = content.match(/<automation_create>([\s\S]*?)<\/automation_create>/i);
+  if (autoCreateMatch && autoCreateMatch[1]) {
+    try {
+      const input = JSON.parse(autoCreateMatch[1].trim());
+      content = content.replace(/<automation_create>[\s\S]*?<\/automation_create>/i, '').trim();
+      const toolResult = await dispatchTool({ tool: 'automation_create', input }).catch(() => null);
+      if (toolResult?.status === 'success') {
+        const intervalLabel = input.interval_minutes >= 60
+          ? `every ${Math.round(input.interval_minutes / 60)}h`
+          : `every ${input.interval_minutes}m`;
+        uiBlocks.push({
+          type: 'info',
+          title: `Automation scheduled: ${input.name}`,
+          body: `Runs ${intervalLabel} — "${input.prompt}"`,
+          actions: [{ label: 'View automations', action: 'view_automations', data: {} }]
+        });
+      }
+    } catch (_) {}
+  }
+
+  // Explicit ui_card tags (LLM-authored interactive cards)
+  const uiCardRegex = /<ui_card>([\s\S]*?)<\/ui_card>/gi;
+  let uiCardMatch;
+  while ((uiCardMatch = uiCardRegex.exec(content)) !== null) {
+    try {
+      const card = JSON.parse(uiCardMatch[1].trim());
+      uiBlocks.push(card);
+    } catch (_) {}
+  }
+  content = content.replace(/<ui_card>[\s\S]*?<\/ui_card>/gi, '').trim();
+
   return {
     content,
+    ui_blocks: uiBlocks,
     thinking_trace: thinkingTrace,
     retrieval: {
       ...retrieval,
@@ -1161,6 +1385,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       query_variants: retrieval?.generated_queries?.semantic || retrieval?.retrieval_plan?.semantic_queries || [],
       message_query_variants: retrieval?.generated_queries?.messages || retrieval?.retrieval_plan?.message_queries || [],
       retrieval_thought: retrieval?.retrieval_plan || null,
+      provider: apiKey ? 'deepseek' : 'local',
       generated_queries: retrieval?.generated_queries || {
         semantic: retrieval?.retrieval_plan?.semantic_queries || [],
         messages: retrieval?.retrieval_plan?.message_queries || [],
@@ -1185,7 +1410,35 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
 }
 
 function isCreditSaverMode() {
-  return String(process.env.CREDIT_SAVER_MODE || process.env.DEEPSEEK_CREDIT_SAVER || '').toLowerCase() === 'true';
+  const envValue = process.env.CREDIT_SAVER_MODE || process.env.DEEPSEEK_CREDIT_SAVER || 'true';
+  return String(envValue).toLowerCase() !== 'false';
+}
+
+function isSimpleQuery(query) {
+  const simple = /^\s*(recent|deadline|when|who|what is|quick|show|list|any messages?|unread|my tasks?|what's next)\b/i;
+  const complex = /\b(relationship|pattern|explain|why|how|analyze|over the last|long-term|habit|recurring)\b/i;
+  return simple.test(query) && !complex.test(query);
+}
+
+function heuristicJudge(evidence) {
+  const evidenceCount = (evidence || []).length;
+  const topScores = evidence.slice(0, 5).map(e => Number(e.score || 0.5));
+  const avgTopScore = topScores.length ? topScores.reduce((a, b) => a + b) / topScores.length : 0;
+  const evidenceQuality = (evidenceCount >= 5 && avgTopScore >= 0.65) 
+    ? 'strong'
+    : (evidenceCount >= 3 && avgTopScore >= 0.55)
+    ? 'moderate'
+    : 'weak';
+  const sufficient = evidenceQuality !== 'weak' || evidenceCount >= 8;
+  const confidenceScore = Math.min(0.99, Math.max(0.3, 
+    (evidenceCount / 10) * 0.5 + (avgTopScore * 0.5)
+  ));
+  return {
+    sufficient,
+    confidence_score: confidenceScore,
+    reason: `[Heuristic] ${evidenceQuality} evidence: ${evidenceCount} items, avg score ${avgTopScore.toFixed(2)}.`,
+    suggested_queries: []
+  };
 }
 
 async function runRouterStage({ query, options }) {
@@ -1209,8 +1462,17 @@ async function runRouterStage({ query, options }) {
 
 async function runPlannerStage({ query, routerOutput, apiKey }) {
   if (!apiKey) return null;
+
+  if (isSimpleQuery(query)) {
+    return {
+      reasoning_plan: ['Using heuristic expansion for simple query.'],
+      refined_queries: [],
+      evidence_criteria: 'Heuristic-based (simple query optimization)'
+    };
+  }
+
   const prompt = `[System]
-Expert retrieval planner. Goal: Take query + router strategy, produce execution plan.
+Retrieval planner. Goal: Take query + router strategy, produce execution plan.
 [Query]
 ${query}
 [Router]
@@ -1219,7 +1481,7 @@ ${JSON.stringify(routerOutput)}
 Return JSON: {"reasoning_plan": ["step1",...], "refined_queries": ["q1",...], "evidence_criteria": "string"}`;
 
   try {
-    const plan = await callLLM(prompt, apiKey, 0.22, { maxTokens: 800, task: 'routing' });
+    const plan = await callLLM(prompt, apiKey, 0.22, { maxTokens: 600, task: 'routing' });
     return plan;
   } catch (e) {
     console.error('[Planner] Stage failed:', e.message);
@@ -1230,48 +1492,73 @@ Return JSON: {"reasoning_plan": ["step1",...], "refined_queries": ["q1",...], "e
 async function runJudgeStage({ query, plan, evidence, apiKey }) {
   if (!apiKey || !evidence?.length) return { sufficient: true, reason: 'No API key or no evidence for judging.' };
 
-  const evidenceSnippet = (evidence || []).slice(0, 25).map(e => `[${e.layer || e.type}] ${String(e.text || e.title || '').slice(0, 400)}`).join('\n---\n');
+  const heuristicResult = heuristicJudge(evidence);
+  if (isCreditSaverMode() || heuristicResult.confidence_score > 0.72) {
+    return heuristicResult;
+  }
 
+  const evidenceSnippet = (evidence || []).slice(0, 15).map(e => `[${e.layer || e.type}] ${String(e.text || e.title || '').slice(0, 250)}`).join('\n');
   const prompt = `[System]
-Retrieval judge. Goal: Evaluate if context is sufficient to answer.
+Quick sufficiency check. Given evidence, is answer supported?
 [Query]
 ${query}
-[Plan]
-${JSON.stringify(plan)}
-[Evidence]
+[Evidence (${evidence.length} items)]
 ${evidenceSnippet}
 [Instruction]
-Return JSON: {"sufficient": bool, "confidence_score": 0.0-1.0, "missing_information": "string", "suggested_queries": ["q1",...], "reason": "string"}`;
+Return JSON: {"sufficient": bool, "confidence_score": 0.5-1.0, "reason": "string"}`;
 
   try {
-    const judgment = await callLLM(prompt, apiKey, 0.1, { maxTokens: 600, task: 'routing' });
-    return judgment || { sufficient: true, reason: 'Judgment parse failed, assuming sufficient.' };
+    const judgment = await callLLM(prompt, apiKey, 0.1, { maxTokens: 400, task: 'routing' });
+    return judgment || heuristicResult;
   } catch (e) {
-    return { sufficient: true, reason: 'Judge stage error: ' + e.message };
+    return heuristicResult;
   }
 }
 
-async function runReflectorStage({ query, evidence, answer, apiKey }) {
+async function runReflectorStage({ query, evidence, answer, apiKey, confidenceScore = 0.5 }) {
   if (!apiKey) return { approved: true, reason: 'No API key for reflection.' };
 
-  const evidenceSnippet = (evidence || []).slice(0, 20).map(e => `[${e.layer || e.type}] ${String(e.text || e.title || '').slice(0, 250)}`).join('\n');
+  if (Number(confidenceScore || 0.5) > 0.85) {
+    return { 
+      approved: true, 
+      reason: 'Confidence gate passed (>0.85). Skipping reflector.' 
+    };
+  }
 
+  const answerLength = String(answer || '').length;
+  if (answerLength < 50) {
+    return { 
+      approved: false, 
+      reason: 'Answer too short.',
+      critique: 'Response incomplete.',
+      suggestions: 'Expand with more detail.'
+    };
+  }
+
+  if (isCreditSaverMode() || answerLength < 500) {
+    return {
+      approved: true,
+      reason: 'Heuristic checks passed.'
+    };
+  }
+
+  const evidenceSnippet = (evidence || []).slice(0, 12).map(e => `[${e.layer || e.type}] ${String(e.text || e.title || '').slice(0, 200)}`).join('\n');
   const prompt = `[System]
-Critical reflector. Critique draft vs evidence/query. Check hallucinations, tone, completeness.
+Check draft for hallucinations and tone.
 [Query]
 ${query}
 [Evidence]
 ${evidenceSnippet}
-[Draft]
-${answer}
+[Draft (${answerLength} chars)]
+${answer.slice(0, 1000)}
 [Instruction]
-Return JSON: {"approved": bool, "critique": "string", "suggestions": "string", "reason": "string"}`;
+Return JSON: {"approved": bool, "critique": "string", "reason": "string"}`;
 
   try {
-    const reflection = await callLLM(prompt, apiKey, 0.1, { maxTokens: 800, task: 'routing' });
-    return reflection || { approved: true, reason: 'Reflection parse failed, assuming approved.' };
+    const reflection = await callLLM(prompt, apiKey, 0.1, { maxTokens: 500, task: 'routing' });
+    return reflection || { approved: true, reason: 'LLM reflection parse failed, assuming approved.' };
   } catch (e) {
-    return { approved: true, reason: 'Reflector stage error: ' + e.message };
+    return { approved: true, reason: 'Reflector fallback.' };
   }
 }
 
@@ -1317,6 +1604,24 @@ async function runSynthesizerStage({ query, retrieval, chatHistory, standingNote
 
   const prompt = `[System]
 Weave assistant. Conversational, grounded, direct, concise. No invented facts.
+
+[Available Actions]
+You can take actions by embedding XML tags anywhere in your response. They are processed silently and removed before display.
+
+Create a contact (use when user asks to add/create a person):
+<contact_create>{"name":"Full Name","email":"email@example.com","phone":"+1234567890","notes":"optional notes"}</contact_create>
+
+Update a contact's profile (use when user asks to add info to an existing contact):
+<contact_update>{"name":"Person Name","updates":{"email":"new@email.com","phone":"...","notes":"..."}}</contact_update>
+
+Save something to memory (use when user explicitly asks to remember something):
+<memory_create>{"layer":"semantic","subtype":"fact","title":"Short title","summary":"What to remember"}</memory_create>
+
+Create a scheduled automation (use when user asks to run something every X minutes/hours):
+<automation_create>{"name":"Automation Name","description":"What it does","prompt":"The prompt to run on schedule","interval_minutes":30}</automation_create>
+
+Show an interactive card to the user (use to confirm actions or offer follow-up options):
+<ui_card>{"type":"info","title":"Card Title","body":"Card description","actions":[{"label":"Button Label","action":"action_id","data":{}}]}</ui_card>
 
 [Grounded Context]
 ${contextLines.join('\n') || 'None'}

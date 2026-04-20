@@ -572,6 +572,7 @@ function buildSeedRetrievalIntent({ title = '', type = '', category = '', trigge
 function mapOpportunityTypeToSeedType(opportunityType = '') {
   const value = String(opportunityType || '').toLowerCase();
   if (value.includes('followup') || value.includes('contact')) return 'person_followup';
+  if (value.includes('social_decay') || value.includes('value_hook')) return 'person_followup';
   if (value.includes('deadline')) return 'deadline_risk';
   if (value.includes('study')) return 'study_followthrough';
   if (value === 'person_news') return 'person_news';
@@ -585,7 +586,7 @@ function mapOpportunityToSeed(candidate = {}) {
   const oppType = String(candidate.opportunity_type || '').toLowerCase();
   let category = 'work';
   if (/followup|contact/.test(oppType)) category = 'followup';
-  if (/relationship_intelligence|person_news|birthday_reminder|article_share|followup_reminder|connection_opportunity/.test(oppType)) category = 'relationship_intelligence';
+  if (/relationship_intelligence|person_news|birthday_reminder|article_share|followup_reminder|connection_opportunity|social_decay_nudge|contextual_value_hook/.test(oppType)) category = 'relationship_intelligence';
   
   const type = mapOpportunityTypeToSeedType(candidate.opportunity_type);
   const triggerSummary = trim(candidate.trigger_summary || candidate.time_anchor || title, 180);
@@ -610,7 +611,13 @@ function mapOpportunityToSeed(candidate = {}) {
     reason_codes: Array.isArray(candidate.reason_codes) ? candidate.reason_codes : [],
     time_anchor: candidate.time_anchor || '',
     candidate_actions: Array.isArray(candidate.candidate_actions) ? candidate.candidate_actions : [],
-    candidate_score: Number(candidate.score || candidate.confidence || 0)
+    candidate_score: Number(candidate.score || candidate.confidence || 0),
+    social_tier: candidate.social_tier || null,
+    social_temperature: Number(candidate.social_temperature || 0),
+    sentiment_gradient: candidate.sentiment_gradient || null,
+    value_hook: candidate.value_hook || null,
+    outreach_options: Array.isArray(candidate.outreach_options) ? candidate.outreach_options : [],
+    social_strategy: candidate.social_strategy || null
   };
 }
 
@@ -1043,12 +1050,17 @@ Opportunity:
 - type: ${seed.opportunity_type || 'unknown'}
 - time_anchor: ${seed.time_anchor || 'now'}
 - reason_codes: ${(seed.reason_codes || []).join(', ') || 'none'}
+- social_tier: ${seed.social_tier || 'unknown'}
+- social_temperature: ${Number(seed.social_temperature || 0).toFixed(2)}
+- value_hook: ${seed.value_hook ? JSON.stringify(seed.value_hook) : 'none'}
 
 KNOWN SPECIFICS (use these exact names/times — do not paraphrase):
 ${graphSpecifics}
 
 Candidate actions:
 ${(seed.candidate_actions || []).map((item) => `- ${item}`).join('\n') || '- None'}
+Outreach options:
+${(seed.outreach_options || []).map((item) => `- [${item.type || 'option'}] ${item.label || ''}: ${item.draft || ''}`).join('\n') || '- None'}
 Standing notes: ${standingNotes || 'None'}
 
 Graph context:
@@ -1183,6 +1195,7 @@ ${recentRecall.map((r) => `- [${r.source}] ${r.text} (${r.timestamp})`).join('\n
       source_node_ids: Array.from(new Set([...(seed.source_node_ids || []), ...graphContext.seed_nodes.map((item) => item.id)])).slice(0, 6),
       source_edge_paths: graphContext.edge_paths,
       evidence: graphContext.evidence || [],
+      provider: apiKey ? 'deepseek' : 'local',
       retrieval_trace: {
         retrieval_plan: graphContext.retrieval_plan,
         seed_nodes: graphContext.seed_nodes,
@@ -1244,6 +1257,7 @@ ${recentRecall.map((r) => `- [${r.source}] ${r.text} (${r.timestamp})`).join('\n
     source_edge_paths: graphContext.edge_paths,
     evidence_path: graphContext.edge_paths,
     evidence: graphContext.evidence || [],
+    provider: apiKey ? 'deepseek' : 'local',
     study_subject: studySubject || null,
     risk_level: riskLevel,
     recommended_action: stepPlan[0] || title,
