@@ -20,6 +20,59 @@ function estimateTokensHeuristic(text) {
   return Math.ceil((text || '').length / 4);
 }
 
+function formatContext({
+  budget = 2000,
+  primarySeeds = [],
+  hierarchicalExpandedNodes = [],
+  seeds = [],
+  expandedNodes = [],
+  edgePaths = []
+} = {}) {
+  let usedTokens = 0;
+  const contextSections = [];
+
+  const addSection = (header, items, formatter) => {
+    if (!items || !items.length) return;
+    const formattedItems = [];
+    const seenText = new Set();
+
+    for (const item of items) {
+      const line = formatter(item);
+      const textKey = line.trim();
+      if (seenText.has(textKey)) continue;
+      seenText.add(textKey);
+
+      const tokens = estimateTokensHeuristic(line);
+      if (usedTokens + tokens > budget) {
+        if (usedTokens < budget) {
+          const remaining = budget - usedTokens;
+          if (remaining > 20) {
+            formattedItems.push(line.slice(0, remaining * 4) + '... [TRUNCATED]');
+            usedTokens = budget;
+          }
+        }
+        break;
+      }
+      formattedItems.push(line);
+      usedTokens += tokens;
+    }
+    if (formattedItems.length) {
+      contextSections.push(`${header}:\n${formattedItems.join('\n')}`);
+    }
+  };
+
+  addSection('PRIMARY SEARCH SEEDS', primarySeeds, (seed) => `- [${seed.layer || 'node'}] ${seed.title || seed.node_id}: ${String(seed.text || '').slice(0, 4000)}`);
+  addSection('HIERARCHICAL EXPANSION', hierarchicalExpandedNodes, (node) => `- [${node.layer}] ${node.title}: ${String(node.text || node.summary || '').slice(0, 4000)}`);
+  addSection('SEED NODES', seeds, (seed) => `- [${seed.layer || 'node'}] ${String(seed.text || '').slice(0, 180)}`);
+  addSection('EXPANDED GRAPH', expandedNodes.slice(0, MAX_EXPANDED), (node) => `- [${node.layer}${node.subtype ? `/${node.subtype}` : ''}] ${node.title}${node.summary ? ` — ${node.summary}` : ''}`);
+
+  if (edgePaths && edgePaths.length) {
+    addSection('TRACE', edgePaths.slice(0, 20), (edge) => `- ${edge.from} -> ${edge.to} via ${edge.relation}${edge.trace_label ? ` (${edge.trace_label})` : ''}`);
+  }
+
+  return contextSections.join('\n\n');
+}
+
 function getEmbedding(row) {
   if (!row) return [];
   if (Array.isArray(row.embedding)) return row.embedding;
@@ -1286,40 +1339,14 @@ async function buildHybridGraphRetrieval({
   ];
 
   const budget = retrievalPlan.context_budget_tokens || 2000;
-  let usedTokens = 0;
-  const contextSections = [];
-
-  const addSection = (header, items, formatter) => {
-    if (!items || !items.length) return;
-    const formattedItems = [];
-    for (const item of items) {
-      const line = formatter(item);
-      const tokens = estimateTokensHeuristic(line);
-      if (usedTokens + tokens > budget) {
-        if (usedTokens < budget) {
-          const remaining = budget - usedTokens;
-          if (remaining > 20) {
-            formattedItems.push(line.slice(0, remaining * 4) + '... [TRUNCATED]');
-            usedTokens = budget;
-          }
-        }
-        break;
-      }
-      formattedItems.push(line);
-      usedTokens += tokens;
-    }
-    if (formattedItems.length) {
-      contextSections.push(`${header}:\n${formattedItems.join('\n')}`);
-    }
-  };
-
-  addSection('PRIMARY SEARCH SEEDS', primarySeeds, (seed) => `- [${seed.layer || 'node'}] ${seed.title || seed.node_id}: ${String(seed.text || '').slice(0, 4000)}`);
-  addSection('HIERARCHICAL EXPANSION', hierarchicalExpansion.expandedNodes, (node) => `- [${node.layer}] ${node.title}: ${String(node.text || node.summary || '').slice(0, 4000)}`);
-  addSection('SEED NODES', seeds, (seed) => `- [${seed.layer || 'node'}] ${String(seed.text || '').slice(0, 180)}`);
-  addSection('EXPANDED GRAPH', graph.expandedNodes.slice(0, MAX_EXPANDED), (node) => `- [${node.layer}${node.subtype ? `/${node.subtype}` : ''}] ${node.title}${node.summary ? ` — ${node.summary}` : ''}`);
-
-  const allEdgePaths = [...graph.edgePaths, ...sourceRefEdges];
-  addSection('TRACE', allEdgePaths.slice(0, 20), (edge) => `- ${edge.from} -> ${edge.to} via ${edge.relation}${edge.trace_label ? ` (${edge.trace_label})` : ''}`);
+  const contextText = formatContext({
+    budget,
+    primarySeeds,
+    hierarchicalExpandedNodes: hierarchicalExpansion.expandedNodes,
+    seeds,
+    expandedNodes: graph.expandedNodes,
+    edgePaths: [...graph.edgePaths, ...sourceRefEdges]
+  });
 
   const retrievalRunId = await logRetrievalRun({
     query,
@@ -1408,8 +1435,8 @@ async function buildHybridGraphRetrieval({
     evidence_nodes: evidenceNodes,
     expanded_nodes: graph.expandedNodes,
     graph_expansion_results: graph.expandedNodes,
-    edge_paths: allEdgePaths,
-    trace_labels: allEdgePaths.map((edge) => edge.trace_label).filter(Boolean),
+    edge_paths: [...graph.edgePaths, ...sourceRefEdges],
+    trace_labels: [...graph.edgePaths, ...sourceRefEdges].map((edge) => edge.trace_label).filter(Boolean),
     lazy_source_refs: drilldownRefs.map((ref) => ({ ref })),
     drilldown_refs: drilldownRefs,
     ranking_policy: {
@@ -1426,10 +1453,12 @@ async function buildHybridGraphRetrieval({
     },
     evidence_count: evidence.length,
     evidence,
-    contextText: contextSections.join('\n\n')
+    contextText
   };
 }
 
 module.exports = {
-  buildHybridGraphRetrieval
+  buildHybridGraphRetrieval,
+  estimateTokensHeuristic,
+  formatContext
 };

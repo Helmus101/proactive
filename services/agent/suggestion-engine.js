@@ -613,13 +613,7 @@ async function generateTopTodosFromMemoryQuery(llmConfig, options = {}) {
   Then return exactly 5 highly specific to-do items as a strict JSON array of plain strings.
 
   Return strict JSON array of strings only:
-  [
-  "Action 1: Concrete task with specific entity/target",
-  "Action 2: Concrete task with specific entity/target",
-  "Action 3: Concrete task with specific entity/target",
-  "Action 4: Concrete task with specific entity/target",
-  "Action 5: Concrete task with specific entity/target"
-  ]
+  ["Action 1", "Action 2", "Action 3", "Action 4", "Action 5"]
 
   RULES:
   - Use only STANDING NOTES + MEMORY EVIDENCE + GRAPH EDGES.
@@ -627,18 +621,18 @@ async function generateTopTodosFromMemoryQuery(llmConfig, options = {}) {
   - Every to-do MUST reference a specific person, file, event, or artifact from the evidence.
   - Avoid generic advice or "considerations."
 
-STANDING NOTES:
-${standingNotes || 'None'}
+  STANDING NOTES:
+  ${standingNotes || 'None'}
 
-MEMORY LAYER COUNTS:
-${JSON.stringify(layerCounts || {})}
+  MEMORY LAYER COUNTS:
+  ${JSON.stringify(layerCounts || {})}
 
-MEMORY EVIDENCE:
-${evidenceDigest || 'No evidence available.'}
+  MEMORY EVIDENCE:
+  ${evidenceDigest || 'No evidence available.'}
 
-GRAPH EDGES:
-${edgeDigest || 'No edge traces available.'}
-`;
+  GRAPH EDGES:
+  ${edgeDigest || 'No edge traces available.'}
+  `;
 
   const rawTopFive = await callLLM(phase1Prompt, llmConfig, 0.22, { maxTokens: 450, economy: true, task: "suggestion" }).catch(() => null);
   const topFiveItems = Array.isArray(rawTopFive) ? rawTopFive.filter(i => typeof i === 'string') : [];
@@ -646,44 +640,17 @@ ${edgeDigest || 'No edge traces available.'}
   if (!topFiveItems.length) return [];
 
   const phase2Prompt = `
-I asked the memory what the top 5 concrete to-dos now were, and it gave me the following 5 things:
-${JSON.stringify(topFiveItems, null, 2)}
+  I asked memory for top 5 concrete todos:
+  ${JSON.stringify(topFiveItems)}
 
-Now generate final proactive suggestions in this exact internal template.
-Provide up to 8 candidates so the system can select the best ones.
-Format them exactly into the following strict JSON array:
-[
-  {
-    "type": "work|followup|study|personal|creative|relationship",
-    "title": "single concrete action",
-    "reason": "why now in one sentence",
-    "description": "optional short context",
-    "outcome": "one clear expected outcome",
-    "evidence": ["memory_id_or_event_id"],
-    "time_anchor": "today|this week|now",
-    "priority": "low|medium|high",
-    "confidence": 0.0,
-    "primary_action": "button label",
-    "secondary_action": "optional",
-    "source_index": 1,
-    "expires_at": "ISO timestamp"
-  }
-]
+  Generate proactive suggestions. Up to 8 candidates.
+  Format JSON array: [{"type": "work|followup|study|personal|creative|relationship", "title": "imperative", "reason": "why now", "description": "", "outcome": "", "evidence": ["id"], "time_anchor": "today|now", "priority": "low|medium|high", "confidence": 0.0, "primary_action": "label", "secondary_action": "", "source_index": 1, "expires_at": "ISO"}]
 
-Rules:
-- Allowed suggestion types include work, followup, study, personal, creative, relationship.
-- Keep titles imperative and specific.
-- Every title must name a concrete target (person/topic/task/artifact/deadline).
-- One suggestion = one job only.
-- Avoid vague text like "be proactive", "work on this", "review item 3".
-- Keep each action grounded in the 5 items provided.
-
-SPECIFITY RULES:
-- Title MUST start with a concrete verb + a specific named entity, filename, person name, or exact time.
-- NEVER start with "Take the next step", "Review and organize", "Send a quick update", or "Continue working on".
-- reason MUST reference a specific artifact, timestamp, or person NAME drawn from the provided evidence.
-- Avoid weak language: no "maybe", "could", "consider", or "might".
-`;
+  Rules:
+  - Title MUST start with verb + specific entity/time.
+  - NEVER start with "Take the next step", "Review", "Update".
+  - reason MUST reference evidence.
+  `;
 
   const aiRows = await callLLM(phase2Prompt, llmConfig, 0.22, { maxTokens: 500, economy: true, task: "suggestion" }).catch(() => null);
   const rows = Array.isArray(aiRows) ? aiRows.slice(0, 10) : [];

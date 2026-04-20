@@ -244,49 +244,21 @@ async function callPlannerLLM(goal, history, observation, plannerContext = {}) {
     console.warn('[Planner] Cache lookup failed:', e.message);
   }
 
-  const prompt = `
-You are a "Desktop Agent" controlling macOS through Accessibility APIs.
-You are continuing an in-progress workflow. Read what just happened, what changed, and what still remains before choosing the next step.
-Your goal is: "${goal}"
-
-GOAL BUNDLE:
-${JSON.stringify(goalBundle, null, 2)}
-
-HISTORY OF ACTIONS:
-${JSON.stringify(history, null, 2)}
-
-CURRENT DESKTOP OBSERVATION:
-SURFACE DRIVER: ${cleanObservation.surface_driver || 'ax'}
-FRONTMOST APP: ${cleanObservation.frontmost_app}
-WINDOW TITLE: ${cleanObservation.window_title}
-URL: ${cleanObservation.url || ''}
-TAB TITLE: ${cleanObservation.tab_title || ''}
-SURFACE TYPE: ${cleanObservation.surface_type || 'unknown'}
-FOCUSED ELEMENT:
-${JSON.stringify(cleanObservation.focused_element, null, 2)}
-VISIBLE ELEMENTS (sample):
-${JSON.stringify(cleanObservation.visible_elements, null, 2)}
-
-INTERACTIVE CANDIDATES:
-${JSON.stringify(cleanObservation.interactive_candidates, null, 2)}
-
-AX TREE ROOT:
-${JSON.stringify(cleanObservation.ax_tree, null, 2)}
-
-BROWSER TREE SUMMARY:
-${JSON.stringify(cleanObservation.browser_tree, null, 2)}
-
-TEXT SAMPLE:
-"${cleanObservation.text_sample}"
-
-PERMISSION STATE:
-${JSON.stringify(cleanObservation.permission_state, null, 2)}
-
-SCREENSHOT METADATA:
-${JSON.stringify(cleanObservation.screenshot, null, 2)}
-
-VISION USED:
-${JSON.stringify({
+  const prompt = `[System]
+  Desktop Agent controlling macOS. Choose NEXT low-level action.
+  Goal: "${goal}"
+  GOAL BUNDLE: ${JSON.stringify(goalBundle)}
+  HISTORY: ${JSON.stringify(history)}
+  OBSERVATION:
+  APP: ${cleanObservation.frontmost_app} | WINDOW: ${cleanObservation.window_title} | URL: ${cleanObservation.url || ''}
+  FOCUSED: ${JSON.stringify(cleanObservation.focused_element)}
+  VISIBLE: ${JSON.stringify(cleanObservation.visible_elements)}
+  CANDIDATES: ${JSON.stringify(cleanObservation.interactive_candidates)}
+  AX TREE: ${JSON.stringify(cleanObservation.ax_tree)}
+  BROWSER TREE: ${JSON.stringify(cleanObservation.browser_tree)}
+  PERMISSION: ${JSON.stringify(cleanObservation.permission_state)}
+  SCREENSHOT: ${JSON.stringify(cleanObservation.screenshot)}
+  VISION: ${JSON.stringify({
   vision_used: cleanObservation.vision_used,
   vision_mode: cleanObservation.vision_mode,
   perception_mode: cleanObservation.perception_mode,
@@ -296,10 +268,8 @@ ${JSON.stringify({
   target_confidence: cleanObservation.target_confidence,
   frame_summaries: cleanObservation.frame_summaries,
   observation_budget: cleanObservation.observation_budget
-}, null, 2)}
-
-PLANNER CONTEXT:
-${JSON.stringify({
+  })}
+  PLANNER CONTEXT: ${JSON.stringify({
   goal_bundle: plannerContext.goal_bundle || goalBundle,
   remaining_gap: plannerContext.remaining_gap || '',
   last_effect_summary: plannerContext.last_effect_summary || '',
@@ -308,52 +278,11 @@ ${JSON.stringify({
   observation_before: plannerContext.observation_before || null,
   observation_after: plannerContext.observation_after || null,
   observation_changed: Boolean(plannerContext.observation_changed)
-}, null, 2)}
+  })}
 
-Decide the NEXT low-level action to take.
-Respond with ONLY valid JSON for the action.
-
-Action options:
-- {"kind": "CDP_GET_TREE", "reason": "..."}
-- {"kind": "CDP_NAVIGATE", "url": "...", "reason": "...", "expected_outcome": "...", "completion_signal": "..."}
-- {"kind": "CDP_CLICK", "target_id": "cdp-0-abc123", "label": "...", "reason": "...", "expected_outcome": "...", "completion_signal": "..."}
-- {"kind": "CDP_TYPE", "target_id": "cdp-0-abc123", "text": "...", "submit": false, "reason": "...", "expected_outcome": "..."}
-- {"kind": "CDP_KEY_PRESS", "key": "Enter", "reason": "...", "expected_outcome": "..."}
-- {"kind": "CDP_SCROLL", "direction": "down", "amount": 1, "reason": "...", "expected_outcome": "..."}
-- {"kind": "CDP_WAIT_FOR", "text": "...", "timeout_ms": 2500, "reason": "...", "expected_outcome": "..."}
-- {"kind": "ACTIVATE_APP", "app": "..."}
-- {"kind": "FOCUS_WINDOW", "title": "..."}
-- {"kind": "OPEN_URL", "url": "...", "app": "Google Chrome"}
-- {"kind": "CLICK_AX", "target_id": "root.0.1", "label": "...", "role": "button", "target_index": 3, "reason": "...", "expected_outcome": "...", "completion_signal": "..."}
-- {"kind": "PRESS_AX", "target_id": "root.0.1", "label": "...", "role": "button", "target_index": 3, "reason": "...", "expected_outcome": "...", "completion_signal": "..."}
-- {"kind": "FOCUS_AX", "target_id": "root.0.1", "reason": "..."}
-- {"kind": "TYPE_TEXT", "label": "...", "text": "..."}
-- {"kind": "SET_VALUE", "label": "...", "text": "...", "target_id": "root.0.1"}
-- {"kind": "SET_AX_VALUE", "target_id": "root.0.1", "text": "..."}
-- {"kind": "WAIT_FOR_AX", "label": "...", "role": "...", "timeout_ms": 12000}
-- {"kind": "SCROLL_AX", "direction": "down", "amount": 1, "reason": "..."}
-- {"kind": "KEY_PRESS", "key": "tab", "modifiers": ["command"]}
-- {"kind": "CLICK_POINT", "target_point": {"x": 450, "y": 820, "width": 0, "height": 0}, "reason": "...", "expected_outcome": "...", "completion_signal": "...", "vision_request": "browser_vlm"}
-- {"kind": "READ_UI_STATE"}
-- {"kind": "DONE", "message": "Reason why task is finished", "vision_request": "window_clip"}
-
-Rules:
-1. Use the loop: inspect -> click/scroll/type/wait -> inspect again until the goal is actually reached.
-2. Do not emit WAIT_FOR_AX as the first post-load action after OPEN_URL or ACTIVATE_APP.
-3. Do not stop after OPEN_URL unless the requested destination or ready state is visibly reached.
-4. If SURFACE DRIVER is "cdp", prefer CDP_* actions for browser work and use AX/native actions only for OS or cross-app transitions.
-5. Prefer stable target_id values from interactive_candidates when available. Use target_index and labels only as fallback hints.
-6. If likely relevant content is below the fold, use SCROLL_AX or CDP_SCROLL before giving up.
-7. Use WAIT_FOR_AX or CDP_WAIT_FOR only after a real state-changing action like click, submit, or scroll.
-8. For search flows: find the search field, type query_text, submit, wait/read, then select the ordinal_target if requested.
-9. Use READ_UI_STATE or CDP_GET_TREE after transitions or when you need a fresh observation.
-10. Do not emit DONE unless the success_predicate is visibly satisfied now.
-11. Do not refer to DOM selectors or extension APIs in the output.
-12. If the last step had no visible effect, change tactics instead of repeating it.
-13. If AX/CDP context is not enough, include "vision_request": "burst", "window_clip", or "browser_vlm" on the action.
-14. Output ONLY the JSON object.
-15. If actionable candidates are visible, prefer a concrete click/type/scroll action over waiting.
-`;
+  Action Options: CDP_NAVIGATE, CDP_CLICK, CDP_TYPE, CDP_KEY_PRESS, CDP_SCROLL, CDP_WAIT_FOR, ACTIVATE_APP, FOCUS_WINDOW, OPEN_URL, CLICK_AX, PRESS_AX, TYPE_TEXT, SET_VALUE, WAIT_FOR_AX, SCROLL_AX, READ_UI_STATE, DONE.
+  Respond with ONLY valid JSON action object.
+  Rules: Loop inspect->action until goal reached. Avoid DONE until success visibly confirmed. Change tactics if no effect. Use vision_request if AX not enough.`;
 
   const parsePlannerJson = (raw = '') => {
     const txt = String(raw || '');
@@ -848,7 +777,7 @@ function planNextAction(goal, history, observation, plannerContext = {}) {
                 headers: { 'Authorization': `Bearer ${providerConfig.apiKey}`, 'Content-Type': 'application/json' },
                 data: {
                   model: providerConfig.model,
-                  messages: [ { role: 'system', content: 'You are a precise macOS accessibility automation planner. Respond with JSON actions only.' }, { role: 'user', content: `Goal: ${goal}\nObservation: ${JSON.stringify(sanitizeObservation(observation)||{}, null, 2)}` } ],
+                  messages: [ { role: 'system', content: 'You are a precise macOS accessibility automation planner. Respond with JSON actions only.' }, { role: 'user', content: `Goal: ${goal}\nObservation: ${JSON.stringify(sanitizeObservation(observation)||{})}` } ],
                   temperature: 0.08,
                   stream: true
                 },
