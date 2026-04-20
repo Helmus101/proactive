@@ -797,6 +797,16 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
   const rawIdBasis = safeMetadataInput.id || safeMetadataInput.source_ref || safeMetadataInput.threadId || safeMetadataInput.original_event_id || safeMetadataInput.url || `${type}|${source}|${tStr}|${sourceText.slice(0, 160)}`;
   const id = `evt_${crypto.createHash('sha1').update(String(rawIdBasis)).digest('hex').slice(0, 24)}`;
 
+  // Optimization: Check if event already exists to skip redundant processing
+  try {
+    const existing = await db.getQuery('SELECT id FROM events WHERE id = ?', [id]);
+    if (existing) {
+      return { id, skipped: true };
+    }
+  } catch (e) {
+    console.warn('[ingestion] Check existing failed:', e.message);
+  }
+
   const redaction = redactSensitiveText(sourceText || '');
   const safeText = redaction.text;
   const entities = extractEntities(safeText || '');

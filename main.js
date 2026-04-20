@@ -93,13 +93,21 @@ function canRunHeavyJob(lastRunAt = 0) {
 }
 
 function updatePerformanceState(next = {}) {
+  const oldMode = isReducedLoadMode() ? "reduced" : "normal";
   Object.assign(performanceState, next || {});
-  const mode = isReducedLoadMode() ? 'reduced' : 'normal';
-  store.set('performanceState', {
+  const newMode = isReducedLoadMode() ? "reduced" : "normal";
+
+  store.set("performanceState", {
     ...performanceState,
-    mode,
+    mode: newMode,
     updated_at: new Date().toISOString()
   });
+
+  if (oldMode !== newMode) {
+    console.log(`[Performance] Mode changed from ${oldMode} to ${newMode}. Restarting capture timers.`);
+    startSensorCaptureLoop();
+    startPeriodicScreenshotCapture();
+  }
 }
 
 function hydrateStudySessionFromStore() {
@@ -1261,15 +1269,20 @@ function startSensorCaptureLoop() {
   }
   if (!settings.enabled) return;
 
-  captureDesktopSensorSnapshot('loop-start').catch((error) => {
-    console.warn('Initial sensor capture failed:', error && error.message ? error.message : error);
+  captureDesktopSensorSnapshot("loop-start").catch((error) => {
+    console.warn("Initial sensor capture failed:", error && error.message ? error.message : error);
   });
 
-  const intervalMs = intervalMinutesToMs(settings.intervalMinutes);
+  // Dynamic interval: 15m normal, 30m reduced
+  const isReduced = isReducedLoadMode();
+  const intervalMs = isReduced ? 30 * 60 * 1000 : intervalMinutesToMs(settings.intervalMinutes);
+
+  console.log(`[SensorCapture] Starting loop with interval: ${intervalMs / 60000}m (Reduced mode: ${isReduced})`);
+
   sensorCaptureTimer = setInterval(() => {
     // Fire-and-forget scheduled capture to keep it in the background
-    captureDesktopSensorSnapshot('scheduled').catch((error) => {
-      console.warn('Scheduled sensor capture failed:', error && error.message ? error.message : error);
+    captureDesktopSensorSnapshot("scheduled").catch((error) => {
+      console.warn("Scheduled sensor capture failed:", error && error.message ? error.message : error);
     });
   }, intervalMs);
 }
@@ -1281,37 +1294,40 @@ function startPeriodicScreenshotCapture() {
     periodicScreenshotTimer = null;
   }
 
-  console.log('[Screenshot] Starting periodic screenshot capture (every 30s)');
+  const isReduced = isReducedLoadMode();
+  const intervalMs = isReduced ? 120000 : 30000; // 2m vs 30s
+
+  console.log(`[Screenshot] Starting periodic screenshot capture every ${intervalMs / 1000}s (Reduced mode: ${isReduced})`);
 
   // Take first screenshot immediately
-  console.log('[Screenshot] Taking initial screenshot...');
+  console.log("[Screenshot] Taking initial screenshot...");
   observeDesktopState({ forceScreenshot: true })
     .then((result) => {
-      console.log('[Screenshot] Initial screenshot result:', {
+      console.log("[Screenshot] Initial screenshot result:", {
         screenshot_present: result?.screenshot?.present,
         file_name: result?.screenshot?.file_name,
         decision_reason: result?.screenshot_summary?.decision_reason
       });
     })
     .catch((error) => {
-      console.error('[Screenshot] Initial screenshot failed:', error?.message || error);
+      console.error("[Screenshot] Initial screenshot failed:", error?.message || error);
     });
 
-  // Then take screenshots every 30 seconds
+  // Then take screenshots periodically
   periodicScreenshotTimer = setInterval(() => {
-    console.log('[Screenshot] Taking periodic screenshot...');
+    console.log("[Screenshot] Taking periodic screenshot...");
     observeDesktopState({ forceScreenshot: true })
       .then((result) => {
         if (result?.screenshot?.present) {
-          console.log('[Screenshot] Periodic screenshot captured:', result.screenshot.file_name);
+          console.log("[Screenshot] Periodic screenshot captured:", result.screenshot.file_name);
         } else {
-          console.warn('[Screenshot] Periodic screenshot skipped:', result?.screenshot_summary?.decision_reason || 'unknown');
+          console.warn("[Screenshot] Periodic screenshot skipped:", result?.screenshot_summary?.decision_reason || "unknown");
         }
       })
       .catch((error) => {
-        console.error('[Screenshot] Periodic screenshot failed:', error?.message || error);
+        console.error("[Screenshot] Periodic screenshot failed:", error?.message || error);
       });
-  }, 30000); // 30 seconds
+  }, intervalMs);
 }
 
 // Schedule daily tasks

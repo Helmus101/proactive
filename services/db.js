@@ -204,8 +204,16 @@ function initDB() {
           FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
         )`);
 
+        db.run(`CREATE TABLE IF NOT EXISTS kv_cache (
+          key TEXT PRIMARY KEY,
+          value TEXT,
+          type TEXT,
+          created_at TEXT
+        )`);
+
         db.run(`CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated_at ON chat_sessions(updated_at)`);
         db.run(`CREATE INDEX IF NOT EXISTS idx_chat_messages_session_ts ON chat_messages(session_id, ts)`);
+        db.run(`CREATE INDEX IF NOT EXISTS idx_kv_cache_type ON kv_cache(type)`);
 
         resolve();
       });
