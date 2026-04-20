@@ -388,6 +388,62 @@ async function detectRelationshipIntelligence(semanticRows, episodeRows, recentE
     }
   }
 
+  // 4. Follow-ups (unresolved threads)
+  for (const row of semanticRows || []) {
+    if (row.subtype !== 'person') continue;
+    const metadata = asObj(row.metadata);
+    const sourceGroup = String(metadata.source_type_group || '').toLowerCase();
+    if (!['communication', 'calendar'].includes(sourceGroup)) continue;
+    const text = `${row.summary || ''} ${row.canonical_text || ''} ${metadata.intent || ''}`.toLowerCase();
+    if (!/\b(reply|follow up|pending|unanswered|open|needs response|action)\b/.test(text)) continue;
+    const lastTs = parseTs(metadata.latest_interaction_at || row.updated_at || row.created_at);
+    if (!lastTs) continue;
+    const days = Math.max(0, (now - lastTs) / (24 * 60 * 60 * 1000));
+    if (days < 2) continue;
+    const contactName = (row.title || 'contact').trim();
+    const lastSeenLabel = days < 1 ? 'today' : days < 2 ? 'yesterday' : `${Math.round(days)} days ago`;
+    const anchorTime = formatAnchorTime(lastTs);
+    const timeAnchorLabel = anchorTime ? `last seen ${anchorTime}` : lastSeenLabel;
+    out.push(candidateBase({
+      opportunityType: 'followup_reminder',
+      seedNodeId: row.id,
+      title: `Follow up with ${contactName}`,
+      triggerSummary: `${contactName} has an unanswered thread, last active ${lastSeenLabel}.`,
+      confidence: Math.min(0.95, 0.6 + Math.min(0.3, days / 10)),
+      reasonCodes: ['open_thread', 'followup_needed', 'relationship_intelligence'],
+      timeAnchor: timeAnchorLabel,
+      candidateActions: [`Draft reply to ${contactName}`, 'Send short status check-in'],
+      sourceRefs: sourceRefsFromRow(row),
+      canonicalTarget: normalizeTarget(contactName),
+      score: Math.min(0.98, 0.65 + Math.min(0.25, days / 12))
+    }));
+  }
+
+  // 5. Connecting (dormant or weak ties)
+  for (const row of semanticRows || []) {
+    if (row.subtype !== 'person') continue;
+    const metadata = asObj(row.metadata);
+    const lastTs = parseTs(metadata.latest_interaction_at || row.updated_at || row.created_at);
+    if (!lastTs) continue;
+    const days = Math.max(0, (now - lastTs) / (24 * 60 * 60 * 1000));
+    const importance = Number(row.confidence || metadata.importance || 0.5);
+    if (days < 7 || importance < 0.6) continue; // Lower threshold for connecting
+    const contactName = (row.title || 'contact').trim();
+    out.push(candidateBase({
+      opportunityType: 'connection_opportunity',
+      seedNodeId: row.id,
+      title: `Reconnect with ${contactName}`,
+      triggerSummary: `${contactName} hasn't been contacted in ${Math.round(days)} days. Time to reconnect.`,
+      confidence: Math.min(0.9, 0.62 + Math.min(0.2, days / 30) + Math.min(0.08, importance / 10)),
+      reasonCodes: ['relationship_decay', 'connection_opportunity', 'relationship_intelligence'],
+      timeAnchor: 'this week',
+      candidateActions: ['Send quick reconnect message', 'Schedule a catch-up call'],
+      sourceRefs: sourceRefsFromRow(row),
+      canonicalTarget: normalizeTarget(contactName),
+      score: Math.min(0.95, 0.64 + Math.min(0.2, days / 28))
+    }));
+  }
+
   return out;
 }
 

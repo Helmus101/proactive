@@ -127,13 +127,33 @@ function testDedupeCollapse() {
   assert.strictEqual(alpha.score, 0.77);
 }
 
+async function testReasoningPipeline() {
+  const { ReasoningPipeline } = require('../services/agent/reasoning-pipeline');
+  const pipeline = new ReasoningPipeline();
+  const context = {
+    query: 'What should I do about unfinished work?',
+    mode: 'proactive',
+    candidate: {}
+  };
+  const result = await pipeline.run(context);
+  assert.ok(result);
+  assert.ok(result.routingMode);
+  assert.ok(result.plan);
+  assert.ok(result.judgment);
+  assert.ok(result.synthesized);
+  assert.ok(result.reflection);
+  console.log('Reasoning pipeline test passed');
+}
+
 async function main() {
+  console.log('Starting opportunity-miner tests');
   await testUnresolvedFollowupDetector();
   await testUnfinishedLoopDetector();
   await testDeadlineRiskDetector();
   await testDormantContactDetector();
   await testWeakConceptDetector();
   await testRelationshipIntelligenceDetector();
+  await testReasoningPipeline();
   testDedupeCollapse();
   console.log('opportunity-miner.test.js passed');
 }

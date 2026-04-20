@@ -1289,7 +1289,7 @@ function startSensorCaptureLoop(mode = null) {
   else if (currentMode === 'reduced') intervalMs = 30 * 60 * 1000;
   else intervalMs = intervalMinutesToMs(settings.intervalMinutes);
 
-  console.log(`[SensorCapture] Starting loop with interval: ${intervalMs / 60000}m (Reduced mode: ${isReduced})`);
+  console.log(`[SensorCapture] Starting loop with interval: ${intervalMs / 60000}m (Reduced mode: ${currentMode === 'reduced'})`);
 
   sensorCaptureTimer = setInterval(() => {
     // Fire-and-forget scheduled capture to keep it in the background
@@ -1312,7 +1312,7 @@ function startPeriodicScreenshotCapture(mode = null) {
   else if (currentMode === 'reduced') intervalMs = 120000; // 2m
   else intervalMs = 30000; // 30s
 
-  console.log(`[Screenshot] Starting periodic screenshot capture every ${intervalMs / 1000}s (Reduced mode: ${isReduced})`);
+  console.log(`[Screenshot] Starting periodic screenshot capture every ${intervalMs / 1000}s (Reduced mode: ${currentMode === 'reduced'})`);
 
   // Take first screenshot immediately
   console.log("[Screenshot] Taking initial screenshot...");

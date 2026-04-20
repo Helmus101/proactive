@@ -2582,14 +2582,14 @@ Would you like me to continue with more detail?` : content;
     normalizeCategory(category) {
         const value = String(category || '').trim().toLowerCase();
         if (value.includes('follow')) return 'followup';
-        if (value.includes('relationship')) return 'relationship';
-        if (['work', 'creative', 'personal', 'study', 'relationship'].includes(value)) return value;
+        if (value.includes('relationship')) return 'relationship_intelligence';
+        if (['work', 'creative', 'personal', 'study', 'relationship_intelligence'].includes(value)) return value;
         return 'work';
     }
 
     prettyCategory(category) {
         if (category === 'followup') return 'Follow-up';
-        if (category === 'relationship') return 'Relationship Intelligence';
+        if (category === 'relationship_intelligence') return 'Relationship Intelligence';
         return category.charAt(0).toUpperCase() + category.slice(1);
     }
 
@@ -2612,7 +2612,7 @@ Would you like me to continue with more detail?` : content;
             creative: 'lightbulb',
             followup: 'reply',
             study: 'school',
-            relationship: 'group'
+            relationship_intelligence: 'group'
         };
         return icons[category] || 'task';
     }

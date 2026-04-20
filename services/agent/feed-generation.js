@@ -585,7 +585,7 @@ function mapOpportunityToSeed(candidate = {}) {
   const oppType = String(candidate.opportunity_type || '').toLowerCase();
   let category = 'work';
   if (/followup|contact/.test(oppType)) category = 'followup';
-  if (/relationship_intelligence|person_news|birthday_reminder|article_share/.test(oppType)) category = 'relationship';
+  if (/relationship_intelligence|person_news|birthday_reminder|article_share|followup_reminder|connection_opportunity/.test(oppType)) category = 'relationship_intelligence';
   
   const type = mapOpportunityTypeToSeedType(candidate.opportunity_type);
   const triggerSummary = trim(candidate.trigger_summary || candidate.time_anchor || title, 180);
@@ -961,7 +961,7 @@ async function buildSuggestionFromSeed(seed, apiKey, now, options = {}) {
   const graphSpecifics = extractGraphSpecifics(seed, graphContext);
   const isStudySeed = looksStudyOpportunity(seed);
   let suggestionCategory = isStudySeed ? 'study' : (seed.category === 'followup' ? 'followup' : 'work');
-  if (seed.category === 'relationship') suggestionCategory = 'relationship';
+  if (seed.category === 'relationship_intelligence') suggestionCategory = 'relationship';
 
   const prompt = `
   You are generating one proactive suggestion from a user's memory graph.
