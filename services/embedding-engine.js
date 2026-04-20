@@ -3,6 +3,9 @@
  * Adheres to the Deep Tech Spec for 1536-dimensional embeddings.
  */
 
+const crypto = require('crypto');
+const db = require('./db');
+
 let lastEmbeddingWarnAt = 0;
 let remoteEmbeddingDisabledUntil = 0;
 let consecutiveEmbeddingFailures = 0;
@@ -30,6 +33,22 @@ function warnEmbeddingFallbackOnce(message) {
 }
 
 async function generateEmbedding(text, apiKey = process.env.OPENAI_API_KEY) {
+  if (!text) return localDeterministicEmbedding('');
+  
+  // 1. Hash the input text for cache lookup
+  const cleanText = String(text).slice(0, 8000);
+  const hash = crypto.createHash('sha256').update(cleanText).digest('hex');
+  
+  // 2. Check local SQLite cache
+  try {
+    const cached = await db.getQuery('SELECT value FROM kv_cache WHERE key = ? AND type = ?', [hash, 'embedding']);
+    if (cached && cached.value) {
+      return JSON.parse(cached.value);
+    }
+  } catch (e) {
+    console.warn('[Embedding] Cache lookup failed:', e.message);
+  }
+
   if (!apiKey) return localDeterministicEmbedding(text);
   if (Date.now() < remoteEmbeddingDisabledUntil) return localDeterministicEmbedding(text);
 
@@ -42,7 +61,7 @@ async function generateEmbedding(text, apiKey = process.env.OPENAI_API_KEY) {
       },
       body: JSON.stringify({
         model: "text-embedding-3-small", // 1536 dims natively
-        input: text.slice(0, 8000) // Stay within context window
+        input: cleanText
       })
     });
     if (!res.ok) {
@@ -55,6 +74,17 @@ async function generateEmbedding(text, apiKey = process.env.OPENAI_API_KEY) {
       throw new Error('invalid embedding payload');
     }
     consecutiveEmbeddingFailures = 0;
+
+    // 3. Store in local SQLite cache
+    try {
+      await db.runQuery(
+        'INSERT OR REPLACE INTO kv_cache (key, value, type, created_at) VALUES (?, ?, ?, ?)',
+        [hash, JSON.stringify(embedding), 'embedding', new Date().toISOString()]
+      );
+    } catch (e) {
+      console.warn('[Embedding] Cache storage failed:', e.message);
+    }
+
     return embedding;
   } catch (e) {
     consecutiveEmbeddingFailures += 1;

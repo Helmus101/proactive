@@ -16,22 +16,41 @@ let lastAiParseLogAt = 0;
 const CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
 const MAX_CACHE_SIZE = 500;
 
-function updateLlmMetrics(cached = false) {
-  const metrics = store.get('llm_metrics') || { total_calls: 0, cached_calls: 0, actual_calls: 0 };
-  metrics.total_calls += 1;
-  if (cached) metrics.cached_calls += 1;
-  else metrics.actual_calls += 1;
-  store.set('llm_metrics', metrics);
+async function updateLlmMetrics(cached = false) {
+  try {
+    const key = 'llm_metrics';
+    const cachedRow = await db.getQuery('SELECT value FROM kv_cache WHERE key = ?', [key]);
+    let metrics = { total_calls: 0, cached_calls: 0, actual_calls: 0 };
+    if (cachedRow && cachedRow.value) {
+      metrics = JSON.parse(cachedRow.value);
+    }
+    metrics.total_calls += 1;
+    if (cached) metrics.cached_calls += 1;
+    else metrics.actual_calls += 1;
+    await db.runQuery(
+      'INSERT OR REPLACE INTO kv_cache (key, value, type, created_at) VALUES (?, ?, ?, ?)',
+      [key, JSON.stringify(metrics), 'metrics', new Date().toISOString()]
+    );
+  } catch (e) {
+    console.warn('[Intelligence] Failed to update metrics:', e.message);
+  }
 }
 
-function pruneLlmCache() {
-  const cache = store.get('llm_cache') || {};
-  const keys = Object.keys(cache);
-  if (keys.length > MAX_CACHE_SIZE) {
-    const sortedKeys = keys.sort((a, b) => cache[a].at - cache[b].at);
-    const keysToDelete = sortedKeys.slice(0, keys.length - MAX_CACHE_SIZE);
-    keysToDelete.forEach(key => delete cache[key]);
-    store.set('llm_cache', cache);
+async function pruneLlmCache() {
+  try {
+    // Basic pruning: keep it under MAX_CACHE_SIZE by deleting oldest LLM responses
+    const countRow = await db.getQuery("SELECT COUNT(*) as count FROM kv_cache WHERE type = 'llm_response'");
+    if (countRow && countRow.count > MAX_CACHE_SIZE) {
+      const toDelete = countRow.count - MAX_CACHE_SIZE;
+      await db.runQuery(
+        `DELETE FROM kv_cache WHERE key IN (
+          SELECT key FROM kv_cache WHERE type = 'llm_response' ORDER BY created_at ASC LIMIT ?
+        )`,
+        [toDelete]
+      );
+    }
+  } catch (e) {
+    console.warn('[Intelligence] Cache pruning failed:', e.message);
   }
 }
 
@@ -124,11 +143,12 @@ async function callDeepSeek(prompt, apiKey, temperature = 0.3) {
   try {
     if (!apiKey) return null;
     const cacheKey = crypto.createHash('sha1').update(`${temperature}|${String(prompt || '').slice(0, 7000)}`).digest('hex');
-    const cache = store.get('llm_cache') || {};
-    const cached = cache[cacheKey];
-    if (cached && (Date.now() - cached.at) < CACHE_TTL) {
-      updateLlmMetrics(true);
-      return cached.value;
+    
+    // Check SQLite cache
+    const cachedRow = await db.getQuery('SELECT value, created_at FROM kv_cache WHERE key = ? AND type = ?', [cacheKey, 'llm_response']);
+    if (cachedRow && (Date.now() - new Date(cachedRow.created_at).getTime()) < CACHE_TTL) {
+      await updateLlmMetrics(true);
+      return JSON.parse(cachedRow.value);
     }
 
     const response = await fetch(DEEPSEEK_ENDPOINT, {
@@ -156,10 +176,15 @@ async function callDeepSeek(prompt, apiKey, temperature = 0.3) {
     const value = tryParseJsonLoose(raw);
     const finalValue = value !== null ? value : raw;
 
-    updateLlmMetrics(false);
-    cache[cacheKey] = { at: Date.now(), value: finalValue };
-    store.set('llm_cache', cache);
-    pruneLlmCache();
+    await updateLlmMetrics(false);
+    
+    // Store in SQLite cache
+    await db.runQuery(
+      'INSERT OR REPLACE INTO kv_cache (key, value, type, created_at) VALUES (?, ?, ?, ?)',
+      [cacheKey, JSON.stringify(finalValue), 'llm_response', new Date().toISOString()]
+    );
+    await pruneLlmCache();
+    
     return finalValue;
   } catch (e) {
     const msg = String(e?.message || e);
@@ -192,11 +217,12 @@ function normalizeLLMConfig(configOrApiKey = null) {
 async function callOllama(prompt, config = {}, temperature = 0.3) {
   try {
     const cacheKey = crypto.createHash('sha1').update(`ollama|${config.model}|${temperature}|${String(prompt || '').slice(0, 7000)}`).digest('hex');
-    const cache = store.get('llm_cache') || {};
-    const cached = cache[cacheKey];
-    if (cached && (Date.now() - cached.at) < CACHE_TTL) {
-      updateLlmMetrics(true);
-      return cached.value;
+    
+    // Check SQLite cache
+    const cachedRow = await db.getQuery('SELECT value, created_at FROM kv_cache WHERE key = ? AND type = ?', [cacheKey, 'llm_response']);
+    if (cachedRow && (Date.now() - new Date(cachedRow.created_at).getTime()) < CACHE_TTL) {
+      await updateLlmMetrics(true);
+      return JSON.parse(cachedRow.value);
     }
 
     const baseUrl = String(config.baseUrl || config.base_url || process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434').replace(/\/+$/, '');
@@ -236,10 +262,14 @@ async function callOllama(prompt, config = {}, temperature = 0.3) {
     const value = tryParseJsonLoose(raw);
     const finalValue = value !== null ? value : raw;
     if (finalValue != null) {
-      updateLlmMetrics(false);
-      cache[cacheKey] = { at: Date.now(), value: finalValue };
-      store.set('llm_cache', cache);
-      pruneLlmCache();
+      await updateLlmMetrics(false);
+      
+      // Store in SQLite cache
+      await db.runQuery(
+        'INSERT OR REPLACE INTO kv_cache (key, value, type, created_at) VALUES (?, ?, ?, ?)',
+        [cacheKey, JSON.stringify(finalValue), 'llm_response', new Date().toISOString()]
+      );
+      await pruneLlmCache();
     }
     return finalValue;
   } catch (e) {
