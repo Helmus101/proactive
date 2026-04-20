@@ -2589,7 +2589,7 @@ Would you like me to continue with more detail?` : content;
 
     prettyCategory(category) {
         if (category === 'followup') return 'Follow-up';
-        if (category === 'relationship') return 'Relationship';
+        if (category === 'relationship') return 'Relationship Intelligence';
         return category.charAt(0).toUpperCase() + category.slice(1);
     }
 
