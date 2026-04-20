@@ -578,7 +578,7 @@ async function buildMultiAngleQueryBundle(baseText, {
     User Query: "${baseText.replace(/"/g, '\\"')}"
     `;
     try {
-      const result = await callLLM(prompt, apiKey, 0.3, { maxTokens: 500, economy: economyMode });
+      const result = await callLLM(prompt, apiKey, 0.3, { maxTokens: 500, economy: economyMode, task: 'routing' });
       if (result && Array.isArray(result.queries)) {
         finalQueries = result.queries.slice(0, 15);
       }

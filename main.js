@@ -83,8 +83,18 @@ const performanceState = {
   thermalState: 'unknown'
 };
 
+function getPerformanceMode() {
+  const idleTime = (powerMonitor && typeof powerMonitor.getSystemIdleTime === 'function') ? powerMonitor.getSystemIdleTime() : 0;
+  if (idleTime > 300) return 'deep-idle'; // 5m+
+  if (Boolean(performanceState.onBattery) || ['serious', 'critical'].includes(String(performanceState.thermalState || '').toLowerCase())) {
+    return 'reduced';
+  }
+  return 'normal';
+}
+
 function isReducedLoadMode() {
-  return Boolean(performanceState.onBattery) || ['serious', 'critical'].includes(String(performanceState.thermalState || '').toLowerCase());
+  const mode = getPerformanceMode();
+  return mode === 'reduced' || mode === 'deep-idle';
 }
 
 function canRunHeavyJob(lastRunAt = 0) {
@@ -93,9 +103,9 @@ function canRunHeavyJob(lastRunAt = 0) {
 }
 
 function updatePerformanceState(next = {}) {
-  const oldMode = isReducedLoadMode() ? "reduced" : "normal";
+  const oldMode = getPerformanceMode();
   Object.assign(performanceState, next || {});
-  const newMode = isReducedLoadMode() ? "reduced" : "normal";
+  const newMode = getPerformanceMode();
 
   store.set("performanceState", {
     ...performanceState,
@@ -1273,9 +1283,11 @@ function startSensorCaptureLoop(mode = null) {
     console.warn("Initial sensor capture failed:", error && error.message ? error.message : error);
   });
 
-  // Dynamic interval: 15m normal, 30m reduced
-  const isReduced = (typeof mode !== "undefined" && mode === "reduced") || isReducedLoadMode();
-  const intervalMs = isReduced ? 30 * 60 * 1000 : intervalMinutesToMs(settings.intervalMinutes);
+  const currentMode = mode || getPerformanceMode();
+  let intervalMs;
+  if (currentMode === 'deep-idle') intervalMs = 60 * 60 * 1000;
+  else if (currentMode === 'reduced') intervalMs = 30 * 60 * 1000;
+  else intervalMs = intervalMinutesToMs(settings.intervalMinutes);
 
   console.log(`[SensorCapture] Starting loop with interval: ${intervalMs / 60000}m (Reduced mode: ${isReduced})`);
 
@@ -1294,8 +1306,11 @@ function startPeriodicScreenshotCapture(mode = null) {
     periodicScreenshotTimer = null;
   }
 
-  const isReduced = (typeof mode !== "undefined" && mode === "reduced") || isReducedLoadMode();
-  const intervalMs = isReduced ? 120000 : 30000; // 2m vs 30s
+  const currentMode = mode || getPerformanceMode();
+  let intervalMs;
+  if (currentMode === 'deep-idle') intervalMs = 300000; // 5m
+  else if (currentMode === 'reduced') intervalMs = 120000; // 2m
+  else intervalMs = 30000; // 30s
 
   console.log(`[Screenshot] Starting periodic screenshot capture every ${intervalMs / 1000}s (Reduced mode: ${isReduced})`);
 
@@ -10359,6 +10374,8 @@ app.whenReady().then(async () => {
     powerMonitor.on('thermal-state-change', (_event, details = {}) => {
       updatePerformanceState({ thermalState: String(details.state || 'unknown') });
     });
+    powerMonitor.on('idle', () => updatePerformanceState());
+    powerMonitor.on('active', () => updatePerformanceState());
   } catch (error) {
     console.warn('[Performance] powerMonitor hooks unavailable:', error?.message || error);
   }

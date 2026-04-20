@@ -1206,7 +1206,7 @@ Return a strict JSON object with the following fields:
 Return only valid JSON.`;
 
   try {
-    const plan = await callLLM(prompt, apiKey, 0.22, { maxTokens: 800 });
+    const plan = await callLLM(prompt, apiKey, 0.22, { maxTokens: 800, task: 'routing' });
     return plan;
   } catch (e) {
     console.error('[Planner] Stage failed:', e.message);
@@ -1242,7 +1242,7 @@ Return a strict JSON object:
 Return only valid JSON.`;
 
   try {
-    const judgment = await callLLM(prompt, apiKey, 0.1, { maxTokens: 600 });
+    const judgment = await callLLM(prompt, apiKey, 0.1, { maxTokens: 600, task: 'routing' });
     return judgment || { sufficient: true, reason: 'Judgment parse failed, assuming sufficient.' };
   } catch (e) {
     return { sufficient: true, reason: 'Judge stage error: ' + e.message };
@@ -1277,7 +1277,7 @@ Return a strict JSON object:
 Return only valid JSON.`;
 
   try {
-    const reflection = await callLLM(prompt, apiKey, 0.1, { maxTokens: 800 });
+    const reflection = await callLLM(prompt, apiKey, 0.1, { maxTokens: 800, task: 'routing' });
     return reflection || { approved: true, reason: 'Reflection parse failed, assuming approved.' };
   } catch (e) {
     return { approved: true, reason: 'Reflector stage error: ' + e.message };
@@ -1314,7 +1314,7 @@ ${reflectorFeedback ? `[Reflector Feedback]\nThe previous draft was rejected for
 ${query}`;
 
   try {
-    const content = await callLLM(prompt, apiKey, 0.22);
+    const content = await callLLM(prompt, apiKey, 0.22, { task: 'synthesis' });
     return content || "I couldn't produce an answer from the current memory context.";
   } catch (llmError) {
     return buildGroundedFallbackAnswer(query, retrieval, drilldownEvidence);
