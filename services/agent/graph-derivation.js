@@ -1226,6 +1226,8 @@ async function deriveGraphFromEvents({ eventIds = null, since = null, limit = 80
     }
   }
 
+  await deriveContacts(allCreatedNodes, version);
+
   const insights = deriveInsights(clouds);
   for (const insight of insights) {
     const node = await writeHigherLayerNode(insight, version);
@@ -1307,6 +1309,88 @@ async function deriveGraphFromEvents({ eventIds = null, since = null, limit = 80
     cloudIds: clouds.map((cloud) => cloud.id),
     insightIds: insights.map((insight) => insight.id)
   };
+}
+
+async function deriveContacts(allCreatedNodes, version) {
+  const peopleNodes = allCreatedNodes.filter((n) => n.layer === 'semantic' && n.subtype === 'person');
+  const episodes = allCreatedNodes.filter((n) => n.layer === 'episode');
+  const contactMap = new Map();
+
+  for (const node of peopleNodes) {
+    const name = String(node.title || '').trim();
+    if (!name) continue;
+    if (!contactMap.has(name)) {
+      contactMap.set(name, {
+        nodes: [],
+        episodes: new Set(),
+        topics: new Set(),
+        interactionHistory: []
+      });
+    }
+    const info = contactMap.get(name);
+    info.nodes.push(node);
+    if (node.metadata?.episode_id) {
+      info.episodes.add(node.metadata.episode_id);
+    }
+  }
+
+  for (const [name, info] of contactMap) {
+    const episodeList = Array.from(info.episodes);
+    for (const epId of episodeList) {
+      const ep = episodes.find((e) => e.id === epId);
+      if (ep) {
+        if (Array.isArray(ep.topics)) {
+          ep.topics.forEach((t) => info.topics.add(t));
+        }
+        info.interactionHistory.push({
+          episode_id: ep.id,
+          title: ep.title,
+          timestamp: ep.anchor_at || ep.start
+        });
+      }
+    }
+
+    const contactId = `contact_${stableHash(name)}`;
+    const interactionHistorySorted = info.interactionHistory.sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+    const latestInteraction = interactionHistorySorted.length > 0
+      ? interactionHistorySorted[0].timestamp
+      : null;
+
+    const contactNode = {
+      id: contactId,
+      layer: 'core',
+      subtype: 'contact',
+      title: name,
+      summary: `Relationship profile for ${name}.`,
+      canonical_text: `${name} - Shared topics: ${Array.from(info.topics).join(', ')}. Interacted across ${info.episodes.size} episodes.`,
+      confidence: 0.9,
+      status: 'active',
+      source_refs: episodeList.slice(0, 50),
+      metadata: {
+        name,
+        shared_topics: Array.from(info.topics).slice(0, 20),
+        interaction_count: info.episodes.size,
+        latest_interaction_at: latestInteraction,
+        interaction_history: interactionHistorySorted.slice(0, 10),
+        episode_ids: episodeList
+      }
+    };
+
+    const createdNode = await writeHigherLayerNode(contactNode, version);
+    allCreatedNodes.push(createdNode);
+
+    for (const personNode of info.nodes) {
+      await upsertMemoryEdge({
+        fromNodeId: personNode.id,
+        toNodeId: contactId,
+        edgeType: 'ABSTRACTED_TO',
+        weight: 0.9,
+        traceLabel: 'Semantic person node graduated to core contact profile',
+        evidenceCount: 1,
+        metadata: { auto_derived: true }
+      });
+    }
+  }
 }
 
 module.exports = {

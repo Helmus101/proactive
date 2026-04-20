@@ -50,6 +50,9 @@
         <button class="nav-pill" id="nav-library" data-view="library-view" title="Library">
             <span class="material-symbols-outlined">library_books</span>
         </button>
+        <button class="nav-pill" id="nav-contacts" data-view="contacts-view" title="Contacts">
+            <span class="material-symbols-outlined">contacts</span>
+        </button>
         <button class="nav-pill" id="nav-settings" data-view="settings-view" title="Settings">
             <span class="material-symbols-outlined">settings</span>
         </button>
@@ -73,6 +76,12 @@
 
                 <div style="padding: 8px 24px 0; display: flex; justify-content: flex-end;">
                     <button id="manual-generate-suggestions-btn" class="pill-btn" type="button">Generate Suggestions</button>
+                </div>
+
+                <!-- Relationship Intelligence Section -->
+                <div id="relationship-intel-container" class="hidden" style="padding: 0 24px 16px;">
+                    <div class="study-suggestion-group-title">Key Contacts</div>
+                    <div id="relationship-intel-contacts" style="display: flex; gap: 12px; overflow-x: auto; padding-bottom: 8px; scrollbar-width: none;"></div>
                 </div>
 
                 <!-- Suggestion Cards (Reminders List) -->
@@ -118,6 +127,23 @@
                     </div>
                 </div>
 
+            </section>
+
+            <!-- ───── CONTACTS VIEW ───── -->
+            <section id="contacts-view" class="view hidden">
+                <div class="library-container">
+                    <div class="library-header">
+                        <h2 class="section-title">Contacts</h2>
+                    </div>
+                    <div id="contacts-list" class="library-grid">
+                        <!-- Contacts will be rendered here -->
+                        <div class="empty-state">
+                            <div class="empty-icon"><span class="material-symbols-outlined">contacts</span></div>
+                            <div class="empty-text">No contacts discovered yet</div>
+                            <div class="empty-sub">We'll automatically build relationship profiles as you interact with people.</div>
+                        </div>
+                    </div>
+                </div>
             </section>
             
             <!-- ───── SETTINGS VIEW ───── -->

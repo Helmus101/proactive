@@ -43,13 +43,13 @@ class WeaveApp {
             const normalized = this.normalizeTodos(suggestions || []);
             this.todos = normalized.filter((todo) => !todo.completed);
             window.electronAPI.savePersistentTodos(this.todos).catch(() => {});
-            this.renderSuggestions();
+            await this.renderSuggestions();
         });
         window.electronAPI.onMorningBriefUpdated?.((brief) => {
             if (!brief) return;
             this.morningBriefs = [brief, ...(this.morningBriefs || []).filter((b) => b.id !== brief.id)].slice(0, 60);
             if (!this.activeBriefId) this.activeBriefId = brief.id;
-            this.renderSuggestions();
+            await this.renderSuggestions();
             this.renderMorningBriefList();
             this.showMorningBrief(this.activeBriefId);
         });
@@ -118,6 +118,9 @@ class WeaveApp {
         this.librarySearchButton = document.getElementById("library-search-btn");
         this.librarySearchQueries = document.getElementById("library-search-queries");
         this.settingsGraphContainer = document.getElementById("settings-graph-container");
+        this.contactsList = document.getElementById('contacts-list');
+        this.relationshipIntelContainer = document.getElementById('relationship-intel-container');
+        this.relationshipIntelContacts = document.getElementById('relationship-intel-contacts');
     this.deleteAllDataButton = document.getElementById('delete-all-data-btn');
     }
 
@@ -132,7 +135,7 @@ class WeaveApp {
         if (!this.getVisibleTodos().length) {
             await this.generateSuggestions({ replace: true, silent: true });
         } else {
-            this.renderSuggestions();
+            await this.renderSuggestions();
         }
 
         await this.loadGreetingContext();
@@ -172,6 +175,9 @@ class WeaveApp {
         if (viewId === "library-view") {
             this.renderLibrary("all");
         }
+        if (viewId === "contacts-view") {
+            this.renderContacts();
+        }
         if (viewId === 'chat-view') {
             this.chatInput?.focus();
             this.renderFullMemoryGraph();
@@ -189,7 +195,7 @@ class WeaveApp {
                 this.filterChips.forEach((item) => item.classList.remove('active'));
                 chip.classList.add('active');
                 this.currentFilter = chip.dataset.filter || 'all';
-                this.renderSuggestions();
+                await this.renderSuggestions();
             });
         });
 
@@ -335,11 +341,11 @@ class WeaveApp {
             this.todos = this.todos.filter((todo) => !todo.completed);
 
             await window.electronAPI.savePersistentTodos(this.todos);
-            this.renderSuggestions();
+            await this.renderSuggestions();
         } catch (error) {
             console.error('Failed to generate suggestions:', error);
             this.showToast('Suggestion generation failed');
-            this.renderSuggestions();
+            await this.renderSuggestions();
         }
     }
 
@@ -441,10 +447,40 @@ class WeaveApp {
             .slice(0, 10);
     }
 
-    renderSuggestions() {
+    async renderSuggestions() {
         if (!this.remindersList) return;
 
         const visibleTodos = this.getVisibleTodos();
+        const showRelIntel = this.currentFilter === 'relationship_intelligence' || this.currentFilter === 'all';
+        if (showRelIntel && this.relationshipIntelContainer) {
+            try {
+                const relIntel = await window.electronAPI.getRelationshipIntelligence();
+                if (relIntel && relIntel.contacts && relIntel.contacts.length > 0) {
+                    this.relationshipIntelContainer.classList.remove('hidden');
+                    this.relationshipIntelContacts.innerHTML = relIntel.contacts.map(contact => `
+                        <div class="glass-card contact-mini-card" style="min-width: 200px; padding: 12px; cursor: pointer;">
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <div class="suggestion-icon followup" style="width: 24px; height: 24px; font-size: 14px;">
+                                    <span class="material-symbols-outlined">person</span>
+                                </div>
+                                <div style="font-weight: 600; font-size: 13px;">${this.escapeHtml(contact.name)}</div>
+                            </div>
+                            <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;">
+                                ${contact.metadata.interaction_count || 0} interactions
+                            </div>
+                        </div>
+                    `).join('');
+                } else {
+                    this.relationshipIntelContainer.classList.add('hidden');
+                }
+            } catch (error) {
+                console.error('Failed to load relationship intelligence:', error);
+                this.relationshipIntelContainer.classList.add('hidden');
+            }
+        } else if (this.relationshipIntelContainer) {
+            this.relationshipIntelContainer.classList.add('hidden');
+        }
+
         const briefBanner = this.renderMorningBriefBanner();
 
         if (!visibleTodos.length) {
@@ -459,6 +495,7 @@ class WeaveApp {
         const grouped = {
             now: visibleTodos.filter((todo) => (todo.suggestion_group || 'next') === 'now'),
             next: visibleTodos.filter((todo) => !todo.suggestion_group || todo.suggestion_group === 'next'),
+            relationship: visibleTodos.filter((todo) => todo.category === 'relationship'),
             risk: visibleTodos.filter((todo) => todo.suggestion_group === 'risk')
         };
 
@@ -476,6 +513,7 @@ class WeaveApp {
         this.remindersList.innerHTML = briefBanner + [
             renderGroup('Now', 'now'),
             renderGroup('Next', 'next'),
+            renderGroup('Relationship Intelligence', 'relationship'),
             renderGroup('Risk Alerts', 'risk')
         ].join('');
     }
@@ -603,7 +641,7 @@ class WeaveApp {
         } else {
             this.expandedCards.add(taskId);
         }
-        this.renderSuggestions();
+        await this.renderSuggestions();
     }
 
     async completeSuggestion(taskId) {
@@ -619,7 +657,7 @@ class WeaveApp {
             console.error('Failed to save completed suggestion:', error);
         }
 
-        this.renderSuggestions();
+        await this.renderSuggestions();
 
         if (!this.getVisibleTodos().length) {
             await this.generateSuggestions({ replace: true, silent: true });
@@ -638,7 +676,7 @@ class WeaveApp {
             console.error('Failed to remove suggestion:', error);
             this.showToast('Remove failed');
         }
-        this.renderSuggestions();
+        await this.renderSuggestions();
     }
 
     async snoozeSuggestion(taskId, minutes = 120) {
@@ -652,7 +690,7 @@ class WeaveApp {
             console.error('Failed to snooze suggestion:', error);
             this.showToast('Snooze failed');
         }
-        this.renderSuggestions();
+        await this.renderSuggestions();
     }
 
     async findContextForSuggestion(taskId) {
@@ -779,7 +817,8 @@ const filtered = this.todos.filter((todo) => {
         if (todo.completed) return false;
         if (todo.snoozedUntil && Number(todo.snoozedUntil) > now) return false;
         if (this.currentFilter === 'all') return true;
-        if (this.currentFilter === 'followups') return todo.category === 'followup';
+        if (this.currentFilter === 'followups') return todo.category === 'followup' || todo.category === 'relationship';
+        if (this.currentFilter === 'relationship_intelligence') return todo.category === 'relationship';
         return todo.category === this.currentFilter;
     });
 
@@ -2407,7 +2446,7 @@ Would you like me to continue with more detail?` : content;
             }
             this.morningBriefs = Array.isArray(briefs) ? briefs : [];
             this.activeBriefId = this.morningBriefs[0]?.id || null;
-            this.renderSuggestions();
+            await this.renderSuggestions();
             this.renderMorningBriefList();
             this.showMorningBrief(this.activeBriefId);
         } catch (error) {
@@ -3098,6 +3137,54 @@ Would you like me to continue with more detail?` : content;
             }
         } catch (err) {
             console.error("Failed to open memory detail:", err);
+        }
+    }
+
+
+    async renderContacts() {
+        if (!this.contactsList) return;
+        this.contactsList.innerHTML = '<div class="loading-placeholder">Loading contacts...</div>';
+        try {
+            const contacts = await window.electronAPI.getContacts();
+            if (!contacts || !contacts.length) {
+                this.contactsList.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-icon"><span class="material-symbols-outlined">contacts</span></div>
+                        <div class="empty-text">No contacts discovered yet</div>
+                        <div class="empty-sub">We'll automatically build relationship profiles as you interact with people.</div>
+                    </div>
+                `;
+                return;
+            }
+
+            this.contactsList.innerHTML = contacts.map(contact => {
+                const meta = contact.metadata || {};
+                const topics = meta.shared_topics || [];
+                const topicsHtml = topics.slice(0, 3).map(t => `<span class="thinking-trace-chip">${this.escapeHtml(t)}</span>`).join('');
+                return `
+                    <div class="suggestion-card liquid-card contact-card" data-id="${contact.id}">
+                        <div class="suggestion-header">
+                            <div class="suggestion-icon followup">
+                                <span class="material-symbols-outlined">person</span>
+                            </div>
+                            <div class="suggestion-content">
+                                <div class="suggestion-title">${this.escapeHtml(contact.name)}</div>
+                                <div class="suggestion-description">${this.escapeHtml(contact.summary || '')}</div>
+                                <div class="suggestion-meta" style="margin-top:8px;">
+                                    <span>${meta.interaction_count || 0} interactions</span>
+                                    ${meta.latest_interaction_at ? `<span>Last seen ${new Date(meta.latest_interaction_at).toLocaleDateString()}</span>` : ''}
+                                </div>
+                                <div class="thinking-timeline-preview" style="margin-top:8px;">
+                                    ${topicsHtml}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        } catch (error) {
+            console.error('Failed to load contacts:', error);
+            this.contactsList.innerHTML = '<div class="error-state">Failed to load contacts</div>';
         }
     }
 

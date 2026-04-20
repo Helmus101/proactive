@@ -140,5 +140,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onMorningBriefUpdated: (cb) => ipcRenderer.on('morning-brief-updated', (_e, brief) => cb(brief)),
   onVoiceCommandToggle: (cb) => ipcRenderer.on('voice-command-toggle', (_e, payload) => cb(payload)),
   onVoiceSessionUpdate: (cb) => ipcRenderer.on('voice-session-update', (_e, payload) => cb(payload)),
+  getContacts: () => ipcRenderer.invoke('get-contacts'),
+  getRelationshipIntelligence: () => ipcRenderer.invoke('get-relationship-intelligence'),
   removeAllListeners:   (channel) => ipcRenderer.removeAllListeners(channel)
-});
+  });

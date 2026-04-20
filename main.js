@@ -7125,6 +7125,41 @@ ipcMain.handle("get-full-memory-graph", async () => {
 });
 
 // AI Assistant Chat Logic
+
+ipcMain.handle("get-contacts", async () => {
+  const contacts = await db.allQuery(
+    `SELECT * FROM memory_nodes WHERE layer = "core" AND subtype = "contact" ORDER BY title ASC`
+  ).catch(() => []);
+  return contacts.map(c => ({
+    id: c.id,
+    name: c.title,
+    summary: c.summary,
+    metadata: JSON.parse(c.metadata || "{}"),
+    updated_at: c.updated_at
+  }));
+});
+
+ipcMain.handle("get-relationship-intelligence", async () => {
+  const contacts = await db.allQuery(
+    `SELECT * FROM memory_nodes WHERE layer = "core" AND subtype = "contact" ORDER BY updated_at DESC LIMIT 5`
+  ).catch(() => []);
+
+  const suggestions = store.get("suggestions") || [];
+  const relationshipSuggestions = suggestions.filter(s =>
+    s.type === "relationship" ||
+    s.category === "relationship" ||
+    s.category === "followup"
+  );
+
+  return {
+    contacts: contacts.map(c => ({
+      id: c.id,
+      name: c.title,
+      metadata: JSON.parse(c.metadata || "{}")
+    })),
+    suggestions: relationshipSuggestions
+  };
+});
 ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
   try {
     const { answerChatQuery } = require('./services/agent/chat-engine');
