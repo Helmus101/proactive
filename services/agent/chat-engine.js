@@ -509,7 +509,7 @@ function buildThinkingResultsSummary(retrieval, drilldownEvidence = []) {
   if (Array.isArray(retrieval?.seed_results) && retrieval.seed_results.length) {
     details.push(`Initial seed search found ${retrieval.seed_results.length} ranked seed results before graph expansion.`);
   }
-  
+
   // Add iterative flow details if available in stageTrace
   const stageTrace = retrieval?.stage_trace || [];
   const primarySearchEvents = stageTrace.filter(s => s.step === 'primary_search_results');
@@ -560,7 +560,7 @@ async function buildThinkingTrace({ query, retrieval, drilldownEvidence = [] }) 
 
   const strategy = buildThinkingStrategy(retrieval, drilldownEvidence);
   const resultsSummary = buildThinkingResultsSummary(retrieval, drilldownEvidence);
-  
+
   // Add Deep Search indicator if recursion was used
   if (retrieval?.retrieval_plan?.recursion_depth > 0) {
     resultsSummary.details.push("Performed recursive 'Deep Search' expansion from high-confidence anchor nodes.");
@@ -578,6 +578,9 @@ async function buildThinkingTrace({ query, retrieval, drilldownEvidence = [] }) 
     filters: buildThinkingFilters(retrieval),
     search_queries: buildThinkingSearchQueries(retrieval),
     results_summary: resultsSummary,
+    planner: retrieval?.plan || null,
+    judge: retrieval?.judgment || null,
+    reflector: retrieval?.reflection || null,
     data_sources: dataSources,
     connection_candidates: buildConnectionCandidates(retrieval),
     seed_results: Array.isArray(retrieval?.seed_results) ? retrieval.seed_results : [],
@@ -693,7 +696,7 @@ async function executeParallelRetrieval(baseQuery, baseThought, options, onProgr
     ...((baseThought.message_queries || []).map((item) => String(item || '').trim()))
   ].filter(Boolean);
   const queries = Array.from(new Set(bundle)).slice(0, 15);
-  
+
   // Detect when a query requires deep context (e.g., long-term relationship, patterns)
   const requiresDeepContext = /\b(relationship|pattern|over the last|long-term|habit|habitual|recurring|years?|months?)\b/i.test(baseQuery);
   const recursionDepth = (requiresDeepContext && !options.passiveOnly) ? 1 : 0;
@@ -735,7 +738,7 @@ async function executeParallelRetrieval(baseQuery, baseThought, options, onProgr
     }
     return Array.from(map.values()).sort((a, b) => (b.score || 0) - (a.score || 0));
   };
-  
+
   const evidence = mergeById(successfulResults.map((r) => r.evidence)).slice(0, Math.max(...successfulResults.map((r) => r.evidence_count)));
   const expanded_nodes = mergeById(successfulResults.map((r) => r.expanded_nodes));
   const seed_nodes = mergeById(successfulResults.map((r) => r.seed_nodes));
@@ -770,7 +773,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       onStep?.(data);
     } catch (_) {}
   };
-  
+
   // Normalize API key: prefer explicit param, then environment, then options; treat empty string as absent
   if (!apiKey) {
     apiKey = process.env.DEEPSEEK_API_KEY || options?.apiKey || null;
@@ -781,8 +784,6 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     emit(event);
     return event;
   };
-  const chatHistory = normalizeChatHistoryWindow(options?.chat_history, 30);
-  const retrievalQuery = buildQueryWithChatContext(query, chatHistory);
 
   // Persist user chat turn as a raw event
   await ingestRawEvent({
@@ -796,12 +797,9 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     }
   }).catch(e => console.warn('Failed to persist user chat turn:', e));
 
-  const baseThought = await buildRetrievalThought({
-    query: retrievalQuery,
-    mode: 'chat',
-    dateRange: options?.date_range,
-    app: options?.app
-  });
+  // 1. Router Stage
+  emitStage('routing', 'started', { label: 'Routing' });
+  const { baseThought, retrievalQuery, chatHistory } = await runRouterStage({ query, options });
   emitStage('routing', 'completed', {
     label: 'Routing',
     detail: formatStageDetail([
@@ -819,13 +817,13 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       baseThought.summary_vs_raw || null
     ].filter(Boolean)
   });
+
   emitStage('query_generation', 'completed', {
     label: 'Query generation',
     detail: formatStageDetail([
       `Prepared ${baseThought.query_sets?.memory_queries?.length || baseThought.semantic_queries?.length || 0} memory queries,`,
       `${baseThought.query_sets?.message_queries?.length || baseThought.message_queries?.length || 0} message queries,`,
-      `and ${baseThought.query_sets?.web_queries?.length || baseThought.web_queries?.length || 0} web fallback queries.`,
-      'Initial reasoning will decide later whether web search is actually necessary.'
+      `and ${baseThought.query_sets?.web_queries?.length || baseThought.web_queries?.length || 0} web fallback queries.`
     ], 'Prepared retrieval queries.'),
     counts: {
       memory_queries: Number(baseThought.query_sets?.memory_queries?.length || baseThought.semantic_queries?.length || 0),
@@ -838,6 +836,16 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     ]
   });
 
+  // 2. Planner Stage
+  emitStage('planning', 'started', { label: 'Planning' });
+  let plan = await runPlannerStage({ query: retrievalQuery, routerOutput: baseThought, apiKey });
+  emitStage('planning', 'completed', {
+    label: 'Planning',
+    detail: plan ? 'Created a formal execution plan with refined queries.' : 'Using default routing plan.',
+    preview_items: plan?.reasoning_plan || []
+  });
+
+  // 3. Retriever Stage (with Judge loop)
   let retrieval = {
     retrieval_plan: baseThought,
     router: {
@@ -869,287 +877,188 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     evidence_count: 0,
     contextText: ''
   };
+  let webResults = [];
+  let drilldownEvidence = [];
+  let judgment = { sufficient: false };
+  let iteration = 0;
+  const maxIterations = 2;
 
-  if ((baseThought.source_mode || baseThought.strategy_mode) !== 'web_only') {
-    // Passive-First Heuristic: attempt retrieval from Core, Insight, Cloud layers first
-    retrieval = await executeParallelRetrieval(retrievalQuery, baseThought, {
-      mode: 'chat',
-      app: options?.app,
-      date_range: baseThought.applied_date_range || options?.date_range,
-      source_types: options?.source_types,
-      retrieval_thought: baseThought,
-      passiveOnly: true
-    }, emit);
+  while (!judgment.sufficient && iteration < maxIterations) {
+    iteration++;
+    emitStage('retrieving', 'started', { label: iteration > 1 ? `Re-retrieving (Attempt ${iteration})` : 'Retrieving' });
 
-    const passiveMaxScore = retrieval.evidence?.length ? Math.max(...retrieval.evidence.map((e) => e.score || 0)) : 0;
-    const isPassiveSufficient = (retrieval.evidence_count >= 3 && passiveMaxScore > 0.75) || (passiveMaxScore > 0.9);
+    // Use refined queries if available and it's not the first pass or if they exist
+    const currentThought = (iteration > 1 && judgment.suggested_queries)
+      ? { ...baseThought, semantic_queries: judgment.suggested_queries }
+      : (plan?.refined_queries ? { ...baseThought, semantic_queries: plan.refined_queries } : baseThought);
 
-    if (!isPassiveSufficient) {
-      retrieval = await executeParallelRetrieval(retrievalQuery, baseThought, {
+    if ((currentThought.source_mode || currentThought.strategy_mode) !== 'web_only') {
+      retrieval = await executeParallelRetrieval(retrievalQuery, currentThought, {
         mode: 'chat',
         app: options?.app,
-        date_range: baseThought.applied_date_range || options?.date_range,
+        date_range: currentThought.applied_date_range || options?.date_range,
         source_types: options?.source_types,
-        retrieval_thought: baseThought,
-        passiveOnly: false
+        retrieval_thought: currentThought,
+        passiveOnly: iteration === 1
       }, emit);
-    }
 
-    const canWiden = Boolean(baseThought?.initial_date_range || baseThought?.filters?.app) && !baseThought?.fallback_policy?.attempted;
-    if (canWiden && retrievalLooksSparse(retrieval)) {
-      const widenedRange = baseThought.initial_date_range ? widenTemporalWindow(baseThought.initial_date_range) : null;
-      let widenedApps = null;
-      if (baseThought.filters?.app) {
-        const families = inferSurfaceFamilies(retrievalQuery, '', baseThought.filters.app);
-        if (families.includes('communication')) widenedApps = ['Gmail', 'Slack', 'Messages', 'WhatsApp', 'Signal'];
-        else if (families.includes('coding')) widenedApps = ['GitHub', 'Cursor', 'Xcode', 'VSCode'];
-        else if (families.includes('browser')) widenedApps = ['Chrome', 'Safari', 'Arc'];
-      }
-
-      if (widenedRange || widenedApps) {
-        const widenedFilters = {
-          ...(baseThought.filters || {}),
-          date_range: widenedRange || baseThought.filters?.date_range,
-          app: widenedApps || baseThought.filters?.app
-        };
-        const widenedThought = {
-          ...baseThought,
-          filters: widenedFilters,
-          applied_date_range: widenedRange || baseThought.applied_date_range,
-          widened_date_range: widenedRange,
-          date_filter_status: 'widened',
-          temporal_reasoning: [
-            ...(baseThought.temporal_reasoning || []),
-            widenedRange ? `Initial time window looked sparse, so retrieval widened to ${widenedRange.start} -> ${widenedRange.end}.` : '',
-            widenedApps ? `Initial app filter was too restrictive, so broadened to related apps: ${widenedApps.join(', ')}.` : ''
-          ].filter(Boolean),
-          fallback_policy: {
-            ...(baseThought.fallback_policy || { mode: 'widen_once' }),
-            attempted: true,
-            widened: true
-          }
-        };
-
-        const widenedRetrieval = await executeParallelRetrieval(retrievalQuery, widenedThought, {
+      if (iteration === 1 && retrievalLooksSparse(retrieval)) {
+        retrieval = await executeParallelRetrieval(retrievalQuery, currentThought, {
           mode: 'chat',
-          app: widenedApps || options?.app,
-          date_range: widenedRange || baseThought.applied_date_range,
+          app: options?.app,
+          date_range: currentThought.applied_date_range || options?.date_range,
           source_types: options?.source_types,
-          retrieval_thought: widenedThought
-        }, onStep);
-        retrieval = {
-          ...widenedRetrieval,
-          initial_date_range: baseThought.initial_date_range,
-          widened_date_range: widenedRange,
-          date_filter_status: 'widened',
-          temporal_reasoning: widenedThought.temporal_reasoning
-        };
+          retrieval_thought: currentThought,
+          passiveOnly: false
+        }, emit);
       }
-    }
 
-    if (retrievalLooksSparse(retrieval) && !options.passiveOnly) {
-      const deepRetrieval = await executeParallelRetrieval(retrievalQuery, baseThought, {
-        ...options,
-        mode: 'chat',
-        recursionDepth: 1,
-        passiveOnly: false
-      }, emit);
-      if ((deepRetrieval.evidence_count || 0) > (retrieval.evidence_count || 0)) {
-         retrieval = {
-           ...deepRetrieval,
-           initial_date_range: retrieval.initial_date_range,
-           widened_date_range: retrieval.widened_date_range,
-           date_filter_status: retrieval.date_filter_status
-         };
+      // Widen if still sparse
+      const canWiden = Boolean(currentThought?.initial_date_range || currentThought?.filters?.app) && !currentThought?.fallback_policy?.attempted;
+      if (canWiden && retrievalLooksSparse(retrieval)) {
+        const widenedRange = currentThought.initial_date_range ? widenTemporalWindow(currentThought.initial_date_range) : null;
+        let widenedApps = null;
+        if (currentThought.filters?.app) {
+          const families = inferSurfaceFamilies(retrievalQuery, '', currentThought.filters.app);
+          if (families.includes('communication')) widenedApps = ['Gmail', 'Slack', 'Messages', 'WhatsApp', 'Signal'];
+          else if (families.includes('coding')) widenedApps = ['GitHub', 'Cursor', 'Xcode', 'VSCode'];
+          else if (families.includes('browser')) widenedApps = ['Chrome', 'Safari', 'Arc'];
+        }
+
+        if (widenedRange || widenedApps) {
+          const widenedThought = {
+            ...currentThought,
+            filters: { ...(currentThought.filters || {}), date_range: widenedRange || currentThought.filters?.date_range, app: widenedApps || currentThought.filters?.app },
+            applied_date_range: widenedRange || currentThought.applied_date_range,
+            widened_date_range: widenedRange,
+            date_filter_status: 'widened',
+            fallback_policy: { ...(currentThought.fallback_policy || { mode: 'widen_once' }), attempted: true, widened: true }
+          };
+          retrieval = await executeParallelRetrieval(retrievalQuery, widenedThought, {
+            mode: 'chat',
+            app: widenedApps || options?.app,
+            date_range: widenedRange || currentThought.applied_date_range,
+            source_types: options?.source_types,
+            retrieval_thought: widenedThought
+          }, onStep);
+        }
       }
-    }
 
-    retrieval = {
-      ...retrieval,
-      stage_trace: stageTrace,
-      router: retrieval.router || {
-        source_mode: baseThought.source_mode || baseThought.strategy_mode || 'memory_only',
-        router_reason: baseThought.router_reason || baseThought.web_gate_reason || '',
-        time_scope: baseThought.time_scope || null,
-        summary_vs_raw: baseThought.summary_vs_raw || 'summary'
-      },
-      query_sets: retrieval.query_sets || retrieval.generated_queries || baseThought.query_sets || null
-    };
-
-    emitStage('ranking', 'completed', {
-      label: 'Ranking and packing',
-      detail: `Packed ${retrieval.evidence_count || 0} evidence items from primary nodes, support nodes, and downward evidence.`,
-      counts: retrieval.packed_context_stats || {
-        evidence: Number(retrieval.evidence_count || 0)
-      },
-      preview_items: (retrieval.evidence || []).slice(0, 3).map((item) => item.text || item.id)
-    });
-  } else {
-    emitStage('memory_search', 'skipped', {
-      label: 'Memory search',
-      detail: 'Skipped memory retrieval because the router selected web-only mode.'
-    });
-    emitStage('seed_selection', 'skipped', {
-      label: 'Node retrieval',
-      detail: 'No memory seed selection was needed for this request.'
-    });
-    emitStage('edge_expansion', 'skipped', {
-      label: 'Edge expansion',
-      detail: 'Skipped graph expansion because no memory seeds were selected.'
-    });
-    emitStage('ranking', 'skipped', {
-      label: 'Ranking and packing',
-      detail: 'Skipped memory context packing because the request is web-only.'
-    });
-  }
-
-  const maxScore = retrieval.evidence?.length ? Math.max(...retrieval.evidence.map((e) => e.score || 0)) : 0;
-  const sparseMemory = retrieval.evidence_count === 0 || (retrieval.evidence_count < 3 && maxScore < 0.45);
-
-  const [suggestions, recentEpisodes] = await Promise.all([
-    fetchActiveSuggestions(),
-    fetchRecentEpisodes()
-  ]);
-  const standingNotes = String(options?.standing_notes || options?.core_memory || '').trim();
-  const drilldownEvidence = (retrieval.drilldown_refs || []).length
-    ? await fetchDrilldownEvidence(retrieval.drilldown_refs || [])
-    : [];
-  const webAssessment = assessWebSearchNecessity(query, baseThought, retrieval);
-  const shouldSearchWeb = webAssessment.shouldSearchWeb;
-  const webSearchQuery = (retrieval?.query_sets?.web_queries || retrieval?.generated_queries?.web || retrieval?.generated_queries?.semantic || retrieval?.retrieval_plan?.web_queries || retrieval?.retrieval_plan?.semantic_queries || [query])[0] || query;
-  let webResults = [];
-  if (shouldSearchWeb || (baseThought.source_mode || baseThought.strategy_mode) === 'web_only') {
-    emitStage('web_search', 'started', {
-      label: 'Web search',
-      detail: `${webAssessment.reason} Searching the web using: ${webSearchQuery}`
-    });
-    webResults = await searchFreeWeb(webSearchQuery, 4);
-    emitStage('web_search', 'completed', {
-      label: 'Web search',
-      detail: webResults.length
-        ? `Retrieved ${webResults.length} public web results.`
-        : 'No web results were returned for this query.',
-      counts: { web_results: webResults.length },
-      preview_items: webResults.slice(0, 3).map((item) => item.title || item.url)
-    });
-  } else {
-    emitStage('web_search', 'skipped', {
-      label: 'Web search',
-      detail: webAssessment.reason
-    });
-  }
-  if (webResults.length) {
-    retrieval = {
-      ...retrieval,
-      web_search_used: true,
-      web_search_query: webSearchQuery,
-      web_results: webResults,
-      web_results_summary: webResults.map((item) => `${item.title}: ${item.url}`),
-      web_sources: webResults.map((item) => item.url).filter(Boolean)
-    };
-  } else {
-    retrieval = {
-      ...retrieval,
-      web_search_used: false,
-      web_search_query: shouldSearchWeb ? webSearchQuery : null,
-      web_results: [],
-      web_results_summary: [],
-      web_sources: []
-    };
-  }
-  if (sparseMemory && !webResults.length && !drilldownEvidence.length) {
-    // If no API key is available, ask the user for clarification as before.
-    if (!apiKey) {
-      emitStage('synthesis', 'completed', {
-        label: 'Synthesis',
-        detail: 'Available evidence was too sparse across memory and web, so the assistant is asking for clarification.'
+      emitStage('ranking', 'completed', {
+        label: 'Ranking and packing',
+        detail: `Packed ${retrieval.evidence_count || 0} evidence items from primary nodes, support nodes, and downward evidence.`,
+        counts: retrieval.packed_context_stats || {
+          evidence: Number(retrieval.evidence_count || 0)
+        },
+        preview_items: (retrieval.evidence || []).slice(0, 3).map((item) => item.text || item.id)
       });
-      return {
-         content: "I couldn't find enough specific details in your memory graph to answer that accurately. Could you provide a bit more context, like a specific timeframe or associated project?",
-         needs_clarification: true,
-         retrieval: {
-           ...retrieval,
-           stage_trace: stageTrace
-         },
-         thinking_trace: ["Confidence Gating: Retrieval returned insufficient high-confidence context across memory and web. Prompting user for clarification."]
-      };
+    } else {
+      emitStage('ranking', 'skipped', {
+        label: 'Ranking and packing',
+        detail: 'Skipped memory context packing because the request is web-only.'
+      });
     }
 
-    // If an API key is present, proceed to synthesize an answer using the LLM
-    // even when memory evidence is sparse. Emit a low-confidence note in the trace.
-    emitStage('synthesis', 'started', {
-      label: 'Synthesis',
-      detail: 'Evidence was sparse across memory and web, but an LLM key is available — proceeding to generate an answer with low confidence.'
+    const webAssessment = assessWebSearchNecessity(query, currentThought, retrieval);
+    const shouldSearchWeb = webAssessment.shouldSearchWeb || (currentThought.source_mode || currentThought.strategy_mode) === 'web_only';
+    
+    if (shouldSearchWeb) {
+      const webSearchQuery = (judgment.suggested_queries?.[0]) || (currentThought?.semantic_queries?.[0]) || query;
+      emitStage('web_search', 'started', {
+        label: 'Web search',
+        detail: `${webAssessment.reason} Searching the web using: ${webSearchQuery}`
+      });
+      webResults = await searchFreeWeb(webSearchQuery, 4);
+      emitStage('web_search', 'completed', {
+        label: 'Web search',
+        detail: webResults.length ? `Retrieved ${webResults.length} public web results.` : 'No web results were returned.',
+        counts: { web_results: webResults.length },
+        preview_items: webResults.slice(0, 3).map((item) => item.title || item.url)
+      });
+    } else {
+      emitStage('web_search', 'skipped', {
+        label: 'Web search',
+        detail: webAssessment.reason
+      });
+    }
+
+    drilldownEvidence = (retrieval.drilldown_refs || []).length
+      ? await fetchDrilldownEvidence(retrieval.drilldown_refs || [])
+      : [];
+
+    // 4. Judge Stage
+    emitStage('judging', 'started', { label: 'Judging' });
+    judgment = await runJudgeStage({ query: retrievalQuery, plan, evidence: [...(retrieval.evidence || []), ...webResults], apiKey });
+    emitStage('judging', 'completed', {
+      label: 'Judging',
+      detail: judgment.reason,
+      status: judgment.sufficient ? 'completed' : 'retry'
     });
+
+    if (judgment.sufficient || !apiKey) break;
   }
+
+  // Final metadata updates for retrieval object
+  retrieval.stage_trace = stageTrace;
+  retrieval.web_search_used = webResults.length > 0;
+  retrieval.web_results = webResults;
+  retrieval.web_sources = webResults.map(r => r.url).filter(Boolean);
+  retrieval.plan = plan;
+  retrieval.judgment = judgment;
+
   const thinkingTrace = await buildThinkingTrace({ query, retrieval, drilldownEvidence });
-  emitStage('synthesis', 'started', {
-    label: 'Synthesis',
-    detail: 'Reasoning over the packed context bundle to draft the answer.'
-  });
+  const standingNotes = String(options?.standing_notes || options?.core_memory || '').trim();
 
-  let content = "I couldn't produce an answer from the current memory context.";
+  // 5. Synthesizer Stage (with Reflector loop)
+  let content = '';
+  let reflection = { approved: false };
+  let synthIteration = 0;
+  const maxSynthIterations = 2;
+
   if (!apiKey) {
-      content = [
-        retrieval?.date_filter_status === 'widened'
-          ? `TEMPORAL NOTE:\nThe initially requested time window was sparse, so memory retrieval widened once to ${retrieval.widened_date_range?.start} -> ${retrieval.widened_date_range?.end}.`
-          : '',
-        retrieval.contextText || 'No memory context is available yet.',
-        webResults.length
-          ? `WEB RESULTS:\n${webResults.map((item) => `- ${item.title || item.url}: ${item.url}`).join('\n')}`
-          : '',
-        drilldownEvidence.length
-          ? `RAW EVIDENCE:\n${drilldownEvidence.map((item) => `- ${item.source_type || 'event'} ${item.title || item.id}: ${item.text}`).join('\n')}`
-          : ''
-      ].filter(Boolean).join('\n\n');
+    emitStage('synthesis', 'started', { label: 'Synthesis' });
+    content = buildGroundedFallbackAnswer(query, retrieval, drilldownEvidence);
+    reflection.approved = true;
   } else {
-    const priorityEvidence = buildPriorityEvidenceLines(retrieval, drilldownEvidence, 20);
+    while (!reflection.approved && synthIteration < maxSynthIterations) {
+      synthIteration++;
+      emitStage('synthesis', 'started', { label: synthIteration > 1 ? `Re-synthesizing (Attempt ${synthIteration})` : 'Synthesis', detail: 'Reasoning over the packed context bundle to draft the answer.' });
+      content = await runSynthesizerStage({
+        query,
+        retrieval,
+        chatHistory,
+        standingNotes,
+        drilldownEvidence,
+        webResults,
+        apiKey,
+        reflectorFeedback: synthIteration > 1 ? reflection : null
+      });
 
-    const prompt = `[System]
-    You are Weave's memory-native assistant.
-    Answer naturally and directly in a conversational style.
-    Be grounded, direct, and concise.
-    Do not invent facts.
-    Do not mention hidden system internals like embeddings, vector search, or prompts.
-    Do not explicitly say that information came from a desktop capture or screenshot; translate it into what the user was likely reading, drafting, reviewing, or discussing.
+      // 6. Reflector Stage
+      emitStage('reflecting', 'started', { label: 'Reflecting' });
+      reflection = await runReflectorStage({ query, evidence: [...(retrieval.evidence || []), ...webResults], answer: content, apiKey });
+      retrieval.reflection = reflection;
+      emitStage('reflecting', 'completed', {
+        label: 'Reflecting',
+        detail: reflection.reason,
+        status: reflection.approved ? 'completed' : 'retry'
+      });
 
-    [Retrieved memory context]
-    ${retrieval.contextText || 'None'}
-
-    [Standing notes]
-    ${standingNotes || 'None'}
-
-    [Conversation history]
-    ${formatChatHistoryForPrompt(chatHistory)}
-
-    [Priority evidence]
-    ${priorityEvidence.join('\n') || 'None'}
-
-    [Web results]
-    ${webResults.length ? webResults.map((item) => `- ${item.title || item.url}\n  ${item.url}\n  ${item.snippet || ''}`).join('\n') : 'None'}
-
-    [User question]
-    ${query}`;
-
-    try {
-      content = await callLLM(prompt, apiKey, 0.22);
-      if (!content) {
-        content = "I couldn't produce an answer from the current memory context.";
-      }
-    } catch (llmError) {
-      content = buildGroundedFallbackAnswer(query, retrieval, drilldownEvidence);
+      if (reflection.approved) break;
     }
   }
+
   emitStage('synthesis', 'completed', {
     label: 'Synthesis',
-    detail: webResults.length
-      ? 'Generated the answer from memory plus web support.'
-      : 'Generated the answer from memory context.',
+    detail: webResults.length ? 'Generated the answer from memory plus web support.' : 'Generated the answer from memory context.',
     counts: {
       evidence: Number(retrieval.evidence_count || 0),
       web_results: Number(webResults.length || 0)
     }
   });
+
+  // Update thinkingTrace again to include reflection if it happened
+  thinkingTrace.reflector = reflection;
 
   // Persist assistant chat turn as a raw event
   await ingestRawEvent({
@@ -1171,7 +1080,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   if (correctionMatch && correctionMatch[1]) {
     const correctionText = correctionMatch[1].trim();
     content = content.replace(/<memory_correction>[\s\S]*?<\/memory_correction>/i, '').trim();
-    
+
     const { upsertMemoryNode, stableHash } = require('./graph-store');
     const correctionId = `core_corr_${stableHash(correctionText)}`;
     await upsertMemoryNode({
@@ -1255,6 +1164,161 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       thinking_trace: thinkingTrace
     }
   };
+}
+
+async function runRouterStage({ query, options }) {
+  const chatHistory = normalizeChatHistoryWindow(options?.chat_history, 30);
+  const retrievalQuery = buildQueryWithChatContext(query, chatHistory);
+
+  const baseThought = await buildRetrievalThought({
+    query: retrievalQuery,
+    mode: 'chat',
+    dateRange: options?.date_range,
+    app: options?.app
+  });
+
+  return {
+    baseThought,
+    retrievalQuery,
+    chatHistory
+  };
+}
+
+async function runPlannerStage({ query, routerOutput, apiKey }) {
+  if (!apiKey) return null;
+  const prompt = `[System]
+You are an expert retrieval planner for a memory-native AI assistant. 
+Your goal is to take a user query and a router's initial strategy, and produce a formal, multi-step execution plan.
+Analyze the query for specific entities, timeframes, and intent.
+
+[User Query]
+${query}
+
+[Router Output]
+${JSON.stringify(routerOutput, null, 2)}
+
+[Instruction]
+Return a strict JSON object with the following fields:
+- reasoning_plan: A list of logical steps to solve the problem.
+- refined_queries: A list of 3-5 high-quality, specific search queries for memory retrieval.
+- evidence_criteria: What specific details or facts are required to consider the search successful?
+
+Return only valid JSON.`;
+
+  try {
+    const plan = await callLLM(prompt, apiKey, 0.22, { maxTokens: 800 });
+    return plan;
+  } catch (e) {
+    console.error('[Planner] Stage failed:', e.message);
+    return null;
+  }
+}
+
+async function runJudgeStage({ query, plan, evidence, apiKey }) {
+  if (!apiKey || !evidence?.length) return { sufficient: true, reason: 'No API key or no evidence for judging.' };
+
+  const evidenceSnippet = (evidence || []).slice(0, 25).map(e => `[${e.layer || e.type}] ${String(e.text || e.title || '').slice(0, 400)}`).join('\n---\n');
+
+  const prompt = `[System]
+You are a retrieval judge evaluating if the current memory/web context is sufficient to accurately answer the user's query.
+
+[User Query]
+${query}
+
+[Plan]
+${JSON.stringify(plan, null, 2)}
+
+[Retrieved Evidence]
+${evidenceSnippet}
+
+[Instruction]
+Return a strict JSON object:
+- sufficient: boolean
+- confidence_score: 0.0 to 1.0
+- missing_information: Description of what is still missing (if insufficient)
+- suggested_queries: 2-3 improved search queries to find the missing info (if insufficient)
+- reason: Brief explanation of the verdict.
+
+Return only valid JSON.`;
+
+  try {
+    const judgment = await callLLM(prompt, apiKey, 0.1, { maxTokens: 600 });
+    return judgment || { sufficient: true, reason: 'Judgment parse failed, assuming sufficient.' };
+  } catch (e) {
+    return { sufficient: true, reason: 'Judge stage error: ' + e.message };
+  }
+}
+
+async function runReflectorStage({ query, evidence, answer, apiKey }) {
+  if (!apiKey) return { approved: true, reason: 'No API key for reflection.' };
+
+  const evidenceSnippet = (evidence || []).slice(0, 20).map(e => `[${e.layer || e.type}] ${String(e.text || e.title || '').slice(0, 250)}`).join('\n');
+
+  const prompt = `[System]
+You are a critical reflector critique the draft answer against the provided evidence and user query.
+Check for hallucinations (facts not in evidence), tone, and completeness.
+
+[User Query]
+${query}
+
+[Evidence]
+${evidenceSnippet}
+
+[Draft Answer]
+${answer}
+
+[Instruction]
+Return a strict JSON object:
+- approved: boolean (true if answer is grounded and accurate)
+- critique: Specific feedback on what is wrong or missing.
+- suggestions: How to improve or fix the answer.
+- reason: Brief summary of the critique.
+
+Return only valid JSON.`;
+
+  try {
+    const reflection = await callLLM(prompt, apiKey, 0.1, { maxTokens: 800 });
+    return reflection || { approved: true, reason: 'Reflection parse failed, assuming approved.' };
+  } catch (e) {
+    return { approved: true, reason: 'Reflector stage error: ' + e.message };
+  }
+}
+
+async function runSynthesizerStage({ query, retrieval, chatHistory, standingNotes, drilldownEvidence, webResults, apiKey, reflectorFeedback = null }) {
+  const priorityEvidence = buildPriorityEvidenceLines(retrieval, drilldownEvidence, 20);
+
+  const prompt = `[System]
+You are Weave's memory-native assistant.
+Answer naturally and directly in a conversational style.
+Be grounded, direct, and concise.
+Do not invent facts.
+
+[Retrieved memory context]
+${retrieval.contextText || 'None'}
+
+[Standing notes]
+${standingNotes || 'None'}
+
+[Conversation history]
+${formatChatHistoryForPrompt(chatHistory)}
+
+[Priority evidence]
+${priorityEvidence.join('\n') || 'None'}
+
+[Web results]
+${webResults.length ? webResults.map((item) => `- ${item.title || item.url}\n  ${item.url}\n  ${item.snippet || ''}`).join('\n') : 'None'}
+
+${reflectorFeedback ? `[Reflector Feedback]\nThe previous draft was rejected for: ${reflectorFeedback.critique}\nSuggestion: ${reflectorFeedback.suggestions}\nPlease fix these issues in the final response.` : ''}
+
+[User question]
+${query}`;
+
+  try {
+    const content = await callLLM(prompt, apiKey, 0.22);
+    return content || "I couldn't produce an answer from the current memory context.";
+  } catch (llmError) {
+    return buildGroundedFallbackAnswer(query, retrieval, drilldownEvidence);
+  }
 }
 
 module.exports = {
