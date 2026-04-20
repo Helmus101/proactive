@@ -115,7 +115,8 @@ async function ensureEventEnvelopeColumns() {
     ['redacted_text', 'TEXT'],
     ['source_ref', 'TEXT'],
     ['observation_time', 'TEXT'],
-    ['event_time', 'TEXT']
+    ['event_time', 'TEXT'],
+    ['ocr_hash', 'TEXT']
     ];
 
   for (const [name, sqlType] of required) {
@@ -790,7 +791,14 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
   const dStr = normalizedTime.date;
   const safeMetadataInput = metadata && typeof metadata === 'object' ? metadata : {};
   const rawInputText = String(text || safeMetadataInput.body || safeMetadataInput.snippet || '').trim();
-  const desktopInterpretation = /\bscreen|desktop|capture|sensor\b/i.test(`${type || ''} ${source || ''}`)
+
+  const isScreenCapture = /\bscreen|desktop|capture|sensor\b/i.test(`${type || ''} ${source || ''}`);
+  let ocrHash = null;
+  if (isScreenCapture && rawInputText) {
+    ocrHash = crypto.createHash('sha1').update(rawInputText).digest('hex');
+  }
+
+  const desktopInterpretation = isScreenCapture
     ? interpretDesktopCapture(rawInputText, safeMetadataInput)
     : null;
   const sourceText = sanitizeSourceText({ type, source, text, metadata: safeMetadataInput });
@@ -805,6 +813,23 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
     }
   } catch (e) {
     console.warn('[ingestion] Check existing failed:', e.message);
+  }
+
+  let isDuplicateOCR = false;
+  if (ocrHash) {
+    try {
+      const appName = inferEventApp(source, safeMetadataInput);
+      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+      const recentDuplicate = await db.getQuery(
+        'SELECT id FROM events WHERE app = ? AND ocr_hash = ? AND occurred_at > ? LIMIT 1',
+        [appName, ocrHash, twoHoursAgo]
+      );
+      if (recentDuplicate) {
+        isDuplicateOCR = true;
+      }
+    } catch (e) {
+      console.warn('[ingestion] Duplicate OCR check failed:', e.message);
+    }
   }
 
   const redaction = redactSensitiveText(sourceText || '');
@@ -849,8 +874,8 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
   try {
     await db.runQuery(
       `INSERT OR IGNORE INTO events
-       (id, type, timestamp, date, source, source_type, source_account, occurred_at, ingested_at, observation_time, event_time, app, window_title, url, domain, participants, title, raw_text, redacted_text, source_ref, text, metadata)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, type, timestamp, date, source, source_type, source_account, occurred_at, ingested_at, observation_time, event_time, app, window_title, url, domain, participants, title, raw_text, redacted_text, source_ref, text, metadata, ocr_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         envelope.source_type,
@@ -873,7 +898,8 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
         envelope.redacted_text,
         envelope.source_ref,
         safeText || '',
-        JSON.stringify(safeMetadata)
+        JSON.stringify(safeMetadata),
+        ocrHash
       ]
     );
 
@@ -885,39 +911,41 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
       );
     }
 
-    await upsertRetrievalDoc({
-      docId: `event:${id}`,
-      sourceType: 'event',
-      eventId: id,
-      app: envelope.app,
-      timestamp: envelope.occurred_at,
-      text: [
-        envelope.source_type,
-        envelope.source,
-        envelope.app,
-        envelope.domain,
-        envelope.window_title,
-        envelope.title,
-        envelope.participants.join(' '),
-        envelope.topics.join(' '),
-        envelope.identifiers.join(' '),
-        envelope.text
-      ].filter(Boolean).join('\n'),
-      metadata: {
-        envelope,
-        data_source: safeMetadata.data_source
-      }
-    });
+    if (!isDuplicateOCR) {
+      await upsertRetrievalDoc({
+        docId: `event:${id}`,
+        sourceType: 'event',
+        eventId: id,
+        app: envelope.app,
+        timestamp: envelope.occurred_at,
+        text: [
+          envelope.source_type,
+          envelope.source,
+          envelope.app,
+          envelope.domain,
+          envelope.window_title,
+          envelope.title,
+          envelope.participants.join(' '),
+          envelope.topics.join(' '),
+          envelope.identifiers.join(' '),
+          envelope.text
+        ].filter(Boolean).join('\n'),
+        metadata: {
+          envelope,
+          data_source: safeMetadata.data_source
+        }
+      });
 
-    await indexEventChunks({
-      eventId: id,
-      eventType: type,
-      timestampISO: envelope.occurred_at,
-      date: dStr,
-      source,
-      text: safeText,
-      metadata: safeMetadata
-    });
+      await indexEventChunks({
+        eventId: id,
+        eventType: type,
+        timestampISO: envelope.occurred_at,
+        date: dStr,
+        source,
+        text: safeText,
+        metadata: safeMetadata
+      });
+    }
     
     // Dispatch to real-time cognitive router for high-priority micro-updates
     cognitiveRouter.dispatch(envelope);

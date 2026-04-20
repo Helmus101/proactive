@@ -14,6 +14,10 @@ const DEFAULT_SEED_LIMIT = 25;
 const DEFAULT_HOP_LIMIT = 10;
 const MAX_EXPANDED = 500;
 
+function estimateTokensHeuristic(text) {
+  return Math.ceil((text || '').length / 4);
+}
+
 function getEmbedding(row) {
   if (!row) return [];
   if (Array.isArray(row.embedding)) return row.embedding;
@@ -849,7 +853,7 @@ Is this context sufficient to provide a detailed and accurate answer?
 Respond with strict JSON: {"sufficient": true/false, "missing_info": "description of what is missing", "suggested_node_indices": [index of nodes that might have relevant edges]}
 `;
 
-  const result = await callLLM(prompt, apiKey, 0.1);
+  const result = await callLLM(prompt, apiKey, 0.1, { task: 'review' });
   return result || { sufficient: true };
 }
 
@@ -1250,23 +1254,41 @@ async function buildHybridGraphRetrieval({
     ...summarizeRetrievalThought(retrievalPlan)
   ];
 
+  const budget = retrievalPlan.context_budget_tokens || 2000;
+  let usedTokens = 0;
   const contextSections = [];
-  if (primarySeeds.length) {
-    contextSections.push(`PRIMARY SEARCH SEEDS:\n${primarySeeds.map((seed) => `- [${seed.layer || 'node'}] ${seed.title || seed.node_id}: ${String(seed.text || '').slice(0, 4000)}`).join('\n')}`);
-  }
-  if (hierarchicalExpansion.expandedNodes.length) {
-    contextSections.push(`HIERARCHICAL EXPANSION:\n${hierarchicalExpansion.expandedNodes.map((node) => `- [${node.layer}] ${node.title}: ${String(node.text || node.summary || '').slice(0, 4000)}`).join('\n')}`);
-  }
-  if (seeds.length) {
-    contextSections.push(`SEED NODES:\n${seeds.map((seed) => `- [${seed.layer || 'node'}] ${String(seed.text || '').slice(0, 180)}`).join('\n')}`);
-  }
-  if (graph.expandedNodes.length) {
-    contextSections.push(`EXPANDED GRAPH:\n${graph.expandedNodes.slice(0, MAX_EXPANDED).map((node) => `- [${node.layer}${node.subtype ? `/${node.subtype}` : ''}] ${node.title}${node.summary ? ` — ${node.summary}` : ''}`).join('\n')}`);
-  }
+
+  const addSection = (header, items, formatter) => {
+    if (!items || !items.length) return;
+    const formattedItems = [];
+    for (const item of items) {
+      const line = formatter(item);
+      const tokens = estimateTokensHeuristic(line);
+      if (usedTokens + tokens > budget) {
+        if (usedTokens < budget) {
+          const remaining = budget - usedTokens;
+          if (remaining > 20) {
+            formattedItems.push(line.slice(0, remaining * 4) + '... [TRUNCATED]');
+            usedTokens = budget;
+          }
+        }
+        break;
+      }
+      formattedItems.push(line);
+      usedTokens += tokens;
+    }
+    if (formattedItems.length) {
+      contextSections.push(`${header}:\n${formattedItems.join('\n')}`);
+    }
+  };
+
+  addSection('PRIMARY SEARCH SEEDS', primarySeeds, (seed) => `- [${seed.layer || 'node'}] ${seed.title || seed.node_id}: ${String(seed.text || '').slice(0, 4000)}`);
+  addSection('HIERARCHICAL EXPANSION', hierarchicalExpansion.expandedNodes, (node) => `- [${node.layer}] ${node.title}: ${String(node.text || node.summary || '').slice(0, 4000)}`);
+  addSection('SEED NODES', seeds, (seed) => `- [${seed.layer || 'node'}] ${String(seed.text || '').slice(0, 180)}`);
+  addSection('EXPANDED GRAPH', graph.expandedNodes.slice(0, MAX_EXPANDED), (node) => `- [${node.layer}${node.subtype ? `/${node.subtype}` : ''}] ${node.title}${node.summary ? ` — ${node.summary}` : ''}`);
+
   const allEdgePaths = [...graph.edgePaths, ...sourceRefEdges];
-  if (allEdgePaths.length) {
-    contextSections.push(`TRACE:\n${allEdgePaths.slice(0, 20).map((edge) => `- ${edge.from} -> ${edge.to} via ${edge.relation}${edge.trace_label ? ` (${edge.trace_label})` : ''}`).join('\n')}`);
-  }
+  addSection('TRACE', allEdgePaths.slice(0, 20), (edge) => `- ${edge.from} -> ${edge.to} via ${edge.relation}${edge.trace_label ? ` (${edge.trace_label})` : ''}`);
 
   const retrievalRunId = await logRetrievalRun({
     query,

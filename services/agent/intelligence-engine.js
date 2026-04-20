@@ -12,8 +12,15 @@ const { generateEmbedding, cosineSimilarity } = require('../embedding-engine');
 
 const DEEPSEEK_ENDPOINT = 'https://api.deepseek.com/v1/chat/completions';
 let lastAiParseLogAt = 0;
-const CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
 const MAX_CACHE_SIZE = 500;
+
+const DEFAULT_CACHE_TTL = 24 * 60 * 60 * 1000; // 24h
+const TASK_TTLS = {
+  suggestion: 1 * 60 * 60 * 1000,   // 1h
+  routing: 12 * 60 * 60 * 1000,    // 12h
+  synthesis: 24 * 60 * 60 * 1000,  // 24h
+  default: 24 * 60 * 60 * 1000
+};
 
 async function updateLlmMetrics(cached = false) {
   try {
@@ -53,6 +60,14 @@ async function pruneKVCache(type = 'llm_response', maxSize = MAX_CACHE_SIZE) {
 }
 
 async function pruneLlmCache() {
+  try {
+    // 1. Remove expired entries (absolute max 7 days to keep cache clean)
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    await db.runQuery('DELETE FROM kv_cache WHERE created_at < ? AND type = ?', [sevenDaysAgo, 'llm_response']);
+  } catch (e) {
+    console.warn('[Intelligence] Failed to prune expired entries:', e.message);
+  }
+
   await pruneKVCache('llm_response', MAX_CACHE_SIZE);
   // Also prune embeddings if they grow too large
   await pruneKVCache('embedding', 2000); 
@@ -163,8 +178,9 @@ async function callDeepSeek(prompt, apiKey, temperature = 0.3, options = {}) {
     const cacheKey = crypto.createHash('sha1').update(`${temperature}|${promptText.slice(0, 7000)}|${getLLMMaxTokens(options, 900)}`).digest('hex');
     
     // Check SQLite cache
+    const ttl = options.ttl || TASK_TTLS[options.task] || DEFAULT_CACHE_TTL;
     const cachedRow = await db.getQuery('SELECT value, created_at FROM kv_cache WHERE key = ? AND type = ?', [cacheKey, 'llm_response']);
-    if (cachedRow && (Date.now() - new Date(cachedRow.created_at).getTime()) < CACHE_TTL) {
+    if (cachedRow && (Date.now() - new Date(cachedRow.created_at).getTime()) < ttl) {
       await updateLlmMetrics(true);
       return JSON.parse(cachedRow.value);
     }
@@ -237,8 +253,9 @@ async function callOllama(prompt, config = {}, temperature = 0.3, options = {}) 
     const cacheKey = crypto.createHash('sha1').update(`ollama|${config.model}|${temperature}|${String(prompt || '').slice(0, 7000)}|${getLLMMaxTokens(options, 900)}`).digest('hex');
     
     // Check SQLite cache
+    const ttl = options.ttl || TASK_TTLS[options.task] || DEFAULT_CACHE_TTL;
     const cachedRow = await db.getQuery('SELECT value, created_at FROM kv_cache WHERE key = ? AND type = ?', [cacheKey, 'llm_response']);
-    if (cachedRow && (Date.now() - new Date(cachedRow.created_at).getTime()) < CACHE_TTL) {
+    if (cachedRow && (Date.now() - new Date(cachedRow.created_at).getTime()) < ttl) {
       await updateLlmMetrics(true);
       return JSON.parse(cachedRow.value);
     }
@@ -320,7 +337,7 @@ Items:
 ${itemsList.slice(0, 30).map((item, index) => `Item ${index + 1}: ${JSON.stringify(item).slice(0, 1200)}`).join('\n')}
 
 Return only valid JSON, nothing else.`;
-  const payload = await callLLM(prompt, normalizeLLMConfig(configOrApiKey), 0.2, { maxTokens: 500, economy: true });
+  const payload = await callLLM(prompt, normalizeLLMConfig(configOrApiKey), 0.2, { maxTokens: 500, economy: true, task: "suggestion" });
   if (!payload || !Array.isArray(payload.tasks)) return [];
   return payload.tasks.filter(Boolean).map((item, idx) => {
     const title = String(item.title || item.name || item.summary || item.text || '').trim();
@@ -357,7 +374,7 @@ Title: ${String(node.title || '').slice(0, 240)}
 Summary: ${String(node.summary || '').slice(0, 500)}
 Content: ${String(node.canonical_text || '').slice(0, 5000)}
 `;
-  const payload = await callLLM(prompt, normalizeLLMConfig(apiKey), 0.2, { maxTokens: 450, economy: true });
+  const payload = await callLLM(prompt, normalizeLLMConfig(apiKey), 0.2, { maxTokens: 450, economy: true, task: "synthesis" });
   if (payload && Array.isArray(payload.tldr)) {
     const limit = isEpisode ? 20 : 3;
     return payload.tldr.slice(0, limit).map(b => `• ${b.replace(/^•\s*/, '')}`).join('\n');
@@ -595,7 +612,7 @@ Keep title under 12 words. Keep summary to 1-3 sentences.
 Cluster events:
 ${JSON.stringify(blob)}`;
 
-      const payload = await callLLM(prompt, normalizeLLMConfig(llmConfigOrKey || process.env.DEEPSEEK_API_KEY || null), 0.2);
+      const payload = await callLLM(prompt, normalizeLLMConfig(llmConfigOrKey || process.env.DEEPSEEK_API_KEY || null), 0.2, { task: "synthesis" });
       const parsed = Array.isArray(payload) ? payload[0] : payload;
       const fallback = summarizeClusterFallback(group);
       const title = String(parsed?.title || fallback?.title || '').trim().slice(0, 220);
@@ -699,7 +716,7 @@ async function runDailyInsights(apiKey) {
     if (!strongClouds.length) return [];
 
     const prompt = `Promote 1-5 high-quality insights from these memory clouds. Return strict JSON array of {cloud_id, title, summary, confidence}.\nClouds:\n${JSON.stringify(strongClouds.map(c=>({id:c.id, title:c.title, summary:c.summary, confidence:c.confidence, repeated_count:c.metadata?.repeated_count||0})))} `;
-    const payload = await callLLM(prompt, normalizeLLMConfig(apiKey || process.env.DEEPSEEK_API_KEY || null), 0.2);
+    const payload = await callLLM(prompt, normalizeLLMConfig(apiKey || process.env.DEEPSEEK_API_KEY || null), 0.2, { task: "synthesis" });
     const rows = Array.isArray(payload) ? payload : [];
     const created = [];
     for (const item of rows) {
@@ -796,7 +813,7 @@ Return strict JSON:
 }
 `;
 
-    const payload = await callLLM(prompt, normalizeLLMConfig(apiKey || process.env.DEEPSEEK_API_KEY || null), 0.2);
+    const payload = await callLLM(prompt, normalizeLLMConfig(apiKey || process.env.DEEPSEEK_API_KEY || null), 0.2, { task: "synthesis" });
     if (!payload || !payload.title) return [];
 
     const title = String(payload.title).trim().slice(0, 180);

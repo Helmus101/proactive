@@ -43,8 +43,11 @@ function initDB() {
           timestamp TEXT NOT NULL,
           source TEXT NOT NULL,
           text TEXT,
-          metadata TEXT
+          metadata TEXT,
+          ocr_hash TEXT
         )`);
+
+        db.run(`CREATE INDEX IF NOT EXISTS idx_events_ocr_hash ON events(ocr_hash)`);
 
         db.run(`CREATE TABLE IF NOT EXISTS event_entities (
           event_id TEXT,
@@ -324,6 +327,15 @@ async function ensureSchemaMigrations() {
         `).catch(() => {});
         await runStatement(`CREATE INDEX IF NOT EXISTS idx_memory_nodes_anchor_date ON memory_nodes(anchor_date)`).catch(() => {});
         await runStatement(`CREATE INDEX IF NOT EXISTS idx_memory_nodes_anchor_at ON memory_nodes(anchor_at)`).catch(() => {});
+
+        // Migration for events table (ocr_hash)
+        const eventCols = await allStatement(`PRAGMA table_info(events)`).catch(() => []);
+        const eventExisting = new Set((eventCols || []).map((c) => c?.name).filter(Boolean));
+        if (!eventExisting.has('ocr_hash')) {
+          await runStatement(`ALTER TABLE events ADD COLUMN ocr_hash TEXT`).catch(() => {});
+          await runStatement(`CREATE INDEX IF NOT EXISTS idx_events_ocr_hash ON events(ocr_hash)`).catch(() => {});
+        }
+
         return;
       }
 
