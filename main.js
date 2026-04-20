@@ -105,8 +105,8 @@ function updatePerformanceState(next = {}) {
 
   if (oldMode !== newMode) {
     console.log(`[Performance] Mode changed from ${oldMode} to ${newMode}. Restarting capture timers.`);
-    startSensorCaptureLoop();
-    startPeriodicScreenshotCapture();
+    startSensorCaptureLoop(newMode);
+    startPeriodicScreenshotCapture(newMode);
   }
 }
 
@@ -1239,7 +1239,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     });
     
     // Throttle expensive background suggestion generation to avoid UI slowdown.
-    if ((Date.now() - lastCaptureSuggestionTriggerAt) >= CAPTURE_TRIGGER_MIN_INTERVAL_MS) {
+    const triggerInterval = isReducedLoadMode() ? CAPTURE_TRIGGER_MIN_INTERVAL_MS * 2 : CAPTURE_TRIGGER_MIN_INTERVAL_MS; if ((Date.now() - lastCaptureSuggestionTriggerAt) >= triggerInterval) {
       lastCaptureSuggestionTriggerAt = Date.now();
       setTimeout(() => {
         runSuggestionEngineJob().catch(err => 
@@ -1261,7 +1261,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   return event;
 }
 
-function startSensorCaptureLoop() {
+function startSensorCaptureLoop(mode = null) {
   const settings = getSensorSettings();
   if (sensorCaptureTimer) {
     clearInterval(sensorCaptureTimer);
@@ -1274,7 +1274,7 @@ function startSensorCaptureLoop() {
   });
 
   // Dynamic interval: 15m normal, 30m reduced
-  const isReduced = isReducedLoadMode();
+  const isReduced = (typeof mode !== "undefined" && mode === "reduced") || isReducedLoadMode();
   const intervalMs = isReduced ? 30 * 60 * 1000 : intervalMinutesToMs(settings.intervalMinutes);
 
   console.log(`[SensorCapture] Starting loop with interval: ${intervalMs / 60000}m (Reduced mode: ${isReduced})`);
@@ -1288,13 +1288,13 @@ function startSensorCaptureLoop() {
 }
 
 // Periodic screenshot capture every 30 seconds
-function startPeriodicScreenshotCapture() {
+function startPeriodicScreenshotCapture(mode = null) {
   if (periodicScreenshotTimer) {
     clearInterval(periodicScreenshotTimer);
     periodicScreenshotTimer = null;
   }
 
-  const isReduced = isReducedLoadMode();
+  const isReduced = (typeof mode !== "undefined" && mode === "reduced") || isReducedLoadMode();
   const intervalMs = isReduced ? 120000 : 30000; // 2m vs 30s
 
   console.log(`[Screenshot] Starting periodic screenshot capture every ${intervalMs / 1000}s (Reduced mode: ${isReduced})`);
