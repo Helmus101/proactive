@@ -7,8 +7,33 @@ const axios = require('axios');
 const { EventEmitter } = require('events');
 const crypto = require('crypto');
 const Store = require('electron-store');
+const db = require('../db');
 const store = new Store();
 let visionUnsupported = false;
+
+async function updateLlmMetrics(cached = false) {
+  try {
+    const key = 'llm_metrics';
+    const cachedRow = await db.getQuery('SELECT value FROM kv_cache WHERE key = ?', [key]);
+    let metrics = { total_calls: 0, cached_calls: 0, actual_calls: 0 };
+    if (cachedRow && cachedRow.value) {
+      metrics = JSON.parse(cachedRow.value);
+    } else {
+      const oldMetrics = store.get('llm_metrics');
+      if (oldMetrics) metrics = oldMetrics;
+    }
+    metrics.total_calls += 1;
+    if (cached) metrics.cached_calls += 1;
+    else metrics.actual_calls += 1;
+    await db.runQuery(
+      'INSERT OR REPLACE INTO kv_cache (key, value, type, created_at) VALUES (?, ?, ?, ?)',
+      [key, JSON.stringify(metrics), 'metrics', new Date().toISOString()]
+    );
+    store.set('llm_metrics', metrics);
+  } catch (e) {
+    console.warn('[Planner] Failed to update metrics:', e.message);
+  }
+}
 
 function getComputerUseProvider() {
   const preferred = String(process.env.COMPUTER_USE_PROVIDER || '').toLowerCase().trim();
@@ -209,14 +234,14 @@ async function callPlannerLLM(goal, history, observation, plannerContext = {}) {
   })).digest('hex');
 
   const CACHE_TTL = 30 * 60 * 1000; // 30 mins
-  const cache = store.get('llm_planner_cache') || {};
-  const cached = cache[cacheKey];
-  if (cached && (Date.now() - cached.at) < CACHE_TTL) {
-    const metrics = store.get('llm_metrics') || { total_calls: 0, cached_calls: 0, actual_calls: 0 };
-    metrics.total_calls += 1;
-    metrics.cached_calls += 1;
-    store.set('llm_metrics', metrics);
-    return cached.value;
+  try {
+    const cachedRow = await db.getQuery('SELECT value, created_at FROM kv_cache WHERE key = ? AND type = ?', [cacheKey, 'llm_planner_response']);
+    if (cachedRow && (Date.now() - new Date(cachedRow.created_at).getTime()) < CACHE_TTL) {
+      await updateLlmMetrics(true);
+      return JSON.parse(cachedRow.value);
+    }
+  } catch (e) {
+    console.warn('[Planner] Cache lookup failed:', e.message);
   }
 
   const prompt = `
@@ -445,22 +470,20 @@ Rules:
       visionUnsupported = true;
       const fallbackRes = await makeRequest(false);
       if (fallbackRes && fallbackRes.action) {
-        const metrics = store.get('llm_metrics') || { total_calls: 0, cached_calls: 0, actual_calls: 0 };
-        metrics.total_calls += 1;
-        metrics.actual_calls += 1;
-        store.set('llm_metrics', metrics);
-        cache[cacheKey] = { at: Date.now(), value: fallbackRes };
-        store.set('llm_planner_cache', cache);
+        await updateLlmMetrics(false);
+        await db.runQuery(
+          'INSERT OR REPLACE INTO kv_cache (key, value, type, created_at) VALUES (?, ?, ?, ?)',
+          [cacheKey, JSON.stringify(fallbackRes), 'llm_planner_response', new Date().toISOString()]
+        );
       }
       return fallbackRes;
     }
     if (res && res.action) {
-      const metrics = store.get('llm_metrics') || { total_calls: 0, cached_calls: 0, actual_calls: 0 };
-      metrics.total_calls += 1;
-      metrics.actual_calls += 1;
-      store.set('llm_metrics', metrics);
-      cache[cacheKey] = { at: Date.now(), value: res };
-      store.set('llm_planner_cache', cache);
+      await updateLlmMetrics(false);
+      await db.runQuery(
+        'INSERT OR REPLACE INTO kv_cache (key, value, type, created_at) VALUES (?, ?, ?, ?)',
+        [cacheKey, JSON.stringify(res), 'llm_planner_response', new Date().toISOString()]
+      );
     }
     return res;
   } catch (e) {
