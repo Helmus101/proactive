@@ -34,11 +34,11 @@ function warnEmbeddingFallbackOnce(message) {
 
 async function generateEmbedding(text, apiKey = process.env.OPENAI_API_KEY) {
   if (!text) return localDeterministicEmbedding('');
-  
+
   // 1. Hash the input text for cache lookup
   const cleanText = String(text).slice(0, 8000);
   const hash = crypto.createHash('sha256').update(cleanText).digest('hex');
-  
+
   // 2. Check local SQLite cache
   try {
     const cached = await db.getQuery('SELECT value FROM kv_cache WHERE key = ? AND type = ?', [hash, 'embedding']);
@@ -97,6 +97,103 @@ async function generateEmbedding(text, apiKey = process.env.OPENAI_API_KEY) {
   }
 }
 
+/**
+ * Calculate sentiment score from text using heuristic analysis
+ * Returns float -1.0 to 1.0
+ * -1.0 = highly negative, 0.0 = neutral, 1.0 = highly positive
+ */
+function calculateSentimentScore(text = '') {
+  const input = String(text || '').toLowerCase();
+
+  const positiveKeywords = [
+    'good', 'great', 'excellent', 'amazing', 'wonderful', 'fantastic', 'love', 'success', 'achieved',
+    'completed', 'fixed', 'working', 'solved', 'progress', 'breakthrough', 'excited', 'happy',
+    'efficient', 'elegant', 'beautiful', 'smooth', 'productive', 'accomplished'
+  ];
+
+  const negativeKeywords = [
+    'bad', 'terrible', 'awful', 'horrible', 'hate', 'failing', 'failed', 'error', 'bug', 'broken',
+    'stuck', 'frustrated', 'angry', 'blocked', 'issue', 'problem', 'critical', 'urgent', 'risk',
+    'delay', 'inefficient', 'slow', 'crash', 'timeout', 'unstable', 'worried', 'disappointed'
+  ];
+
+  let score = 0;
+  let matches = 0;
+
+  for (const word of positiveKeywords) {
+    const regex = new RegExp(`\\b${word}\\b`, 'g');
+    const count = (input.match(regex) || []).length;
+    if (count > 0) {
+      score += count;
+      matches += count;
+    }
+  }
+
+  for (const word of negativeKeywords) {
+    const regex = new RegExp(`\\b${word}\\b`, 'g');
+    const count = (input.match(regex) || []).length;
+    if (count > 0) {
+      score -= count;
+      matches += count;
+    }
+  }
+
+  if (matches === 0) return 0;
+
+  // Normalize to -1.0 to 1.0
+  const normalized = Math.max(-1, Math.min(1, score / Math.max(1, matches)));
+  return Math.round(normalized * 100) / 100;
+}
+
+/**
+ * Build semantic prepend header for embedding
+ * Encodes metadata into vector space so context travels with embeddings
+ * Example: "[APP: VS Code][CONTEXT: main.js][TIME: 2026-04-21T14:30Z][SENTIMENT: 0.5]"
+ */
+function buildSemanticPrependHeader(metadata = {}) {
+  const parts = [];
+
+  if (metadata.source_app) {
+    parts.push(`[APP: ${String(metadata.source_app).slice(0, 30)}]`);
+  }
+  if (metadata.app_id) {
+    parts.push(`[APP_ID: ${String(metadata.app_id).slice(0, 60)}]`);
+  }
+  if (metadata.data_source) {
+    parts.push(`[SOURCE: ${String(metadata.data_source).slice(0, 40)}]`);
+  }
+  if (metadata.context_title) {
+    parts.push(`[CONTEXT: ${String(metadata.context_title).slice(0, 40)}]`);
+  }
+  if (Array.isArray(metadata.entity_tags) && metadata.entity_tags.length) {
+    parts.push(`[ENTITIES: ${metadata.entity_tags.slice(0, 6).join(', ')}]`);
+  }
+  if (metadata.timestamp) {
+    parts.push(`[TIME: ${String(metadata.timestamp).slice(0, 19)}]`);
+  }
+  if (typeof metadata.sentiment_score === 'number') {
+    parts.push(`[SENTIMENT: ${metadata.sentiment_score.toFixed(2)}]`);
+  }
+  if (metadata.session_id) {
+    parts.push(`[SESSION: ${String(metadata.session_id).slice(0, 8)}]`);
+  }
+  if (metadata.activity_type) {
+    parts.push(`[ACTIVITY: ${String(metadata.activity_type).slice(0, 20)}]`);
+  }
+
+  return parts.join('');
+}
+
+/**
+ * Generate embedding with semantic metadata prepended
+ * This ensures metadata is baked into the vector coordinates
+ */
+async function generateSemanticEmbedding(text, metadata = {}, apiKey = process.env.OPENAI_API_KEY) {
+  const header = buildSemanticPrependHeader(metadata);
+  const textWithMetadata = header ? `${header} ${text}` : text;
+  return generateEmbedding(textWithMetadata, apiKey);
+}
+
 function cosineSimilarity(vecA, vecB) {
   if (!vecA || !vecB || vecA.length !== vecB.length) return 0;
   let dotProduct = 0;
@@ -113,5 +210,8 @@ function cosineSimilarity(vecA, vecB) {
 
 module.exports = {
   generateEmbedding,
+  generateSemanticEmbedding,
+  calculateSentimentScore,
+  buildSemanticPrependHeader,
   cosineSimilarity
 };

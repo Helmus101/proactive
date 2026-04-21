@@ -8,6 +8,20 @@ function safeText(value) {
   }
 }
 
+function getCallLLM() {
+  try {
+    const engine = require('./intelligence-engine');
+    if (!engine || typeof engine.callLLM !== 'function') {
+      console.warn('[retrieval-thought] callLLM not yet available during circular dependency');
+      return null;
+    }
+    return engine.callLLM;
+  } catch (e) {
+    console.warn('[retrieval-thought] Failed to load callLLM:', e.message);
+    return null;
+  }
+}
+
 function uniquePush(arr, value, limit = 15) {
   const next = String(value || '').replace(/\s+/g, ' ').trim();
   if (!next || arr.includes(next)) return;
@@ -24,8 +38,43 @@ const LEXICAL_STOPWORDS = new Set([
   'show', 'tell', 'give', 'find', 'based', 'latest', 'current', 'recent', 'context',
   'about', 'around', 'from', 'with', 'this', 'that', 'these', 'those', 'here', 'there',
   'focus', 'thing', 'things', 'stuff', 'the', 'and', 'for', 'into', 'onto', 'over',
-  'under', 'after', 'before', 'today', 'yesterday', 'tomorrow', 'tonight'
+  'under', 'after', 'before', 'today', 'yesterday', 'tomorrow', 'tonight',
+  'conversation'
 ]);
+
+const ENTITY_STOPWORDS = new Set([
+  'conversation',
+  'context',
+  'conversation context',
+  'original need',
+  'relevant evidence',
+  'source mode',
+  'search planning',
+  'retrieval',
+  'memory',
+  'web',
+  'chrome desktop',
+  'desktop',
+  'browser'
+]);
+
+function stripChatScaffolding(text = '') {
+  return safeText(text)
+    .replace(/\bConversation context:\s*/gi, ' ')
+    .replace(/^\s*-\s+/gm, ' ')
+    .replace(/\bOriginal need:\s*/gi, ' ')
+    .replace(/\bRelevant evidence mentions\b/gi, ' ')
+    .replace(/\bIt appears in\b/gi, ' ')
+    .replace(/\bcontext\b/gi, ' ');
+}
+
+function isUsefulEntityLabel(value = '') {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized || ENTITY_STOPWORDS.has(normalized)) return false;
+  if (/^(today|yesterday|this morning|this afternoon|tonight)$/i.test(value)) return false;
+  if (/^(conversation|context|memory|web|desktop|browser|chrome|safari|arc)$/i.test(value)) return false;
+  return true;
+}
 
 function isUsefulLexicalTerm(term) {
   const t = String(term || '').trim().toLowerCase();
@@ -76,9 +125,9 @@ function extractExactTokens(text) {
 }
 
 function extractNamedEntities(text) {
-  return [...safeText(text).matchAll(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b/g)]
+  return [...stripChatScaffolding(text).matchAll(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b/g)]
     .map((match) => String(match[1] || '').trim())
-    .filter((value) => value.length >= 3 && !/^(Today|Yesterday|This Morning|This Afternoon|Tonight)$/i.test(value))
+    .filter((value) => value.length >= 3 && isUsefulEntityLabel(value))
     .slice(0, 8);
 }
 
@@ -410,7 +459,7 @@ function sanitizeQueryList(queries = [], max = 15) {
 }
 
 function stripQuestionFormatting(text) {
-  return safeText(text)
+  return stripChatScaffolding(text)
     .replace(/^[\s]*(what(?:'s| is)?|how(?:'s| is)?|show me|tell me|give me|find)\b[:\s]*/i, '')
     .replace(/[?]+/g, ' ')
     .replace(/\s+/g, ' ')
@@ -423,12 +472,14 @@ function inferApps(text) {
   if (/\bgmail|email|inbox|thread|correspondence|mail\b/.test(lower)) apps.push('Gmail');
   if (/\bmessages|imessage|sms|text message|pap|whatsapp|signal|telegram\b/.test(lower)) apps.push('Messages');
   if (/\bslack|channel|dm|direct message\b/.test(lower)) apps.push('Slack');
-  if (/\bchrome|browser|extension|website|url|webpage|visited\b/.test(lower)) apps.push('Chrome');
+  if (/\bchrome|browser|extension|website|url|webpage|visited|youtube|video|trailer|watching|watched|playing\b/.test(lower)) apps.push('Chrome');
   if (/\bgithub|pull request|pr|repo|repository|commit|issue\b/.test(lower)) apps.push('GitHub');
   if (/\bdocs|document|doc|slides|deck|spreadsheet|sheets\b/.test(lower)) apps.push('Google Docs');
   if (/\bcalendar|meeting|agenda|invite|event|sync\b/.test(lower)) apps.push('Calendar');
   if (/\bnotion|page|workspace|database\b/.test(lower)) apps.push('Notion');
-  if (/\bcursor|vscode|code editor|coding|ide|editor\b/.test(lower)) apps.push('Cursor');
+  if (/\bcursor\b/.test(lower)) apps.push('Cursor');
+  if (/\bvscode|vs code|visual studio code\b/.test(lower)) apps.push('VSCode');
+  if (/\bcode editor|coding|ide|editor\b/.test(lower)) apps.push('Cursor', 'VSCode');
   if (/\bxcode|ios dev|swift\b/.test(lower)) apps.push('Xcode');
   if (/\bfigma|design|prototype\b/.test(lower)) apps.push('Figma');
   if (/\bzoom|teams|video call\b/.test(lower)) apps.push('Video');
@@ -444,10 +495,10 @@ function inferSurfaceFamilies(text, candidateType = '', appScope = [], sourceSco
   if (/\b(calendar|meeting|agenda|attendees|invite|event)\b/.test(lower) || (Array.isArray(sourceScope) && sourceScope.includes('calendar'))) {
     families.push('calendar');
   }
-  if (/\b(cursor|code|commit|pr|pull request|diff|tsx|ts|js|json|manifest|schema|function|handler|error|exception|stack trace|extension)\b/.test(lower)) {
+  if (/\b(cursor|vscode|vs code|visual studio code|code|commit|pr|pull request|diff|tsx|ts|js|json|manifest|schema|function|handler|error|exception|stack trace|extension)\b/.test(lower)) {
     families.push('coding');
   }
-  if (/\b(chrome|safari|browser|dashboard|search|landing page|metrics|headline|website|page|waitlist|signup|sign up|form|ui)\b/.test(lower) || (Array.isArray(sourceScope) && sourceScope.includes('desktop'))) {
+  if (/\b(chrome|safari|browser|dashboard|search|landing page|metrics|headline|website|page|waitlist|signup|sign up|form|ui|youtube|video|trailer|watching|watched|playing)\b/.test(lower) || (Array.isArray(sourceScope) && sourceScope.includes('desktop'))) {
     families.push('browser');
   }
   return safeUnique(families, 3);
@@ -559,14 +610,18 @@ async function buildMultiAngleQueryBundle(baseText, {
 
   if (apiKey && !economyMode) {
     const prompt = `[System]
-Router/Query Generator. 
+Router/Query Generator.
 1. Source: "memory", "web", or "hybrid".
 2. Queries: 15 vector search queries for memory.
 Include: Literal, Decomposed (sub-tasks), Expanded (synonyms), Contextual (apps/site), Thematic (project).
 Return JSON: {"source_mode": "memory"|"web"|"hybrid", "queries": ["q1",...]}
 User: "${baseText.replace(/"/g, '\\"')}"`;
     try {
-      const result = await callLLM(prompt, apiKey, 0.3, { maxTokens: 500, economy: economyMode, task: 'routing' });
+      const llm = getCallLLM();
+      if (typeof llm !== 'function') {
+        throw new Error('callLLM unavailable');
+      }
+      const result = await llm(prompt, apiKey, 0.3, { maxTokens: 500, economy: economyMode, task: 'routing' });
       if (result && Array.isArray(result.queries)) {
         finalQueries = result.queries.slice(0, 15);
       }
@@ -725,10 +780,10 @@ function buildCrossLayerQueries(decomposition) {
 
   // Episodic: Specific events and actions
   queries.push(`${base} ${terms[1] || 'recent action'}`.trim());
-  
+
   // Semantic: Conceptual knowledge and facts
   queries.push(`${base} ${cluster.replace(/_/g, ' ')} context`.trim());
-  
+
   // Core: Long-term patterns and importance
   queries.push(`${base} significance and patterns`.trim());
 
@@ -737,17 +792,17 @@ function buildCrossLayerQueries(decomposition) {
 
 function inferIntent(text, mode, candidateType = '') {
   const lower = `${safeText(text)} ${safeText(candidateType)}`.toLowerCase();
-  
+
   // Fact: point-in-time recovery
   if (/\b(what was|what did|where is|exact|verbatim|quote|when|at what time|on [A-Z][a-z]+)\b/.test(lower)) {
     return 'fact';
   }
-  
+
   // Proactive: future-looking/actionable
   if (/\b(should|next|action|todo|plan|prepare|prep|upcoming|future|suggest)\b/.test(lower) || mode === 'suggestion') {
     return 'proactive';
   }
-  
+
   // State: current/ongoing status
   return 'state';
 }
@@ -766,7 +821,7 @@ function inferPreferredSourceTypes(text, candidateType = '') {
   const preferred = [];
   if (/\bemail|gmail|thread|reply|message|inbox|correspondence\b/.test(lower)) preferred.push('communication');
   if (/\bmeeting|calendar|agenda|attendees|event|sync\b/.test(lower)) preferred.push('calendar');
-  if (/\bwhat was i doing|what happened|extension|chrome|cursor|screen|desktop|activity|visited\b/.test(lower)) preferred.push('desktop', 'communication', 'calendar');
+  if (/\bwhat was i doing|what happened|what am i doing|just watching|watching|watched|trailer|video|youtube|extension|chrome|cursor|vscode|vs code|screen|desktop|activity|visited\b/.test(lower)) preferred.push('desktop', 'communication', 'calendar');
   if (/\bdecision|decided|choice|resolution\b/.test(lower)) preferred.push('decision');
   if (/\bfact|detail|specific|verbatim|quote\b/.test(lower)) preferred.push('fact');
   if (/\btask|todo|action|plan|next steps\b/.test(lower)) preferred.push('task');
@@ -778,13 +833,92 @@ function inferHardSourceTypes(text, candidateType = '') {
   const lower = `${safeText(text)} ${safeText(candidateType)}`.toLowerCase();
   if (/\bemail|gmail|thread|reply|subject|sender|from:|to:\b/.test(lower)) return ['communication'];
   if (/\bmeeting|calendar|agenda|attendees|invite|event\b/.test(lower)) return ['calendar'];
-  if (/\bbrowser history|visited|website|page|url|domain\b/.test(lower)) return ['desktop'];
+  if (/\bbrowser history|visited|website|page|url|domain|trailer|watching|watched|video|youtube|what was i doing|what am i doing\b/.test(lower)) return ['desktop'];
   return null;
+}
+
+function inferHardMetadataFilters(text, {
+  apps = [],
+  sourceTypes = [],
+  lexicalTerms = [],
+  candidateType = ''
+} = {}) {
+  const source = `${stripChatScaffolding(text)} ${safeText(candidateType)}`;
+  const lower = source.toLowerCase();
+  const appIds = [];
+  if (/\b(vscode|visual studio code)\b/.test(lower)) appIds.push('com.microsoft.vscode');
+  if (/\bcursor\b/.test(lower)) appIds.push('com.todesktop.230313mzl4w4u92');
+  if (/\bchrome|youtube|video|trailer|watching|watched|playing\b/.test(lower)) appIds.push('com.google.chrome');
+  if (/\bsafari\b/.test(lower)) appIds.push('com.apple.safari');
+  if (/\bgmail|email|mail\b/.test(lower)) appIds.push('com.google.gmail');
+  if (/\bslack\b/.test(lower)) appIds.push('com.tinyspeck.slackmacgap');
+
+  const contentTypes = [];
+  if (/\b(code|bug|websocket|manifest|function|handler|stack trace|error|vscode|cursor)\b/.test(lower)) contentTypes.push('code');
+  if (/\b(email|gmail|thread|reply|subject|from:|to:)\b/.test(lower)) contentTypes.push('email');
+  if (/\b(slack|message|dm|chat)\b/.test(lower)) contentTypes.push('chat');
+  if (/\b(calendar|meeting|agenda|invite|attendee)\b/.test(lower)) contentTypes.push('calendar');
+  if (/\b(browser|website|url|visited|page|chrome|safari)\b/.test(lower)) contentTypes.push('browser_page');
+  if (/\b(youtube|video|trailer|watching|watched|playing)\b/.test(lower)) contentTypes.push('browser_page', 'video');
+
+  const dataSources = [];
+  if (/\b(ocr|screenshot|screen|capture|visible|image|desktop|window text)\b/.test(lower)) {
+    dataSources.push('screenshot_ocr');
+  }
+  if (/\b(what was i doing|what am i doing|just watching|watching|watched|trailer|video|youtube|playing|vscode|vs code|cursor)\b/.test(lower)) {
+    dataSources.push('screenshot_ocr', 'raw_event', 'browser_history');
+  }
+  if (/\b(exact|verbatim|quote|quoted|precise|wording|raw|line by line)\b/.test(lower)) {
+    dataSources.push('raw_event');
+  }
+
+  const entityTags = safeUnique([
+    ...extractNamedEntities(source),
+    ...extractExactTokens(source).filter((item) => /@|[._/-]/.test(item))
+  ].filter(isUsefulEntityLabel), 12);
+
+  return {
+    app: apps?.length ? apps : null,
+    app_id: appIds.length ? safeUnique(appIds, 6) : null,
+    source_types: sourceTypes?.length ? sourceTypes : null,
+    data_source: dataSources.length ? safeUnique(dataSources, 4) : null,
+    content_type: contentTypes.length ? safeUnique(contentTypes, 6) : null,
+    entity_tags: entityTags.length ? entityTags : null
+  };
+}
+
+function buildHypotheticalDocument(text, {
+  apps = [],
+  sourceTypes = [],
+  lexicalTerms = [],
+  candidateType = ''
+} = {}) {
+  const cleaned = stripQuestionFormatting(text);
+  const terms = safeUnique([
+    ...extractNamedEntities(text),
+    ...extractExactTokens(text),
+    ...(Array.isArray(lexicalTerms) ? lexicalTerms : []),
+    ...normalizeTerms(cleaned).slice(0, 6)
+  ], 10);
+  const surface = safeUnique([
+    ...(Array.isArray(apps) ? apps : []),
+    ...(Array.isArray(sourceTypes) ? sourceTypes : []),
+    ...inferSurfaceFamilies(text, candidateType, apps, sourceTypes)
+  ], 6).join(' ');
+  const technical = inferTechnicalHints(text).slice(0, 4).join(' ');
+  const outcome = inferOutcomeTerms(text, candidateType).slice(0, 3).join(' ');
+  return [
+    terms.length ? `Relevant evidence mentions ${terms.join(', ')}.` : '',
+    surface ? `It appears in ${surface} context.` : '',
+    technical ? `Nearby details include ${technical}.` : '',
+    outcome ? `The answer should recover ${outcome}.` : '',
+    cleaned ? `Original need: ${cleaned}.` : ''
+  ].filter(Boolean).join(' ');
 }
 
 function inferSummaryVsRaw(text) {
   const lower = safeText(text).toLowerCase();
-  if (/\b(exact|verbatim|quote|quoted|precise|wording|show me the email|exact email|exact message|what did .* say|ocr|screenshot|image|reading from|screen|capture|text in|visible)\b/.test(lower)) {
+  if (/\b(exact|verbatim|quote|quoted|precise|wording|show me the email|exact email|exact message|what did .* say|ocr|screenshot|image|reading from|screen|capture|text in|visible|what was i doing|what am i doing|just watching|watching|watched|trailer|video|youtube|playing|open in vscode|working on in vscode)\b/.test(lower)) {
     return 'raw';
   }
   if (/\b(status|progress|update|where do things stand|what's the status|how is .* going|what did i work on|summary)\b/.test(lower)) {
@@ -798,8 +932,6 @@ function inferSummaryVsRaw(text) {
 
 function shouldDefaultRecentWindow(text, mode, normalizedDateRange) {
   if (mode !== 'chat' || normalizedDateRange) return false;
-  const lower = safeText(text).toLowerCase();
-  if (/\b(exact|verbatim|quote|quoted|precise|wording)\b/.test(lower)) return false;
   return true;
 }
 
@@ -844,8 +976,8 @@ function inferRouterDecision(text, llmSourceMode, webGate) {
     sourceMode = 'memory_only';
     routerReason = 'The request is asking for a personal bio/profile grounded in memory and prior context.';
   } else if (llmSourceMode === 'web') {
-    sourceMode = 'memory_then_web';
-    routerReason = 'The structured router classified this as external or current information, but memory is searched first and web corroboration follows if needed.';
+    sourceMode = 'web_only';
+    routerReason = 'The structured router classified this as external or current information, so web retrieval is prioritized.';
   } else if (llmSourceMode === 'hybrid') {
     sourceMode = 'memory_then_web';
     routerReason = 'The structured router classified this as needing memory context plus external corroboration.';
@@ -853,8 +985,8 @@ function inferRouterDecision(text, llmSourceMode, webGate) {
     sourceMode = 'memory_then_web';
     routerReason = 'The request mixes personal context with current or public information.';
   } else if (asksCurrentWorld && !looksPersonal && !asksLifeContext) {
-    sourceMode = 'memory_then_web';
-    routerReason = 'The request appears focused on current or public world knowledge, so memory is searched first and web corroboration follows if needed.';
+    sourceMode = 'web_only';
+    routerReason = 'The request appears focused on current or public world knowledge, so web retrieval is prioritized.';
   } else if (looksPersonal || asksLifeContext) {
     sourceMode = 'memory_only';
     routerReason = 'The request appears focused on personal activity, memory, or prior context.';
@@ -909,8 +1041,6 @@ function buildMessageQueries(baseText, { max = 5, candidateType = '' } = {}) {
   return queries.filter(Boolean).slice(0, max);
 }
 
-const { callLLM } = require('./intelligence-engine');
-
 async function buildRetrievalThought({
   query = '',
   mode = 'chat',
@@ -944,7 +1074,7 @@ async function buildRetrievalThought({
   const webGate = inferWebGate(query || mergedText);
   const preferredSourceTypes = inferPreferredSourceTypes(mergedText || query, candidateType);
   const hardSourceTypes = inferHardSourceTypes(mergedText || query, candidateType);
-  
+
   const requiresDeepContext = /\b(relationship|pattern|habit|preference|long-term|study habits|multi-hop|recurring|theme|trend|habitual|regularly|typical)\b/i.test(mergedText || query);
 
   const structuredQueries = await buildMultiAngleQueryBundle(mergedText || query, {
@@ -958,7 +1088,7 @@ async function buildRetrievalThought({
   let semanticQueries = Array.isArray(structuredQueries?.semantic_queries) && structuredQueries.semantic_queries.length === 15
     ? structuredQueries.semantic_queries
     : sanitizeQueryList(structuredQueries?.semantic_queries || [], 15);
-  
+
   if (semanticQueries.length < 15) {
     const filler = sanitizeQueryList(fallbackSemanticQueries(mergedText || query, candidateType, 15), 15);
     for (const q of filler) {
@@ -966,14 +1096,46 @@ async function buildRetrievalThought({
       if (semanticQueries.length >= 15) break;
     }
   }
-  
+
+  const isSimpleSummaryQuery = summaryVsRaw === 'summary' && !requiresDeepContext && /\b(status|update|progress|overview|summary|how is|what'?s the status)\b/i.test(mergedText || query);
+  if (isSimpleSummaryQuery) {
+    if (semanticQueries.length > 7) semanticQueries = semanticQueries.slice(0, 7);
+    while (semanticQueries.length < 5) {
+      const filler = fallbackSemanticQueries(mergedText || query, candidateType, 5);
+      for (const q of filler) {
+        uniquePush(semanticQueries, q, 7);
+        if (semanticQueries.length >= 5) break;
+      }
+      if (semanticQueries.length >= 5) break;
+    }
+  }
+
   const messageQueries = [];
   const intent = inferIntent(query || mergedText, mode, candidateType);
   const entryMode = inferEntryMode(query || mergedText, intent, mode);
   const alpha = (summaryVsRaw === 'raw' || entryMode === 'query_first') ? 0.35 : 0.65;
   const reasoning = [];
   const lexicalTerms = buildLexicalTerms(mergedText || query);
-  
+  const hypotheticalDocument = buildHypotheticalDocument(mergedText || query, {
+    apps,
+    sourceTypes: hardSourceTypes || preferredSourceTypes || [],
+    lexicalTerms,
+    candidateType
+  });
+  const hydeQuery = sanitizeQueryForEmbedding(hypotheticalDocument);
+  if (hydeQuery) {
+    semanticQueries = [hydeQuery, ...semanticQueries.filter((item) => item !== hydeQuery)].slice(0, 15);
+    if (isSimpleSummaryQuery && semanticQueries.length > 7) {
+      semanticQueries = semanticQueries.slice(0, 7);
+    }
+  }
+  const metadataFilters = inferHardMetadataFilters(mergedText || query, {
+    apps,
+    sourceTypes: hardSourceTypes || preferredSourceTypes || [],
+    lexicalTerms,
+    candidateType
+  });
+
   const temporalReasoning = [];
   const llmSource = structuredQueries?.query_bundle?.source_mode || null;
   const router = inferRouterDecision(mergedText || query, llmSource, webGate);
@@ -1018,6 +1180,8 @@ async function buildRetrievalThought({
     temporalReasoning.push('No temporal window inferred from the user phrasing.');
   }
   reasoning.push('Embedding rule: relative time and vague deixis are handled by filters, not semantic queries.');
+  reasoning.push('Search funnel: metadata prefilter -> BM25/dense vector hybrid -> graph expansion -> reranker gold set.');
+  if (hypotheticalDocument) reasoning.push('HYDE: added a hypothetical answer-shaped query to reduce query/document mismatch.');
   reasoning.push(`Router reason: ${router.routerReason}`);
   reasoning.push(`Web gate: ${webGate.webGateReason}`);
 
@@ -1043,6 +1207,8 @@ async function buildRetrievalThought({
     semantic_queries: semanticQueries,
     message_queries: messageQueries,
     lexical_terms: lexicalTerms,
+    hypothetical_documents: hypotheticalDocument ? [hypotheticalDocument] : [],
+    metadata_filters: metadataFilters,
     query_sets: querySets,
     search_phases: [
       {
@@ -1057,11 +1223,12 @@ async function buildRetrievalThought({
       }
     ],
     query_bundle: structuredQueries?.query_bundle || null,
-    query_debug: structuredQueries?.debug || {
-      inferred_entities: extractNamedEntities(mergedText || query),
-      inferred_surfaces: inferSurfaceFamilies(mergedText || query, candidateType, apps, hardSourceTypes || preferredSourceTypes || []),
-      inferred_technical_hints: inferTechnicalHints(mergedText || query),
-      stripped_noise_terms: extractNoiseTerms(mergedText || query)
+    query_debug: {
+      ...(structuredQueries?.debug || {}),
+      inferred_entities: (structuredQueries?.debug?.inferred_entities || extractNamedEntities(mergedText || query)),
+      inferred_surfaces: (structuredQueries?.debug?.inferred_surfaces || inferSurfaceFamilies(mergedText || query, candidateType, apps, hardSourceTypes || preferredSourceTypes || [])),
+      inferred_technical_hints: (structuredQueries?.debug?.inferred_technical_hints || inferTechnicalHints(mergedText || query)),
+      stripped_noise_terms: (structuredQueries?.debug?.stripped_noise_terms || extractNoiseTerms(mergedText || query))
     },
     preferred_source_types: preferredSourceTypes,
     filters,
@@ -1075,8 +1242,8 @@ async function buildRetrievalThought({
       attempted: false,
       widened: false
     },
-    seed_limit: 30,
-    hop_limit: 10,
+    seed_limit: 12,
+    hop_limit: 3,
     context_budget_tokens: mode === 'suggestion' ? (economyMode ? 600 : 900) : (economyMode ? 1200 : 2000),
     search_queries: semanticQueries,
     search_queries_messages: messageQueries,

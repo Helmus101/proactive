@@ -88,7 +88,10 @@ async function upsertMemoryNode({
   updatedAt = null,
   embedding = [],
   anchorDate = null,
-  anchorAt = null
+  anchorAt = null,
+  importance = null,
+  connectionCount = null,
+  lastReheated = null
 }) {
   const now = new Date().toISOString();
   const titleText = String(title || '').trim();
@@ -97,16 +100,37 @@ async function upsertMemoryNode({
   const metadataObj = asObj(metadata);
   const resolvedAnchorAt = anchorAt || metadataObj.anchor_at || metadataObj.latest_activity_at || metadataObj.occurred_at || metadataObj.timestamp || createdAt || now;
   const resolvedAnchorDate = anchorDate || asObj(metadata).anchor_date || (resolvedAnchorAt ? resolvedAnchorAt.slice(0, 10) : now.slice(0, 10));
+
+  // Calculate importance: 1-10 scale based on connection density
+  // importance = min(10, 1 + (connection_count / 10))
+  const sourceRefsArray = Array.isArray(sourceRefs) ? sourceRefs : [];
+  const connCount = typeof connectionCount === 'number' ? connectionCount : sourceRefsArray.length;
+  let nodeImportance = importance;
+  if (typeof nodeImportance !== 'number') {
+    nodeImportance = Math.min(10, Math.max(1, 1 + Math.floor(connCount / 10)));
+  }
+
+  // Track when node was last reheated (last time evidence pointed to it)
+  const nodeLastReheated = lastReheated || metadataObj.last_reheated || now;
+
   const resolvedMetadata = {
     ...metadataObj,
+    node_type: metadataObj.node_type || subtype || layer,
     anchor_at: resolvedAnchorAt,
     anchor_date: resolvedAnchorDate,
-    timestamp: metadataObj.timestamp || resolvedAnchorAt
+    timestamp: metadataObj.timestamp || resolvedAnchorAt,
+    last_seen: metadataObj.last_seen || metadataObj.latest_activity_at || resolvedAnchorAt,
+    importance: nodeImportance,
+    priority: metadataObj.priority ?? nodeImportance,
+    connection_count: connCount,
+    last_reheated: nodeLastReheated,
+    sentiment: metadataObj.sentiment ?? metadataObj.sentiment_score ?? null
   };
+
   await db.runQuery(
     `INSERT OR REPLACE INTO memory_nodes
-     (id, layer, subtype, title, summary, canonical_text, confidence, status, source_refs, metadata, graph_version, created_at, updated_at, embedding, anchor_date, anchor_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     (id, layer, subtype, title, summary, canonical_text, confidence, status, source_refs, metadata, graph_version, created_at, updated_at, embedding, anchor_date, anchor_at, importance, connection_count, last_reheated)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       layer,
@@ -116,14 +140,17 @@ async function upsertMemoryNode({
       canonical,
       Number(confidence || 0),
       status || 'active',
-      JSON.stringify(Array.isArray(sourceRefs) ? sourceRefs : []),
+      JSON.stringify(sourceRefsArray),
       JSON.stringify(resolvedMetadata),
       graphVersion,
       createdAt || now,
       updatedAt || now,
       JSON.stringify(Array.isArray(embedding) ? embedding : []),
       resolvedAnchorDate,
-      resolvedAnchorAt
+      resolvedAnchorAt,
+      nodeImportance,
+      connCount,
+      nodeLastReheated
     ]
   );
 
@@ -132,7 +159,7 @@ async function upsertMemoryNode({
     id,
     type: layer,
     subtype,
-    sourceRef: Array.isArray(sourceRefs) ? sourceRefs[0] || null : null,
+    sourceRef: sourceRefsArray[0] || null,
     version: graphVersion,
     data: {
       title: titleText,
@@ -140,7 +167,10 @@ async function upsertMemoryNode({
       canonical_text: canonical,
       confidence: Number(confidence || 0),
       status: status || 'active',
-      source_refs: Array.isArray(sourceRefs) ? sourceRefs : [],
+      source_refs: sourceRefsArray,
+      importance: nodeImportance,
+      connection_count: connCount,
+      last_reheated: nodeLastReheated,
       ...resolvedMetadata
     },
     embedding
@@ -253,6 +283,33 @@ function buildRetrievalDocText({ title = '', summary = '', text = '', data = {} 
   ].filter(Boolean).join('\n');
 }
 
+function buildRetrievalDocBreadcrumb(metadata = {}, fallback = {}) {
+  const meta = asObj(metadata);
+  const envelope = asObj(meta.envelope);
+  const app = meta.source_app || meta.app || envelope.app || fallback.app || '';
+  const appId = meta.app_id || envelope.app_id || envelope.metadata?.app_id || '';
+  const dataSource = meta.data_source || envelope.metadata?.data_source || meta.storage_data_source || '';
+  const context = meta.context_title || meta.window_title || envelope.window_title || meta.title || '';
+  const timestamp = meta.occurred_at || meta.anchor_at || envelope.occurred_at || fallback.timestamp || '';
+  const file = meta.file || meta.path || envelope.metadata?.file || envelope.metadata?.path || '';
+  const surface = meta.content_type || envelope.metadata?.content_type || meta.layer || '';
+  const activity = meta.activity_type || envelope.metadata?.activity_type || '';
+  const people = Array.isArray(meta.person_labels) && meta.person_labels.length
+    ? meta.person_labels
+    : (Array.isArray(envelope.participants) ? envelope.participants : []);
+  return [
+    dataSource ? `[SOURCE: ${String(dataSource).slice(0, 40)}]` : '',
+    app ? `[APP: ${String(app).slice(0, 40)}]` : '',
+    appId ? `[APP_ID: ${String(appId).slice(0, 60)}]` : '',
+    file ? `[FILE: ${String(file).slice(0, 80)}]` : '',
+    context ? `[CONTEXT: ${String(context).slice(0, 80)}]` : '',
+    timestamp ? `[TIME: ${String(timestamp).slice(0, 19)}]` : '',
+    surface ? `[SURFACE: ${String(surface).slice(0, 30)}]` : '',
+    activity ? `[ACTIVITY: ${String(activity).slice(0, 30)}]` : '',
+    people.length ? `[PEOPLE: ${people.slice(0, 5).join(', ')}]` : ''
+  ].filter(Boolean).join('');
+}
+
 async function upsertRetrievalDoc({
   docId,
   sourceType,
@@ -265,12 +322,25 @@ async function upsertRetrievalDoc({
 }) {
   const content = String(text || '').trim();
   if (!content) return;
+  const metadataObj = asObj(metadata);
+  const breadcrumb = metadataObj.retrieval_breadcrumb || buildRetrievalDocBreadcrumb(metadataObj, { app, timestamp });
+  const searchableContent = breadcrumb && !content.startsWith(breadcrumb)
+    ? `${breadcrumb}\n${content}`.trim()
+    : content;
+  const enrichedMetadata = {
+    ...metadataObj,
+    retrieval_breadcrumb: breadcrumb || metadataObj.retrieval_breadcrumb || null,
+    source_app: metadataObj.source_app || metadataObj.app || app || null,
+    app_id: metadataObj.app_id || null,
+    entity_tags: Array.isArray(metadataObj.entity_tags) ? metadataObj.entity_tags : (metadataObj.entity_labels || []),
+    occurred_at: metadataObj.occurred_at || metadataObj.anchor_at || timestamp || null
+  };
 
   await db.runQuery(
     `INSERT OR REPLACE INTO retrieval_docs
      (doc_id, source_type, node_id, event_id, app, timestamp, text, metadata)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-     [docId, sourceType, nodeId, eventId, app, timestamp, content, JSON.stringify(metadata || {})]
+     [docId, sourceType, nodeId, eventId, app, timestamp, searchableContent, JSON.stringify(enrichedMetadata)]
      );
      }
 

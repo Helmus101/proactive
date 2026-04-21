@@ -3,11 +3,13 @@ const assert = require('assert');
 const db = require('../services/db');
 const { scoreGraphFeedSeeds } = require('../services/agent/feed-generation');
 const { buildThinkingTrace } = require('../services/agent/chat-engine');
-const { normalizeEventEnvelope } = require('../services/ingestion');
+const { normalizeEventEnvelope, buildCanonicalEventMetadata, inferAppId } = require('../services/ingestion');
 const { clusterEnvelopes } = require('../services/agent/graph-derivation');
 const { buildRetrievalThought } = require('../services/agent/retrieval-thought-system');
 const { buildHybridGraphRetrieval } = require('../services/agent/hybrid-graph-retrieval');
+const { upsertRetrievalDoc } = require('../services/agent/graph-store');
 const { planNextAction, normalizeDesktopGoal } = require('../services/agent/agentPlanner');
+const { generateEmbedding } = require('../services/embedding-engine');
 
 async function testEpisodeSeedSourceRefs() {
   const originalAllQuery = db.allQuery;
@@ -150,6 +152,85 @@ function testSourceAwareTimestampNormalization() {
   assert.strictEqual(envelope.occurred_date, '2026-04-03');
 }
 
+function testCanonicalRawMetadataContract() {
+  const metadata = buildCanonicalEventMetadata({
+    id: 'evt_1',
+    type: 'EmailThread',
+    source: 'Gmail',
+    timestampISO: '2026-04-20T10:00:00.000Z',
+    date: '2026-04-20',
+    metadata: {
+      from: 'alex@example.com',
+      subject: 'Anqer launch',
+      app: 'Gmail'
+    },
+    entities: ['project:Anqer'],
+    participants: ['alex@example.com'],
+    topics: ['Anqer launch'],
+    sentimentScore: -0.25,
+    sessionId: 'sess_1',
+    status: 'pending'
+  });
+
+  assert.strictEqual(metadata.memory_schema_version, 2);
+  assert.strictEqual(metadata.source_app, 'Gmail');
+  assert.strictEqual(metadata.app_id, 'com.google.gmail');
+  assert.strictEqual(metadata.data_source, 'email_api');
+  assert.strictEqual(metadata.context_title, 'Anqer launch');
+  assert.ok(metadata.entity_tags.includes('project:Anqer'));
+  assert.ok(Array.isArray(metadata.entity_ids) && metadata.entity_ids.length >= 1);
+  assert.ok(Array.isArray(metadata.person_ids) && metadata.person_ids.length === 1);
+  assert.strictEqual(metadata.session_id, 'sess_1');
+  assert.strictEqual(metadata.sentiment_score, -0.25);
+  assert.strictEqual(metadata.status, 'pending');
+  assert.strictEqual(metadata.relationship_tier, 'network');
+  assert.strictEqual(metadata.social_half_life_days, 21);
+  assert.ok(metadata.retrieval_breadcrumb.includes('[SOURCE: email_api]'));
+  assert.ok(metadata.retrieval_breadcrumb.includes('[APP: Gmail]'));
+  assert.ok(metadata.retrieval_breadcrumb.includes('[APP_ID: com.google.gmail]'));
+  assert.ok(metadata.retrieval_breadcrumb.includes('[PEOPLE: alex@example.com]'));
+
+  assert.strictEqual(inferAppId('', { app_id: 'Google Chrome' }), 'com.google.chrome');
+  assert.strictEqual(inferAppId('', { app_id: 'VS Code' }), 'com.microsoft.vscode');
+}
+
+async function testRetrievalDocsStoreSearchableBreadcrumbs() {
+  const originalRunQuery = db.runQuery;
+  const writes = [];
+  db.runQuery = async (sql, params = []) => {
+    writes.push({ sql, params });
+    return true;
+  };
+
+  try {
+    await upsertRetrievalDoc({
+      docId: 'event:evt_1',
+      sourceType: 'event',
+      eventId: 'evt_1',
+      app: 'Gmail',
+      timestamp: '2026-04-20T10:00:00.000Z',
+      text: 'Fixed launch follow-up with Alex.',
+      metadata: {
+        source_app: 'Gmail',
+        context_title: 'Anqer launch',
+        person_labels: ['alex@example.com'],
+        content_type: 'email',
+        activity_type: 'viewing'
+      }
+    });
+
+    const insert = writes.find((entry) => /INSERT OR REPLACE INTO retrieval_docs/i.test(entry.sql));
+    assert.ok(insert, 'expected retrieval_docs insert');
+    assert.ok(String(insert.params[6]).includes('[APP: Gmail]'));
+    assert.ok(String(insert.params[6]).includes('[CONTEXT: Anqer launch]'));
+    const metadata = JSON.parse(insert.params[7]);
+    assert.strictEqual(metadata.retrieval_breadcrumb.includes('[PEOPLE: alex@example.com]'), true);
+    assert.strictEqual(metadata.source_app, 'Gmail');
+  } finally {
+    db.runQuery = originalRunQuery;
+  }
+}
+
 function testEpisodeAnchorStaysOnFirstDay() {
   const first = normalizeEventEnvelope({
     id: 'evt_email_1',
@@ -193,6 +274,9 @@ async function testRetrievalThoughtExtractsExactTerms() {
   assert.ok(thought.lexical_terms.includes('manifest.json'));
   assert.ok(thought.semantic_queries.some((item) => /manifest\.json/i.test(item)));
   assert.deepStrictEqual(thought.filters.source_types, ['communication']);
+  assert.ok(thought.metadata_filters?.app_id?.includes('com.google.gmail'));
+  assert.ok(thought.metadata_filters?.entity_tags?.some((item) => /alexandra@albertschool\.com/i.test(item)));
+  assert.ok(Array.isArray(thought.hypothetical_documents) && thought.hypothetical_documents.length === 1);
   assert.ok(thought.query_bundle);
   assert.ok(Array.isArray(thought.query_debug?.stripped_noise_terms));
   assert.ok(thought.query_debug.stripped_noise_terms.includes('yesterday'));
@@ -211,6 +295,7 @@ async function testRetrievalThoughtDefaultsToSevenDaySummaryWindow() {
   assert.ok(thought.applied_date_range?.end);
   assert.ok(thought.semantic_queries.length >= 5 && thought.semantic_queries.length <= 7);
   assert.ok(thought.semantic_queries.every((item) => !/\byesterday\b|\blast week\b|\bwhat(?:'s| is)\b/i.test(item)));
+  assert.ok(thought.reasoning.some((line) => /metadata prefilter/i.test(line)));
 }
 
 async function testRetrievalThoughtRoutesMemoryWebAndHybrid() {
@@ -242,11 +327,31 @@ async function testRetrievalThoughtBuildsCodingAndCommunicationAngles() {
   });
   assert.ok(Array.isArray(codingThought.query_debug?.inferred_technical_hints));
   assert.ok(codingThought.query_debug.inferred_technical_hints.length >= 1);
+  assert.ok(codingThought.metadata_filters?.content_type?.includes('code'));
 
   const messageThought = await buildRetrievalThought({
     query: 'Can you find the follow-up email from Sarah about the browser extension?'
   });
   assert.ok(messageThought.semantic_queries.length >= 1);
+  assert.ok(messageThought.metadata_filters?.content_type?.includes('email'));
+
+  const activityThought = await buildRetrievalThought({
+    query: 'according to memory what trailer was I just watching and what was I working on in VSCode today?'
+  });
+  assert.strictEqual(activityThought.summary_vs_raw, 'raw');
+  assert.ok(activityThought.filters?.source_types?.includes('desktop'));
+  assert.ok(activityThought.filters?.app?.some((item) => /chrome/i.test(item)));
+  assert.ok(activityThought.filters?.app?.some((item) => /vscode/i.test(item)));
+  assert.ok(activityThought.metadata_filters?.data_source?.includes('screenshot_ocr'));
+  assert.ok(activityThought.metadata_filters?.data_source?.includes('browser_history'));
+  assert.ok(activityThought.metadata_filters?.app_id?.includes('com.google.chrome'));
+  assert.ok(activityThought.metadata_filters?.app_id?.includes('com.microsoft.vscode'));
+
+  const contextualTrailerThought = await buildRetrievalThought({
+    query: 'what trailer did I watch today\n\nConversation context:\n- what trailer was i watching\n- what is the trailer i was watching'
+  });
+  const entityTags = contextualTrailerThought.metadata_filters?.entity_tags || [];
+  assert.ok(!entityTags.some((item) => /conversation|context/i.test(item)), 'chat scaffolding must not become a hard entity metadata filter');
 }
 
 async function testHybridRetrievalPrefersDownwardExpansion() {
@@ -389,6 +494,170 @@ async function testHybridRetrievalPrefersDownwardExpansion() {
   }
 }
 
+async function testHybridRetrievalUsesTextChunkVectorsWithMetadata() {
+  const originalAllQuery = db.allQuery;
+  const originalGetQuery = db.getQuery;
+  const originalRunQuery = db.runQuery;
+  const chunkText = '[SOURCE: email_api][APP: Gmail][APP_ID: com.google.gmail][TIME: 2026-04-20T10:00:00][ENTITIES: person:willem, topic:websocket] Willem mentioned websocket manifest permissions in the Anqer extension.';
+  const embedding = await generateEmbedding(chunkText, null);
+
+  db.allQuery = async (sql) => {
+    if (/FROM memory_nodes/i.test(sql)) return [];
+    if (/FROM retrieval_docs_fts/i.test(sql)) return [];
+    if (/FROM text_chunks/i.test(sql)) {
+      return [{
+        id: 'chk_evt_1_0',
+        event_id: 'evt_1',
+        node_id: null,
+        chunk_index: 0,
+        text: chunkText,
+        embedding: JSON.stringify(embedding),
+        timestamp: '2026-04-20T10:00:00.000Z',
+        date: '2026-04-20',
+        app: 'Gmail',
+        data_source: 'raw',
+        metadata: JSON.stringify({
+          event_type: 'EmailThread',
+          source_app: 'Gmail',
+          app_id: 'com.google.gmail',
+          data_source: 'email_api',
+          content_type: 'email',
+          entity_tags: ['person:willem', 'topic:websocket'],
+          person_labels: ['willem'],
+          occurred_at: '2026-04-20T10:00:00.000Z'
+        })
+      }];
+    }
+    if (/FROM events/i.test(sql)) return [];
+    if (/FROM memory_edges/i.test(sql)) return [];
+    return [];
+  };
+  db.getQuery = async () => null;
+  db.runQuery = async () => true;
+
+  try {
+    const retrieval = await buildHybridGraphRetrieval({
+      query: 'What websocket bug did Willem mention?',
+      options: {
+        retrieval_thought: {
+          mode: 'semantic',
+          strategy_mode: 'memory_only',
+          source_mode: 'memory_only',
+          router_reason: 'Personal memory request.',
+          summary_vs_raw: 'raw',
+          semantic_queries: [chunkText],
+          message_queries: [],
+          lexical_terms: ['websocket', 'willem'],
+          metadata_filters: {
+            app_id: ['com.google.gmail'],
+            entity_tags: ['willem']
+          },
+          filters: {
+            source_types: ['communication']
+          },
+          query_sets: { memory_queries: [chunkText], message_queries: [], web_queries: [] },
+          hop_limit: 1,
+          seed_limit: 3
+        }
+      },
+      seedLimit: 3,
+      hopLimit: 1
+    });
+
+    const evidenceText = JSON.stringify(retrieval.evidence || []);
+    assert.ok(/websocket manifest permissions/i.test(evidenceText), 'expected text chunk vector evidence to be retrieved');
+  } finally {
+    db.allQuery = originalAllQuery;
+    db.getQuery = originalGetQuery;
+    db.runQuery = originalRunQuery;
+  }
+}
+
+async function testHybridRetrievalMatchesLegacyDisplayNameAppIds() {
+  const originalAllQuery = db.allQuery;
+  const originalGetQuery = db.getQuery;
+  const originalRunQuery = db.runQuery;
+  const chunkText = '[SOURCE: screenshot_ocr][APP: Google Chrome][APP_ID: Google Chrome][TIME: 2026-04-21T13:38:28] Project Hail Mary - Official Trailer - YouTube - Audio playing.';
+  const embedding = await generateEmbedding(chunkText, null);
+
+  db.allQuery = async (sql) => {
+    if (/FROM memory_nodes/i.test(sql)) return [];
+    if (/FROM retrieval_docs_fts/i.test(sql)) return [];
+    if (/FROM text_chunks/i.test(sql)) {
+      return [{
+        id: 'chk_evt_trailer_0',
+        event_id: 'evt_trailer',
+        node_id: null,
+        chunk_index: 0,
+        text: chunkText,
+        embedding: JSON.stringify(embedding),
+        timestamp: '2026-04-21T13:38:28.000Z',
+        date: '2026-04-21',
+        app: 'Google Chrome',
+        data_source: 'raw_event',
+        metadata: JSON.stringify({
+          event_type: 'ScreenCapture',
+          source_app: 'Google Chrome',
+          app: 'Google Chrome',
+          app_id: 'Google Chrome',
+          data_source: 'raw_event',
+          storage_data_source: 'raw',
+          content_type: 'general',
+          occurred_at: '2026-04-21T13:38:28.000Z'
+        })
+      }];
+    }
+    if (/FROM events/i.test(sql)) return [];
+    if (/FROM memory_edges/i.test(sql)) return [];
+    return [];
+  };
+  db.getQuery = async () => null;
+  db.runQuery = async () => true;
+
+  try {
+    const retrieval = await buildHybridGraphRetrieval({
+      query: 'what trailer was I watching?',
+      options: {
+        retrieval_thought: {
+          mode: 'semantic',
+          strategy_mode: 'memory_only',
+          source_mode: 'memory_only',
+          router_reason: 'Personal raw memory request.',
+          summary_vs_raw: 'raw',
+          semantic_queries: [chunkText],
+          message_queries: [],
+          lexical_terms: ['trailer', 'youtube'],
+          metadata_filters: {
+            app_id: ['com.google.chrome'],
+            data_source: ['screenshot_ocr', 'raw_event', 'browser_history'],
+            content_type: ['browser_page', 'video']
+          },
+          filters: {
+            source_types: ['desktop'],
+            app: ['Chrome'],
+            prioritize_screen_capture: true
+          },
+          query_sets: { memory_queries: [chunkText], message_queries: [], web_queries: [] },
+          hop_limit: 1,
+          seed_limit: 3
+        }
+      },
+      seedLimit: 3,
+      hopLimit: 1
+    });
+
+    const evidenceText = JSON.stringify(retrieval.evidence || []);
+    assert.ok(/Project Hail Mary - Official Trailer/i.test(evidenceText), 'expected legacy Chrome app_id row to survive metadata filters');
+    assert.ok((retrieval.evidence || []).length >= 1, 'expected at least one raw evidence item');
+    assert.strictEqual(retrieval.diagnostics?.dropped_by_prioritize_screen_capture, 0, 'Chrome OCR rows must not be dropped as browser history');
+    assert.strictEqual(retrieval.diagnostics?.dropped_by_content_type, 0, 'general OCR rows must not be dropped by browser/video content filter');
+  } finally {
+    db.allQuery = originalAllQuery;
+    db.getQuery = originalGetQuery;
+    db.runQuery = originalRunQuery;
+  }
+}
+
 async function testAnswerChatQueryEmitsStructuredPipelineStages() {
   const originalAllQuery = db.allQuery;
   const ingestion = require('../services/ingestion');
@@ -416,7 +685,10 @@ async function testAnswerChatQueryEmitsStructuredPipelineStages() {
     web_queries: ['alex project'],
     lexical_terms: ['alex']
   });
-  hybrid.buildHybridGraphRetrieval = async () => ({
+  const hybridCalls = [];
+  hybrid.buildHybridGraphRetrieval = async (args = {}) => {
+    hybridCalls.push(args);
+    return ({
     retrieval_plan: {
       mode: 'semantic',
       source_mode: 'memory_only',
@@ -473,7 +745,8 @@ async function testAnswerChatQueryEmitsStructuredPipelineStages() {
     drilldown_refs: [],
     lazy_source_refs: [],
     temporal_reasoning: []
-  });
+    });
+  };
   db.allQuery = async () => [];
 
   try {
@@ -483,6 +756,15 @@ async function testAnswerChatQueryEmitsStructuredPipelineStages() {
     const result = await answerChatQuery({
       apiKey: null,
       query: 'What did I do with Alex?',
+      options: {
+        historical_summaries: {
+          '2026-04-20': {
+            narrative: 'Daily summary says Alex project happened.',
+            top_people: ['Alex'],
+            topics: ['project']
+          }
+        }
+      },
       onStep: (event) => steps.push(event)
     });
 
@@ -504,6 +786,10 @@ async function testAnswerChatQueryEmitsStructuredPipelineStages() {
     assert.ok(steps.every((item) => typeof item.status === 'string'));
     assert.ok(steps.find((item) => item.step === 'web_search' && item.status === 'completed'));
     assert.ok(Array.isArray(result.retrieval.stage_trace) && result.retrieval.stage_trace.length >= steps.length);
+    assert.ok(hybridCalls.length >= 1);
+    assert.ok(hybridCalls.every((call) => call.passiveOnly === false), 'chat retrieval should actively search vectors/nodes, not passive summaries first');
+    assert.strictEqual(result.retrieval.summary_context_used, false);
+    assert.ok(!/Daily Summary Snapshots/i.test(result.retrieval.contextText || ''), 'daily summaries should not be prepended when vector evidence is present');
   } finally {
     ingestion.ingestRawEvent = originalIngest;
     retrievalThoughtSystem.buildRetrievalThought = originalThought;
@@ -1039,12 +1325,16 @@ async function main() {
   await testEpisodeSeedSourceRefs();
   await testThinkingTraceShape();
   testSourceAwareTimestampNormalization();
+  testCanonicalRawMetadataContract();
+  await testRetrievalDocsStoreSearchableBreadcrumbs();
   testEpisodeAnchorStaysOnFirstDay();
   await testRetrievalThoughtExtractsExactTerms();
   await testRetrievalThoughtDefaultsToSevenDaySummaryWindow();
   await testRetrievalThoughtRoutesMemoryWebAndHybrid();
   await testRetrievalThoughtBuildsCodingAndCommunicationAngles();
   await testHybridRetrievalPrefersDownwardExpansion();
+  await testHybridRetrievalUsesTextChunkVectorsWithMetadata();
+  await testHybridRetrievalMatchesLegacyDisplayNameAppIds();
   await testAnswerChatQueryEmitsStructuredPipelineStages();
   await testAnswerChatQueryUsesWebFallbackForSparseWorldKnowledge();
   await testAnswerChatQueryUsesDrilldownEvidenceBeforeClarifying();

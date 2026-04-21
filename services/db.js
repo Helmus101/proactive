@@ -12,6 +12,44 @@ const fs = require('fs');
 
 let db;
 let schemaReadyPromise = null;
+let currentDbPath = null;
+
+const SQLITE_BUSY_RETRY_LIMIT = 8;
+const SQLITE_BUSY_BASE_DELAY_MS = 30;
+
+function isSqliteBusyError(err) {
+  if (!err) return false;
+  return err.code === 'SQLITE_BUSY' || /database is locked|SQLITE_BUSY/i.test(String(err.message || ''));
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function safeWarn(...args) {
+  try {
+    console.warn(...args);
+  } catch (_) {
+    // ignore EPIPE / closed stream writes
+  }
+}
+
+async function withSqliteBusyRetry(operation) {
+  let lastError = null;
+  for (let attempt = 0; attempt <= SQLITE_BUSY_RETRY_LIMIT; attempt++) {
+    try {
+      return await operation();
+    } catch (err) {
+      if (!isSqliteBusyError(err) || attempt === SQLITE_BUSY_RETRY_LIMIT) {
+        throw err;
+      }
+      lastError = err;
+      const delayMs = SQLITE_BUSY_BASE_DELAY_MS * (attempt + 1);
+      await sleep(delayMs);
+    }
+  }
+  throw lastError || new Error('SQLITE_BUSY: database is locked');
+}
 
 function initDB() {
   return new Promise((resolve, reject) => {
@@ -29,15 +67,53 @@ function initDB() {
       }
 
       const dbPath = path.join(userDataPath, 'proactive_graph.db');
+      currentDbPath = dbPath;
       console.log('Initializing SQLite database at:', dbPath);
       
-      db = new sqlite3.Database(dbPath, (err) => {
-        if (err) return reject(err);
-      });
+      db = new sqlite3.Database(
+        dbPath,
+        sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE | sqlite3.OPEN_FULLMUTEX,
+        (err) => {
+          if (err) return reject(err);
+        }
+      );
+
+      db.configure('busyTimeout', 8000);
+      const pragmaSql = `
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        PRAGMA foreign_keys = ON;
+        PRAGMA busy_timeout = 8000;
+      `;
+      const applyPragmas = (attempt = 0) => {
+        db.exec(pragmaSql, (pragmaErr) => {
+          if (!pragmaErr) return;
+          if (isSqliteBusyError(pragmaErr) && attempt < SQLITE_BUSY_RETRY_LIMIT) {
+            const delayMs = SQLITE_BUSY_BASE_DELAY_MS * (attempt + 1);
+            setTimeout(() => applyPragmas(attempt + 1), delayMs);
+            return;
+          }
+          safeWarn('[DB] Failed to apply PRAGMAs:', pragmaErr.message);
+        });
+      };
+      applyPragmas();
+
+      const safeSchemaRun = (sql, attempt = 0) => {
+        db.run(sql, (err) => {
+          if (!err) return;
+          const transientNoSuchTable = /no such table/i.test(String(err?.message || ''));
+          if ((isSqliteBusyError(err) || transientNoSuchTable) && attempt < SQLITE_BUSY_RETRY_LIMIT) {
+            const delayMs = SQLITE_BUSY_BASE_DELAY_MS * (attempt + 1);
+            setTimeout(() => safeSchemaRun(sql, attempt + 1), delayMs);
+            return;
+          }
+          safeWarn('[DB] Schema statement failed:', err.message);
+        });
+      };
 
       db.serialize(() => {
         // Layer 1: Raw Events (Source of Truth)
-        db.run(`CREATE TABLE IF NOT EXISTS events (
+        safeSchemaRun(`CREATE TABLE IF NOT EXISTS events (
           id TEXT PRIMARY KEY,
           type TEXT NOT NULL,
           timestamp TEXT NOT NULL,
@@ -47,16 +123,14 @@ function initDB() {
           ocr_hash TEXT
         )`);
 
-        db.run(`CREATE INDEX IF NOT EXISTS idx_events_ocr_hash ON events(ocr_hash)`);
-
-        db.run(`CREATE TABLE IF NOT EXISTS event_entities (
+        safeSchemaRun(`CREATE TABLE IF NOT EXISTS event_entities (
           event_id TEXT,
           entity TEXT,
           FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE
         )`);
 
         // Layer 2-5: Graph Nodes (Episodes, Semantics, Insights, Core)
-        db.run(`CREATE TABLE IF NOT EXISTS nodes (
+        safeSchemaRun(`CREATE TABLE IF NOT EXISTS nodes (
           id TEXT PRIMARY KEY,
           type TEXT NOT NULL,
           data TEXT,
@@ -64,7 +138,7 @@ function initDB() {
         )`);
 
         // Edges connecting Nodes to Nodes, or Events to Nodes
-        db.run(`CREATE TABLE IF NOT EXISTS edges (
+        safeSchemaRun(`CREATE TABLE IF NOT EXISTS edges (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           from_id TEXT NOT NULL,
           to_id TEXT NOT NULL,
@@ -78,20 +152,20 @@ function initDB() {
             const hasDataCol = columns.some(col => col.name === 'data');
             if (!hasDataCol) {
               console.log('Migrating edges table: adding data column');
-              db.run("ALTER TABLE edges ADD COLUMN data TEXT DEFAULT '{}'");
+              safeSchemaRun("ALTER TABLE edges ADD COLUMN data TEXT DEFAULT '{}'");
             }
           }
         });
 
         // Indices for fast retrieval (e.g., 20m suggestion loop & chat embeddings)
-        db.run(`CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp)`);
-        db.run(`CREATE INDEX IF NOT EXISTS idx_event_entities_entity ON event_entities(entity)`);
-        db.run(`CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type)`);
-        db.run(`CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_id)`);
-        db.run(`CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_id)`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp)`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_event_entities_entity ON event_entities(entity)`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type)`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_id)`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_id)`);
 
         // Retrieval & search tables used by the graph store / retrieval layer
-        db.run(`CREATE TABLE IF NOT EXISTS retrieval_docs (
+        safeSchemaRun(`CREATE TABLE IF NOT EXISTS retrieval_docs (
           doc_id TEXT PRIMARY KEY,
           source_type TEXT,
           node_id TEXT,
@@ -101,9 +175,33 @@ function initDB() {
           text TEXT,
           metadata TEXT
         )`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_retrieval_docs_app ON retrieval_docs(app)`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_retrieval_docs_timestamp ON retrieval_docs(timestamp)`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_retrieval_docs_source_type ON retrieval_docs(source_type)`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_retrieval_docs_node_id ON retrieval_docs(node_id)`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_retrieval_docs_event_id ON retrieval_docs(event_id)`);
+
+        safeSchemaRun(`CREATE VIRTUAL TABLE IF NOT EXISTS retrieval_docs_fts USING fts5(
+          doc_id UNINDEXED,
+          text,
+          tokenize = 'porter unicode61 remove_diacritics 2'
+        )`);
+
+        safeSchemaRun(`CREATE TRIGGER IF NOT EXISTS retrieval_docs_ai AFTER INSERT ON retrieval_docs BEGIN
+          INSERT INTO retrieval_docs_fts(doc_id, text) VALUES (new.doc_id, COALESCE(new.text, ''));
+        END`);
+
+        safeSchemaRun(`CREATE TRIGGER IF NOT EXISTS retrieval_docs_au AFTER UPDATE ON retrieval_docs BEGIN
+          DELETE FROM retrieval_docs_fts WHERE doc_id = old.doc_id;
+          INSERT INTO retrieval_docs_fts(doc_id, text) VALUES (new.doc_id, COALESCE(new.text, ''));
+        END`);
+
+        safeSchemaRun(`CREATE TRIGGER IF NOT EXISTS retrieval_docs_ad AFTER DELETE ON retrieval_docs BEGIN
+          DELETE FROM retrieval_docs_fts WHERE doc_id = old.doc_id;
+        END`);
 
         // Memory & graph-related tables
-        db.run(`CREATE TABLE IF NOT EXISTS memory_nodes (
+        safeSchemaRun(`CREATE TABLE IF NOT EXISTS memory_nodes (
           id TEXT PRIMARY KEY,
           layer TEXT,
           subtype TEXT,
@@ -122,7 +220,7 @@ function initDB() {
           anchor_at TEXT
         )`);
 
-        db.run(`CREATE TABLE IF NOT EXISTS memory_edges (
+        safeSchemaRun(`CREATE TABLE IF NOT EXISTS memory_edges (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           from_node_id TEXT,
           to_node_id TEXT,
@@ -135,13 +233,13 @@ function initDB() {
         )`);
 
         // Small supporting artifacts
-        db.run(`CREATE TABLE IF NOT EXISTS suggestion_artifacts (
+        safeSchemaRun(`CREATE TABLE IF NOT EXISTS suggestion_artifacts (
           id TEXT PRIMARY KEY,
           suggestion_id TEXT,
           data TEXT
         )`);
 
-        db.run(`CREATE TABLE IF NOT EXISTS text_chunks (
+        safeSchemaRun(`CREATE TABLE IF NOT EXISTS text_chunks (
           id TEXT PRIMARY KEY,
           doc_id TEXT,
           chunk_index INTEGER,
@@ -165,12 +263,12 @@ function initDB() {
           ];
           for (const [name, type] of required) {
             if (!existing.has(name)) {
-              db.run(`ALTER TABLE text_chunks ADD COLUMN ${name} ${type}`);
+              safeSchemaRun(`ALTER TABLE text_chunks ADD COLUMN ${name} ${type}`);
             }
           }
         });
 
-        db.run(`CREATE TABLE IF NOT EXISTS graph_versions (
+        safeSchemaRun(`CREATE TABLE IF NOT EXISTS graph_versions (
           version TEXT PRIMARY KEY,
           status TEXT,
           started_at TEXT,
@@ -178,7 +276,7 @@ function initDB() {
           metadata TEXT
         )`);
 
-        db.run(`CREATE TABLE IF NOT EXISTS retrieval_runs (
+        safeSchemaRun(`CREATE TABLE IF NOT EXISTS retrieval_runs (
           id TEXT PRIMARY KEY,
           query TEXT,
           mode TEXT,
@@ -187,7 +285,7 @@ function initDB() {
         )`);
 
         // Durable chat session storage (renderer can hydrate chat history on startup)
-        db.run(`CREATE TABLE IF NOT EXISTS chat_sessions (
+        safeSchemaRun(`CREATE TABLE IF NOT EXISTS chat_sessions (
           id TEXT PRIMARY KEY,
           title TEXT,
           created_at TEXT,
@@ -195,7 +293,7 @@ function initDB() {
           metadata TEXT
         )`);
 
-        db.run(`CREATE TABLE IF NOT EXISTS chat_messages (
+        safeSchemaRun(`CREATE TABLE IF NOT EXISTS chat_messages (
           id TEXT PRIMARY KEY,
           session_id TEXT NOT NULL,
           role TEXT NOT NULL,
@@ -207,18 +305,18 @@ function initDB() {
           FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
         )`);
 
-        db.run(`CREATE TABLE IF NOT EXISTS kv_cache (
+        safeSchemaRun(`CREATE TABLE IF NOT EXISTS kv_cache (
           key TEXT PRIMARY KEY,
           value TEXT,
           type TEXT,
           created_at TEXT
         )`);
 
-        db.run(`CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated_at ON chat_sessions(updated_at)`);
-        db.run(`CREATE INDEX IF NOT EXISTS idx_chat_messages_session_ts ON chat_messages(session_id, ts)`);
-        db.run(`CREATE INDEX IF NOT EXISTS idx_kv_cache_type ON kv_cache(type)`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated_at ON chat_sessions(updated_at)`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_chat_messages_session_ts ON chat_messages(session_id, ts)`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_kv_cache_type ON kv_cache(type)`);
 
-        db.run(`CREATE TABLE IF NOT EXISTS scheduled_automations (
+        safeSchemaRun(`CREATE TABLE IF NOT EXISTS scheduled_automations (
           id TEXT PRIMARY KEY,
           name TEXT NOT NULL,
           description TEXT,
@@ -231,7 +329,7 @@ function initDB() {
           metadata TEXT
         )`);
 
-        db.run(`CREATE INDEX IF NOT EXISTS idx_scheduled_automations_next_run ON scheduled_automations(next_run_at, enabled)`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_scheduled_automations_next_run ON scheduled_automations(next_run_at, enabled)`);
 
         resolve();
       });
@@ -247,34 +345,37 @@ function getDB() {
 }
 
 function runStatement(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    try {
-      db.run(sql, params, function(err) {
-        if (err) reject(err);
-        else resolve(this);
-      });
-    } catch (err) {
-      reject(err);
-    }
+  return withSqliteBusyRetry(() => {
+    return new Promise((resolve, reject) => {
+      try {
+        db.run(sql, params, function(err) {
+          if (err) reject(err);
+          else resolve(this);
+        });
+      } catch (err) {
+        reject(err);
+      }
+    });
   });
 }
 
 function allStatement(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    try {
-      db.all(sql, params, (err, rows) => {
-        if (err) reject(err);
-        else resolve(rows);
-      });
-    } catch (err) {
-      reject(err);
-    }
+  return withSqliteBusyRetry(() => {
+    return new Promise((resolve, reject) => {
+      try {
+        db.all(sql, params, (err, rows) => {
+          if (err) reject(err);
+          else resolve(rows);
+        });
+      } catch (err) {
+        reject(err);
+      }
+    });
   });
 }
 
 async function ensureSchemaMigrations() {
   if (schemaReadyPromise) return schemaReadyPromise;
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const required = [
     ['event_id', 'TEXT'],
     ['node_id', 'TEXT'],
@@ -343,13 +444,70 @@ async function ensureSchemaMigrations() {
         await runStatement(`CREATE INDEX IF NOT EXISTS idx_memory_nodes_anchor_date ON memory_nodes(anchor_date)`).catch(() => {});
         await runStatement(`CREATE INDEX IF NOT EXISTS idx_memory_nodes_anchor_at ON memory_nodes(anchor_at)`).catch(() => {});
 
-        // Migration for events table (ocr_hash)
+        await runStatement(`CREATE VIRTUAL TABLE IF NOT EXISTS retrieval_docs_fts USING fts5(
+          doc_id UNINDEXED,
+          text,
+          tokenize = 'porter unicode61 remove_diacritics 2'
+        )`).catch(() => {});
+        await runStatement(`CREATE TRIGGER IF NOT EXISTS retrieval_docs_ai AFTER INSERT ON retrieval_docs BEGIN
+          INSERT INTO retrieval_docs_fts(doc_id, text) VALUES (new.doc_id, COALESCE(new.text, ''));
+        END`).catch(() => {});
+        await runStatement(`CREATE TRIGGER IF NOT EXISTS retrieval_docs_au AFTER UPDATE ON retrieval_docs BEGIN
+          DELETE FROM retrieval_docs_fts WHERE doc_id = old.doc_id;
+          INSERT INTO retrieval_docs_fts(doc_id, text) VALUES (new.doc_id, COALESCE(new.text, ''));
+        END`).catch(() => {});
+        await runStatement(`CREATE TRIGGER IF NOT EXISTS retrieval_docs_ad AFTER DELETE ON retrieval_docs BEGIN
+          DELETE FROM retrieval_docs_fts WHERE doc_id = old.doc_id;
+        END`).catch(() => {});
+        await runStatement(`DELETE FROM retrieval_docs_fts`).catch(() => {});
+        await runStatement(`INSERT INTO retrieval_docs_fts(doc_id, text) SELECT doc_id, COALESCE(text, '') FROM retrieval_docs`).catch(() => {});
+        await runStatement(`CREATE INDEX IF NOT EXISTS idx_retrieval_docs_app ON retrieval_docs(app)`).catch(() => {});
+        await runStatement(`CREATE INDEX IF NOT EXISTS idx_retrieval_docs_timestamp ON retrieval_docs(timestamp)`).catch(() => {});
+        await runStatement(`CREATE INDEX IF NOT EXISTS idx_retrieval_docs_source_type ON retrieval_docs(source_type)`).catch(() => {});
+        await runStatement(`CREATE INDEX IF NOT EXISTS idx_retrieval_docs_node_id ON retrieval_docs(node_id)`).catch(() => {});
+        await runStatement(`CREATE INDEX IF NOT EXISTS idx_retrieval_docs_event_id ON retrieval_docs(event_id)`).catch(() => {});
+
+        // Migration for events table (ocr_hash, sentiment_score, session_id, status)
         const eventCols = await allStatement(`PRAGMA table_info(events)`).catch(() => []);
         const eventExisting = new Set((eventCols || []).map((c) => c?.name).filter(Boolean));
         if (!eventExisting.has('ocr_hash')) {
           await runStatement(`ALTER TABLE events ADD COLUMN ocr_hash TEXT`).catch(() => {});
-          await runStatement(`CREATE INDEX IF NOT EXISTS idx_events_ocr_hash ON events(ocr_hash)`).catch(() => {});
         }
+        if (!eventExisting.has('sentiment_score')) {
+          await runStatement(`ALTER TABLE events ADD COLUMN sentiment_score REAL`).catch(() => {});
+        }
+        if (!eventExisting.has('session_id')) {
+          await runStatement(`ALTER TABLE events ADD COLUMN session_id TEXT`).catch(() => {});
+        }
+        if (!eventExisting.has('status')) {
+          await runStatement(`ALTER TABLE events ADD COLUMN status TEXT DEFAULT 'active'`).catch(() => {});
+        }
+        await runStatement(`CREATE INDEX IF NOT EXISTS idx_events_ocr_hash ON events(ocr_hash)`).catch(() => {});
+        await runStatement(`CREATE INDEX IF NOT EXISTS idx_events_sentiment_score ON events(sentiment_score)`).catch(() => {});
+        await runStatement(`CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id)`).catch(() => {});
+        await runStatement(`CREATE INDEX IF NOT EXISTS idx_events_status ON events(status)`).catch(() => {});
+
+        // Migration for memory_nodes table (importance, connection_count, last_reheated)
+        const memoryNodeCols = await allStatement(`PRAGMA table_info(memory_nodes)`).catch(() => []);
+        const memoryNodeExisting = new Set((memoryNodeCols || []).map((c) => c?.name).filter(Boolean));
+        if (!memoryNodeExisting.has('importance')) {
+          await runStatement(`ALTER TABLE memory_nodes ADD COLUMN importance INTEGER DEFAULT 5`).catch(() => {});
+        }
+        if (!memoryNodeExisting.has('connection_count')) {
+          await runStatement(`ALTER TABLE memory_nodes ADD COLUMN connection_count INTEGER DEFAULT 0`).catch(() => {});
+        }
+        if (!memoryNodeExisting.has('last_reheated')) {
+          await runStatement(`ALTER TABLE memory_nodes ADD COLUMN last_reheated TEXT`).catch(() => {});
+        }
+        // Initialize last_reheated from updated_at for existing nodes
+        await runStatement(`
+          UPDATE memory_nodes
+          SET last_reheated = COALESCE(NULLIF(last_reheated, ''), updated_at)
+          WHERE last_reheated IS NULL OR last_reheated = ''
+        `).catch(() => {});
+        await runStatement(`CREATE INDEX IF NOT EXISTS idx_memory_nodes_importance ON memory_nodes(importance)`).catch(() => {});
+        await runStatement(`CREATE INDEX IF NOT EXISTS idx_memory_nodes_connection_count ON memory_nodes(connection_count)`).catch(() => {});
+        await runStatement(`CREATE INDEX IF NOT EXISTS idx_memory_nodes_last_reheated ON memory_nodes(last_reheated)`).catch(() => {});
 
         return;
       }
@@ -384,14 +542,16 @@ const runQuery = async (sql, params = []) => {
   } catch (e) {
     return Promise.reject(new Error(`DB not available: ${e.message}`));
   }
-  return new Promise((resolve, reject) => {
-    try {
-      db.run(sql, params, function(err) {
-        if (err) reject(err); else resolve(this);
-      });
-    } catch (err) {
-      reject(err);
-    }
+  return withSqliteBusyRetry(() => {
+    return new Promise((resolve, reject) => {
+      try {
+        db.run(sql, params, function(err) {
+          if (err) reject(err); else resolve(this);
+        });
+      } catch (err) {
+        reject(err);
+      }
+    });
   });
 };
 
@@ -401,14 +561,16 @@ const getQuery = async (sql, params = []) => {
   } catch (e) {
     return Promise.reject(new Error(`DB not available: ${e.message}`));
   }
-  return new Promise((resolve, reject) => {
-    try {
-      db.get(sql, params, (err, row) => {
-        if (err) reject(err); else resolve(row);
-      });
-    } catch (err) {
-      reject(err);
-    }
+  return withSqliteBusyRetry(() => {
+    return new Promise((resolve, reject) => {
+      try {
+        db.get(sql, params, (err, row) => {
+          if (err) reject(err); else resolve(row);
+        });
+      } catch (err) {
+        reject(err);
+      }
+    });
   });
 };
 
@@ -418,20 +580,27 @@ const allQuery = async (sql, params = []) => {
   } catch (e) {
     return Promise.reject(new Error(`DB not available: ${e.message}`));
   }
-  return new Promise((resolve, reject) => {
-    try {
-      db.all(sql, params, (err, rows) => {
-        if (err) reject(err); else resolve(rows);
-      });
-    } catch (err) {
-      reject(err);
-    }
+  return withSqliteBusyRetry(() => {
+    return new Promise((resolve, reject) => {
+      try {
+        db.all(sql, params, (err, rows) => {
+          if (err) reject(err); else resolve(rows);
+        });
+      } catch (err) {
+        reject(err);
+      }
+    });
   });
 };
+
+function getDbPath() {
+  return currentDbPath;
+}
 
 module.exports = {
   initDB,
   getDB,
+  getDbPath,
   runQuery,
   getQuery,
   allQuery

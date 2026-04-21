@@ -198,7 +198,8 @@ function assignEpisode(groups, envelope) {
     const sameCommunicationFlow = group.typeGroup === 'communication' && envelope.type_group === 'communication';
     const MAX_EPISODE_SPAN = EPISODE_WINDOW_MS; // strictly enforce 15m generation window
 
-    if (Math.abs(ts - group.startTs) > MAX_EPISODE_SPAN || gapMs > EPISODE_WINDOW_MS) continue;
+    // A matching source_ref/thread ID should override the time window so thread continuity stays intact.
+    if (!sameSourceRef && (Math.abs(ts - group.startTs) > MAX_EPISODE_SPAN || gapMs > EPISODE_WINDOW_MS)) continue;
 
     // Hard boundary for parallel but unrelated contexts happening in the same window.
     // Use 5-minute gap as a stricter boundary for session-like grouping.
@@ -333,6 +334,40 @@ function inferStudyEpisodeSubtype(group, fallbackSubtype = 'desktop') {
   return 'study_reading';
 }
 
+function relationshipTierForPerson(person, events = []) {
+  const explicit = events.map((event) => event?.metadata?.relationship_tier || event?.metadata?.social_tier).find(Boolean);
+  if (explicit) return String(explicit);
+  if (String(person || '').includes('@')) return 'network';
+  const communicationCount = events.filter((event) => String(event?.type_group || event?.source_type || '').toLowerCase().includes('communication')).length;
+  if (communicationCount >= 3) return 'network';
+  return 'observed_contact';
+}
+
+function socialHalfLifeDaysForTier(tier) {
+  const normalized = String(tier || '').toLowerCase();
+  if (normalized === 'inner_circle') return 7;
+  if (normalized === 'close_friend') return 10;
+  if (normalized === 'active_lead') return 3;
+  if (normalized === 'network') return 21;
+  if (normalized === 'observed_contact') return 30;
+  return 30;
+}
+
+function relationshipTemperature(latestIso, halfLifeDays = 30) {
+  const latest = parseTs(latestIso);
+  if (!latest) return 0;
+  const ageDays = Math.max(0, (Date.now() - latest) / (24 * 60 * 60 * 1000));
+  return Number(Math.exp(-ageDays / Math.max(1, halfLifeDays)).toFixed(4));
+}
+
+function averageSentiment(events = []) {
+  const scores = events
+    .map((event) => Number(event?.metadata?.sentiment_score))
+    .filter((score) => Number.isFinite(score));
+  if (!scores.length) return 0;
+  return Number((scores.reduce((sum, score) => sum + score, 0) / scores.length).toFixed(3));
+}
+
 function deriveSemanticNodes(group, episodeData) {
   const nodes = [];
   const episodeId = group.id;
@@ -341,6 +376,11 @@ function deriveSemanticNodes(group, episodeData) {
   const anchorDate = episodeData.anchor_date;
 
   for (const person of uniq(group.events.flatMap((event) => event.participants || []).filter((item) => isLikelyPerson(item)), 12)) {
+    const personEvents = group.events.filter((event) => (event.participants || []).includes(person));
+    const tier = relationshipTierForPerson(person, personEvents);
+    const halfLifeDays = socialHalfLifeDaysForTier(tier);
+    const temperature = relationshipTemperature(latestIso, halfLifeDays);
+    const sentiment = averageSentiment(personEvents);
     nodes.push({
       id: `sem_${stableHash(`person|${person}|${episodeId}`)}`,
       layer: 'semantic',
@@ -353,7 +393,14 @@ function deriveSemanticNodes(group, episodeData) {
       source_refs: episodeData.source_refs,
       metadata: {
         name: person,
+        node_type: 'person',
         latest_interaction_at: latestIso,
+        last_reheated: latestIso,
+        relationship_tier: tier,
+        social_half_life_days: halfLifeDays,
+        social_temperature: temperature,
+        sentiment_score: sentiment,
+        sentiment_trend: sentiment < -0.2 ? 'negative' : (sentiment > 0.2 ? 'positive' : 'neutral'),
         anchor_at: anchorIso,
         anchor_date: anchorDate,
         episode_id: episodeId,
@@ -539,6 +586,10 @@ function deriveClouds(episodes) {
     const latest = Math.max(...item.episodes.map((ep) => parseTs(ep.end)));
     const anchor = Math.min(...item.episodes.map((ep) => parseTs(ep.anchor_at || ep.start)));
     const days = Math.max(0, (Date.now() - latest) / (24 * 60 * 60 * 1000));
+    const tier = relationshipTierForPerson(item.label, item.episodes.flatMap((ep) => ep.events || []));
+    const halfLifeDays = socialHalfLifeDaysForTier(tier);
+    const socialTemperature = relationshipTemperature(isoFromTs(latest), halfLifeDays);
+    const relationshipStatus = socialTemperature < 0.35 ? 'decaying' : (socialTemperature < 0.65 ? 'cooling' : 'warm');
     let confidence = Math.min(0.88, 0.5 + Math.min(0.28, item.episodes.length * 0.08) + Math.min(0.1, days / 30));
     confidence = applyTimeDecay(confidence, isoFromTs(latest));
     if (confidence < 0.35) continue;
@@ -560,7 +611,12 @@ function deriveClouds(episodes) {
         latest_activity_at: isoFromTs(latest),
         supporting_episode_ids: item.episodes.map((ep) => ep.id),
         supporting_semantic_ids: uniq(item.semanticNodeIds),
-        repeated_count: item.episodes.length
+        repeated_count: item.episodes.length,
+        relationship_tier: tier,
+        social_half_life_days: halfLifeDays,
+        social_temperature: socialTemperature,
+        relationship_status: relationshipStatus,
+        decay_days_since_latest: Number(days.toFixed(2))
       }
     });
   }

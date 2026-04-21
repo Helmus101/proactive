@@ -45,6 +45,7 @@ const TOOL_SCHEMAS = {
   memory_update: ['node_id', 'updates'],
   memory_link: ['from_id', 'to_id', 'relationship'],
   memory_create: ['layer', 'subtype', 'title', 'summary'],
+  action_create: ['title'],
   contact_create: ['name'],
   contact_update: ['name', 'updates'],
   automation_create: ['name', 'prompt', 'interval_minutes'],
@@ -106,6 +107,10 @@ function evaluateToolPolicy(request = {}, policyContext = {}) {
 
   if (tool === 'memory_create' || tool === 'contact_create' || tool === 'contact_update') {
     return { decision: 'auto_allow', risk_level: 'low', reason: 'user_initiated_write' };
+  }
+
+  if (tool === 'action_create') {
+    return { decision: 'auto_allow', risk_level: 'low', reason: 'user_initiated_action_creation' };
   }
 
   if (tool === 'automation_create') {
@@ -325,6 +330,76 @@ async function dispatchTool(request = {}, runtime = {}) {
       source_refs: []
     });
     result = { status: 'success', output: { node_id: nodeId, created } };
+  } else if (tool === 'action_create') {
+    const crypto = require('crypto');
+    const actionId = `action_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+    const nowIso = new Date().toISOString();
+    const metadata = {
+      category: input.category || 'work',
+      priority: input.priority || 'medium',
+      ai_generated: input.ai_generated !== false,
+      ai_doable: Boolean(input.ai_doable),
+      action_type: input.action_type || (input.ai_doable ? 'draft_message' : 'manual_next_step'),
+      execution_mode: input.execution_mode || (input.ai_doable ? 'draft_or_execute' : 'manual'),
+      assignee: input.assignee || (input.ai_doable ? 'ai' : 'human'),
+      suggested_actions: Array.isArray(input.suggested_actions) ? input.suggested_actions : [],
+      reason_codes: Array.isArray(input.reason_codes) ? input.reason_codes : ['recursive_action_create'],
+      provider: input.provider || 'deepseek',
+      created_via: input.created_via || 'recursive_improvement_cycle'
+    };
+
+    const cols = await db.allQuery(`PRAGMA table_info(suggestion_artifacts)`).catch(() => []);
+    const colSet = new Set((cols || []).map((row) => row?.name).filter(Boolean));
+    const hasExpandedSchema = colSet.has('type') && colSet.has('title') && colSet.has('metadata');
+
+    if (hasExpandedSchema) {
+      await db.runQuery(
+        `INSERT OR REPLACE INTO suggestion_artifacts
+         (id, type, title, body, trigger_summary, source_node_ids, source_edge_paths, confidence, status, metadata, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          actionId,
+          input.type || 'next_action',
+          String(input.title || '').trim(),
+          String(input.body || input.description || '').trim(),
+          String(input.trigger_summary || input.body || input.title || '').trim(),
+          JSON.stringify(Array.isArray(input.source_node_ids) ? input.source_node_ids : []),
+          JSON.stringify(Array.isArray(input.source_edge_paths) ? input.source_edge_paths : []),
+          Number(input.confidence || 0.75),
+          'active',
+          JSON.stringify(metadata),
+          nowIso
+        ]
+      );
+    } else {
+      const legacyData = {
+        id: actionId,
+        type: input.type || 'next_action',
+        title: String(input.title || '').trim(),
+        body: String(input.body || input.description || '').trim(),
+        trigger_summary: String(input.trigger_summary || input.body || input.title || '').trim(),
+        source_node_ids: Array.isArray(input.source_node_ids) ? input.source_node_ids : [],
+        source_edge_paths: Array.isArray(input.source_edge_paths) ? input.source_edge_paths : [],
+        confidence: Number(input.confidence || 0.75),
+        status: 'active',
+        created_at: nowIso,
+        ...metadata
+      };
+      await db.runQuery(
+        `INSERT OR REPLACE INTO suggestion_artifacts (id, suggestion_id, data) VALUES (?, ?, ?)`,
+        [actionId, actionId, JSON.stringify(legacyData)]
+      );
+    }
+
+    result = {
+      status: 'success',
+      output: {
+        action_id: actionId,
+        title: String(input.title || '').trim(),
+        category: metadata.category,
+        ai_doable: metadata.ai_doable
+      }
+    };
   } else if (tool === 'contact_create') {
     const { stableHash: sh } = require('./graph-store');
     const name = String(input.name || '').trim();

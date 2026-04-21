@@ -3708,15 +3708,17 @@ body.compact-mode .suggestion-card {
 }
 
 /* Dark mode responsive adjustments */
-[data-theme="dark"] @media (max-width: 768px) {
-    .glass-bg {
+@media (max-width: 768px) {
+    [data-theme="dark"] .glass-bg {
         background: rgba(30,41,59,0.8);
     }
-    
-    .glass-soft {
+
+    [data-theme="dark"] .glass-soft {
         background: rgba(30,41,59,0.6);
     }
 }
+
+.memory-item-card {
     border: 1px solid var(--glass-border);
     background: linear-gradient(135deg, var(--glass-soft), var(--glass-bg));
 }

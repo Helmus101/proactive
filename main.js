@@ -18,7 +18,7 @@ if (process.stderr && typeof process.stderr.on === 'function') {
   });
 }
 
-const { app, BrowserWindow, ipcMain, session, desktopCapturer, systemPreferences, screen, globalShortcut, powerMonitor } = require('electron');
+const { app, BrowserWindow, ipcMain, session, desktopCapturer, systemPreferences, screen, globalShortcut, powerMonitor, nativeImage } = require('electron');
 const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
@@ -39,11 +39,11 @@ const { buildDailySummaries } = require('./services/summarizer/dailySummary');
 const { planNextAction, normalizeDesktopGoal } = require('./services/agent/agentPlanner');
 const { checkAccessibilityPermission, observeDesktopState, executeDesktopAction, openAccessibilitySettings, openScreenRecordingSettings } = require('./services/desktop-control');
 const { ensureManagedBrowser, observeManagedBrowserState, executeManagedBrowserAction, getManagedBrowserStatus } = require('./services/browser-driver');
-const { 
+const {
   buildGlobalGraph,
-  detectTasks, 
-  generateSuggestionFromGraph, 
-  generateCoreGlobal, callLLM 
+  detectTasks,
+  generateSuggestionFromGraph,
+  generateCoreGlobal, callLLM
 } = require('./services/agent/intelligence-engine');
 const {
   normalizeSuggestion,
@@ -90,9 +90,15 @@ const CAPTURE_TRIGGER_MIN_INTERVAL_MS = 15 * 60 * 1000;
 const SUGGESTION_REFRESH_INTERVAL_MINUTES = 30;
 const LOW_POWER_OCR_MIN_INTERVAL_MS = 5 * 60 * 1000;
 const LOW_POWER_HEAVY_JOB_MIN_GAP_MS = 30 * 60 * 1000;
+const CAPTURE_VISUAL_DIFF_THRESHOLD = Number(process.env.CAPTURE_VISUAL_DIFF_THRESHOLD || 0.05);
+const STARTUP_HEAVY_JOB_DELAY_MS = Math.max(5 * 60 * 1000, Number(process.env.STARTUP_HEAVY_JOB_DELAY_MS || 10 * 60 * 1000));
+const STARTUP_INITIAL_SYNC_DELAY_MS = Math.max(10 * 60 * 1000, Number(process.env.STARTUP_INITIAL_SYNC_DELAY_MS || 20 * 60 * 1000));
+const GSUITE_SYNC_INTERVAL_MS = Math.max(5 * 60 * 1000, Number(process.env.GSUITE_SYNC_INTERVAL_MS || 5 * 60 * 1000));
 let lastLowPowerOCRAt = 0;
 let lastEpisodeHeavyRunAt = 0;
 let lastSuggestionHeavyRunAt = 0;
+let lastAcceptedCaptureFingerprint = null;
+let screenshotsPausedForDisplayOff = false;
 const performanceState = {
   onBattery: false,
   thermalState: 'unknown'
@@ -113,8 +119,17 @@ function isReducedLoadMode() {
 }
 
 function canRunHeavyJob(lastRunAt = 0) {
+  const idleTime = (powerMonitor && typeof powerMonitor.getSystemIdleTime === 'function') ? powerMonitor.getSystemIdleTime() : 0;
+  if (idleTime < 180) return false;
   if (!isReducedLoadMode()) return true;
   return (Date.now() - Number(lastRunAt || 0)) >= LOW_POWER_HEAVY_JOB_MIN_GAP_MS;
+}
+
+function shouldDeferBackgroundWork(label = 'background') {
+  const idleTime = (powerMonitor && typeof powerMonitor.getSystemIdleTime === 'function') ? powerMonitor.getSystemIdleTime() : 0;
+  const defer = idleTime < 180;
+  if (defer) console.log(`[${label}] Deferring heavy work until idle; idle=${idleTime}s`);
+  return defer;
 }
 
 function updatePerformanceState(next = {}) {
@@ -129,9 +144,8 @@ function updatePerformanceState(next = {}) {
   });
 
   if (oldMode !== newMode) {
-    console.log(`[Performance] Mode changed from ${oldMode} to ${newMode}. Restarting capture timers.`);
+    console.log(`[Performance] Mode changed from ${oldMode} to ${newMode}. Restarting sensor timer only; screenshot cadence stays fixed at 30s.`);
     startSensorCaptureLoop(newMode);
-    startPeriodicScreenshotCapture(newMode);
   }
 }
 
@@ -326,27 +340,27 @@ async function rebuildLayeredMemoryGraphFromEvents(events, apiKey) {
     const engine = require('./services/agent/intelligence-engine');
     const appDataMap = { [appId]: { rawItems: items, appName: appId } };
     const graphResult = await engine.buildGlobalGraph({ appDataMap, apiKey, store });
-    
+
     const appCoreId = `core_${appId.toLowerCase()}`;
     const semanticIdsByEpisode = new Map();
     const semanticIds = [];
 
     if (graphResult && graphResult.nodes) {
       console.log(`[rebuildLayeredMemoryGraphFromEvents] Built graph for ${appId}: ${graphResult.nodes.length} nodes`);
-      
+
       // Extract app core from the graph results
       const appCoreNode = graphResult.nodes.find(n => n.type === 'app_core');
       if (appCoreNode) {
         appCores[appId] = appCoreNode.data.narrative || appCoreNode.data.title || `${appId} Core`;
-        
+
         // Add App-Core Node
         pushNode({ id: appCoreId, type: 'app_core', data: { title: `${appId} Core`, narrative: appCores[appId] } });
-        
+
         // Add Episode Nodes & collect semantic info
         const episodeNodes = graphResult.nodes.filter(n => n.type === 'episode');
         episodeNodes.forEach(ep => {
           pushNode({ id: ep.id, type: 'episode', data: ep.data });
-          
+
           // Collect semantic nodes for this episode
           const episodeSemantics = graphResult.nodes.filter(n => n.type === 'semantic' && n.data.episode_id === ep.id);
           const semIds = [];
@@ -355,7 +369,7 @@ async function rebuildLayeredMemoryGraphFromEvents(events, apiKey) {
             semIds.push(sem.id);
             pushEdge(sem.id, ep.id, 'extracted_from', 'Semantic understanding extracted from episode.');
           });
-          
+
           semanticIdsByEpisode.set(ep.id, semIds);
           semanticIds.push(...semIds);
         });
@@ -751,7 +765,15 @@ function getSensorSettings() {
 }
 
 function getSensorEvents() {
-  return store.get('sensorEvents') || [];
+  const events = store.get('sensorEvents') || [];
+  const { maxEvents } = getSensorSettings();
+  const limit = Math.max(50, Number(maxEvents || DEFAULT_SENSOR_SETTINGS.maxEvents));
+  if (Array.isArray(events) && events.length > limit) {
+    const trimmed = events.slice(0, limit);
+    store.set('sensorEvents', trimmed);
+    return trimmed;
+  }
+  return events;
 }
 
 function getSensorStatus() {
@@ -880,7 +902,7 @@ function mergeSuggestionQueues(existing = [], incoming = [], limit = MAX_PRACTIC
 }
 
 function ensureSensorStorageDir() {
-  const capturesDir = path.join(app.getPath('userData'), 'sensor-captures');
+  const capturesDir = path.join(app.getPath('userData'), 'screenshots');
   if (!fs.existsSync(capturesDir)) {
     fs.mkdirSync(capturesDir, { recursive: true });
   }
@@ -890,7 +912,11 @@ function ensureSensorStorageDir() {
 // Content filtering functions
 function isSensitiveContent(text, windowTitle, appName) {
   const content = `${text} ${windowTitle} ${appName}`.toLowerCase();
-  
+  const hasPhrase = (keyword) => {
+    const escaped = String(keyword || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`, 'i').test(content);
+  };
+
   // Banking and financial sites
   const bankingKeywords = [
     'bank', 'chase', 'wells fargo', 'bank of america', 'citibank', 'capital one',
@@ -898,30 +924,36 @@ function isSensitiveContent(text, windowTitle, appName) {
     'account number', 'credit card', 'debit card', 'balance', 'transaction',
     'login', 'signin', 'password', 'security code', 'ssn', 'social security'
   ];
-  
-  // Adult content keywords
-  const adultKeywords = [
-    'porn', 'xxx', 'sex', 'adult', 'nsfw', 'erotic', 'nude', 'naked',
-    'hookup', 'dating', 'escort', 'cam', 'strip', 'adultfriendfinder'
+
+  // Adult content detection intentionally avoids generic one-word matches like
+  // "adult" because IDEs/terminals can display filter logs containing
+  // "Adult content" and should not be classified as adult content themselves.
+  const adultStrongKeywords = [
+    'porn', 'xxx', 'nsfw', 'erotic', 'nude', 'naked', 'escort', 'adultfriendfinder',
+    'pornhub', 'xvideos', 'xhamster'
   ];
-  
+  const adultWeakKeywords = [
+    'adult', 'sex', 'hookup', 'dating', 'cam', 'strip'
+  ];
+
   // Password and security sensitive sites
   const passwordKeywords = [
     'password', 'passphrase', 'secret key', 'private key', 'api key',
     'two factor', '2fa', 'authentication', 'security question',
     'reset password', 'change password', 'forgot password'
   ];
-  
+
   // Check each category
-  const isBanking = bankingKeywords.some(keyword => content.includes(keyword));
-  const isAdult = adultKeywords.some(keyword => content.includes(keyword));
-  const isPasswordRelated = passwordKeywords.some(keyword => content.includes(keyword));
-  
+  const isBanking = bankingKeywords.some(keyword => hasPhrase(keyword));
+  const adultWeakMatches = adultWeakKeywords.filter(keyword => hasPhrase(keyword));
+  const isAdult = adultStrongKeywords.some(keyword => hasPhrase(keyword)) || adultWeakMatches.length >= 2;
+  const isPasswordRelated = passwordKeywords.some(keyword => hasPhrase(keyword));
+
   return {
     isSensitive: isBanking || isAdult || isPasswordRelated,
     category: isBanking ? 'banking' : isAdult ? 'adult' : isPasswordRelated ? 'password' : null,
-    reason: isBanking ? 'Banking/Financial content' : 
-            isAdult ? 'Adult content' : 
+    reason: isBanking ? 'Banking/Financial content' :
+            isAdult ? 'Adult content' :
             isPasswordRelated ? 'Password/Security content' : null
   };
 }
@@ -935,30 +967,38 @@ function shouldFilterCapture(text, windowTitle, appName, url) {
       'capitalone.com', 'paypal.com', 'venmo.com', 'cash.app',
       'adultfriendfinder.com', 'pornhub.com', 'xvideos.com', 'xhamster.com'
     ];
-    
+
     if (sensitiveDomains.some(domain => urlLower.includes(domain))) {
-      return { shouldFilter: true, reason: 'Sensitive domain detected' };
+      return { shouldFilter: true, reason: 'Sensitive domain detected', category: 'domain' };
     }
   }
-  
+
   // Check content-based filtering
   const contentCheck = isSensitiveContent(text, windowTitle, appName);
   if (contentCheck.isSensitive) {
-    return { shouldFilter: true, reason: contentCheck.reason };
+    return { shouldFilter: true, reason: contentCheck.reason, category: contentCheck.category };
   }
-  
+
   return { shouldFilter: false };
 }
 
 async function deleteSensitiveCapture(imagePath, eventId, reason) {
   // Total Data Durability: deletion disabled
   console.log(`[Content Filter] Sensitive content detected but deletion skipped for durability: ${reason}`);
+  return {
+    deleted: false,
+    retained_for_durability: true,
+    reason,
+    imagePath,
+    eventId
+  };
 }
 
 function runVisionOCR(imagePath) {
   const scriptPath = path.join(__dirname, 'ocr_vision.swift');
+  const timeoutMs = Number(process.env.VISION_OCR_TIMEOUT_MS || 15000);
   return new Promise((resolve) => {
-    execFile('/usr/bin/xcrun', ['swift', scriptPath, imagePath], { timeout: 60000 }, (error, stdout, stderr) => {
+    execFile('/usr/bin/xcrun', ['swift', scriptPath, imagePath], { timeout: timeoutMs }, (error, stdout, stderr) => {
       if (error) {
         resolve({
           text: '',
@@ -989,6 +1029,46 @@ function runVisionOCR(imagePath) {
       }
     });
   });
+}
+
+function buildPerceptualFingerprintFromPngBuffer(pngBuffer) {
+  try {
+    if (!pngBuffer || !pngBuffer.length) return null;
+    const image = nativeImage.createFromBuffer(pngBuffer);
+    if (!image || image.isEmpty()) return null;
+    const normalized = image.resize({ width: 32, height: 18, quality: 'good' });
+    const bitmap = normalized.toBitmap();
+    if (!bitmap || !bitmap.length) return null;
+
+    const bins = new Array(64).fill(0);
+    const counts = new Array(64).fill(0);
+    const pixelCount = Math.floor(bitmap.length / 4);
+    for (let idx = 0; idx < pixelCount; idx += 1) {
+      const offset = idx * 4;
+      const r = bitmap[offset] || 0;
+      const g = bitmap[offset + 1] || 0;
+      const b = bitmap[offset + 2] || 0;
+      const gray = Math.round((r * 0.299) + (g * 0.587) + (b * 0.114));
+      const bin = Math.min(63, Math.floor((idx / Math.max(1, pixelCount - 1)) * 64));
+      bins[bin] += gray;
+      counts[bin] += 1;
+    }
+    return bins.map((sum, i) => Math.round(sum / Math.max(1, counts[i])));
+  } catch (_) {
+    return null;
+  }
+}
+
+function fingerprintDiffPercent(prev, next) {
+  if (!Array.isArray(prev) || !Array.isArray(next)) return 1;
+  if (prev.length !== next.length || !prev.length) return 1;
+  let delta = 0;
+  for (let i = 0; i < prev.length; i += 1) {
+    delta += Math.abs(Number(prev[i] || 0) - Number(next[i] || 0));
+  }
+  const maxDelta = prev.length * 255;
+  if (!maxDelta) return 0;
+  return Math.min(1, Math.max(0, delta / maxDelta));
 }
 
 function getFrontmostWindowContext() {
@@ -1050,18 +1130,32 @@ function getFrontmostWindowContext() {
 }
 
 async function captureDesktopSensorSnapshot(reason = 'scheduled') {
+  if (screenshotsPausedForDisplayOff) {
+    return {
+      skipped: true,
+      reason: 'display_off',
+      screenshot_present: false
+    };
+  }
   if (sensorCaptureInProgress) {
     // Avoid overlapping captures
-    return null;
+    return {
+      skipped: true,
+      reason: 'capture_in_progress',
+      screenshot_present: false
+    };
   }
   sensorCaptureInProgress = true;
+  let captureLockReleased = false;
   const timestamp = Date.now();
   const filename = `ocr_capture_${timestamp}_${crypto.randomBytes(4).toString('hex')}.png`;
   const sensorStorageDir = ensureSensorStorageDir();
   const imagePath = path.join(sensorStorageDir, filename);
-  const windowContext = await getFrontmostWindowContext();
-  let sourceName = 'Screen';
-  let captureMode = 'screen';
+  let capturePngBuffer = null;
+  try {
+    const windowContext = await getFrontmostWindowContext();
+    let sourceName = 'Screen';
+    let captureMode = 'screen';
 
   if (process.platform === 'darwin' && windowContext.windowId) {
     try {
@@ -1074,6 +1168,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
       if (fs.existsSync(imagePath)) {
         captureMode = 'frontmost-window';
         sourceName = windowContext.windowTitle || windowContext.appName || 'Window';
+        capturePngBuffer = await fs.promises.readFile(imagePath).catch(() => null);
       }
     } catch (_) {}
   }
@@ -1095,6 +1190,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
         if (fs.existsSync(imagePath)) {
           captureMode = 'frontmost-window-bounds';
           sourceName = windowContext.windowTitle || windowContext.appName || 'Window';
+          capturePngBuffer = await fs.promises.readFile(imagePath).catch(() => null);
         }
       }
     } catch (_) {}
@@ -1141,27 +1237,74 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   else if (screenSource) console.log('[SensorCapture] falling back to screenSource:', { id: screenSource.id, name: screenSource.name });
   else console.log('[SensorCapture] using first available source:', { id: source.id, name: source.name });
     if (!source) {
-      sensorCaptureInProgress = false;
       throw new Error('No screen or window source available for capture');
     }
 
     const pngBuffer = source.thumbnail.toPNG();
     if (!pngBuffer || !pngBuffer.length) {
-      sensorCaptureInProgress = false;
       throw new Error('Screen capture returned an empty image');
     }
     try {
       await fs.promises.writeFile(imagePath, pngBuffer);
+      capturePngBuffer = pngBuffer;
     } catch (writeErr) {
-      sensorCaptureInProgress = false;
       throw writeErr;
     }
     sourceName = source.name || 'Screen';
   }
 
+  if (!capturePngBuffer && fs.existsSync(imagePath)) {
+    capturePngBuffer = await fs.promises.readFile(imagePath).catch(() => null);
+  }
+
+  // Use the visual fingerprint as the cheap gate before OCR/embedding work.
+  const fingerprint = buildPerceptualFingerprintFromPngBuffer(capturePngBuffer);
+  const visualDiffPct = Number((fingerprintDiffPercent(lastAcceptedCaptureFingerprint, fingerprint) * 100).toFixed(2));
+  const visualChangeSignificant = !lastAcceptedCaptureFingerprint || !fingerprint || visualDiffPct >= (CAPTURE_VISUAL_DIFF_THRESHOLD * 100);
+  const forceCapture = /manual|reset/i.test(String(reason || ''));
+  const isPeriodicScreenshot = /periodic-screenshot/i.test(String(reason || ''));
+
+  if (fingerprint) {
+    lastAcceptedCaptureFingerprint = fingerprint;
+  }
+
+  if (!visualChangeSignificant && !forceCapture) {
+    return {
+      skipped: true,
+      reason: 'low_visual_change',
+      screenshot_present: Boolean(fs.existsSync(imagePath)),
+      imagePath: fs.existsSync(imagePath) ? imagePath : null,
+      screenshot_filename: filename,
+      activeApp: windowContext.appName || '',
+      activeWindowTitle: windowContext.windowTitle || '',
+      visual_diff_pct: visualDiffPct,
+      visual_diff_threshold_pct: Number((CAPTURE_VISUAL_DIFF_THRESHOLD * 100).toFixed(2))
+    };
+  }
+
   const contextSuffix = [windowContext.appName, windowContext.windowTitle].filter(Boolean).join(' - ');
   const studySession = getStudySessionState();
   const inStudySession = studySession?.status === 'active' && Boolean(studySession?.session_id);
+
+  const axText = String(windowContext.extractedText || '').trim();
+  const canUseAxOnly = !forceCapture && !isPeriodicScreenshot && axText.length >= 80;
+  let ocrStartTime = Date.now();
+  const ocr = canUseAxOnly
+    ? {
+        text: '',
+        lines: [],
+        confidence: 0,
+        status: isPeriodicScreenshot ? 'skipped_periodic_capture' : 'skipped_ax_text_available'
+      }
+    : await runVisionOCR(imagePath);
+  const ocrDuration = Date.now() - ocrStartTime;
+
+  const ocrText = String(ocr.text || '').trim();
+  const mergedText = [axText, ocrText].filter(Boolean).join('\n').trim();
+
+  if (!canUseAxOnly && ocrDuration > 500) {
+    console.log(`[SensorCapture] OCR completed in ${ocrDuration}ms for ${imagePath}`);
+  }
 
   const event = {
     id: `sensor_${timestamp}`,
@@ -1178,28 +1321,23 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     windowBounds: windowContext.bounds || null,
     windowContextStatus: windowContext.status || 'unavailable',
     imagePath: imagePath,
-    text: '',
-    textCaptureSource: 'none',
-    ocrLines: [],
-    ocrConfidence: 0,
-    ocrStatus: 'processing',
+    text: mergedText,
+    textCaptureSource: axText && ocrText ? 'ax+ocr' : (ocrText ? 'ocr' : (axText ? 'ax' : 'none')),
+    ocrLines: ocr.lines || [],
+    ocrConfidence: ocr.confidence || 0,
+    ocrStatus: ocr.status || (ocrText ? 'complete' : 'no_text'),
+    ocrDuration,
+    visual_diff_pct: visualDiffPct,
+    visual_diff_threshold_pct: Number((CAPTURE_VISUAL_DIFF_THRESHOLD * 100).toFixed(2)),
+    visual_change_significant: visualChangeSignificant,
+    screenshot_folder: sensorStorageDir,
+    screenshot_filename: filename,
     reason,
     study_session_id: inStudySession ? studySession.session_id : null,
     study_goal: inStudySession ? (studySession.goal || '') : '',
     study_subject: inStudySession ? (studySession.subject || '') : ''
   };
   if (windowContext.error) event.windowContextError = windowContext.error;
-  // Always run OCR so screenshot text capture is not reliant on AX-only extraction.
-  const axText = String(windowContext.extractedText || '').trim();
-  const ocr = await runVisionOCR(imagePath);
-  // Keep screenshot for better identification
-  const ocrText = String(ocr.text || '').trim();
-  const mergedText = [axText, ocrText].filter(Boolean).join('\n').trim();
-  event.text = mergedText;
-  event.textCaptureSource = axText && ocrText ? 'ax+ocr' : (ocrText ? 'ocr' : (axText ? 'ax' : 'none'));
-  event.ocrLines = ocr.lines || [];
-  event.ocrConfidence = ocr.confidence || 0;
-  event.ocrStatus = ocr.status || (ocrText ? 'complete' : 'no_text');
   if (ocr.error) event.ocrError = ocr.error;
   if (isReducedLoadMode()) lastLowPowerOCRAt = Date.now();
 
@@ -1213,67 +1351,120 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
 
   // Content filtering - check for sensitive content and delete if found
   const filterCheck = shouldFilterCapture(
-    event.text, 
-    event.activeWindowTitle, 
+    event.text,
+    event.activeWindowTitle,
     event.activeApp,
     null // URL not available for screen captures
   );
-  
+
   if (filterCheck.shouldFilter) {
-    // Clean up and delete the sensitive capture
-    sensorCaptureInProgress = false;
-    await deleteSensitiveCapture(imagePath, event.id, filterCheck.reason);
-    return null; // Return null to indicate capture was filtered
+    const filterResult = await deleteSensitiveCapture(imagePath, event.id, filterCheck.reason);
+    return {
+      ...event,
+      filtered: true,
+      filter_reason: filterCheck.reason,
+      sensitive_category: filterCheck.category || null,
+      retained_for_durability: Boolean(filterResult?.retained_for_durability),
+      screenshot_present: Boolean(fs.existsSync(imagePath)),
+      imagePath: fs.existsSync(imagePath) ? imagePath : null
+    };
   }
 
   const existing = pruneOldSensorCaptures(getSensorEvents());
-  const nextEvents = [event, ...existing];
+  const { maxEvents } = getSensorSettings();
+  const nextEvents = [event, ...existing].slice(0, Math.max(50, Number(maxEvents || DEFAULT_SENSOR_SETTINGS.maxEvents)));
 
   store.set('sensorEvents', nextEvents);
-  
-  // L1 Ingestion
+
+  if (isPeriodicScreenshot) {
+    // The 30s screenshot cadence must not be blocked by DB/vector ingestion.
+    sensorCaptureInProgress = false;
+    captureLockReleased = true;
+  }
+
+  // L1 Ingestion - Always save OCR to memory with full metadata
   try {
     const { ingestRawEvent } = require('./services/ingestion');
-    await ingestRawEvent({ 
-      type: 'ScreenCapture', 
-      timestamp: event.timestamp, 
-      source: 'Sensors', 
+    const ingestPayload = {
+      type: 'ScreenCapture',
+      timestamp: event.timestamp,
+      source: 'Sensors',
       text: [
         event.activeApp ? `App: ${event.activeApp}` : '',
         event.activeWindowTitle ? `Window: ${event.activeWindowTitle}` : '',
+        ocrText ? `OCR raw text:\n${ocrText}` : '',
+        axText ? `AX raw text:\n${axText}` : '',
         event.text ? `Captured text:\n${event.text}` : ''
       ].filter(Boolean).join('\n'),
       metadata: {
         ...event,
         app: event.activeApp || 'Desktop',
+        source_app: event.activeApp || 'Desktop',
+        data_source: 'screenshot_ocr',
         window_title: event.activeWindowTitle || '',
+        context_title: event.activeWindowTitle || event.sourceName || '',
+        timestamp: event.captured_at,
+        app_id: event.activeApp || 'Desktop',
+        raw_ocr_text: ocrText,
+        raw_ax_text: axText,
+        raw_ocr_lines: event.ocrLines || [],
+        raw_ocr_confidence: event.ocrConfidence || 0,
+        ocr_text_char_count: ocrText.length,
+        ax_text_char_count: axText.length,
         text_capture_source: event.textCaptureSource || 'none',
         study_context: event.study_context,
         study_signal: event.study_signal,
         study_session_id: event.study_session_id,
         study_goal: event.study_goal,
-        study_subject: event.study_subject
+        study_subject: event.study_subject,
+        screenshot_folder: event.screenshot_folder,
+        screenshot_filename: event.screenshot_filename,
+        screenshot_path: event.imagePath,
+        capture_reason: event.reason,
+        capture_interval_seconds: 30
       }
-    });
+    };
+
+    await ingestRawEvent(ingestPayload);
+
+    // Log OCR ingestion with metadata
+    const ocrSummary = [
+      `OCR status: ${event.ocrStatus}`,
+      event.ocrConfidence ? `confidence: ${(event.ocrConfidence * 100).toFixed(1)}%` : null,
+      event.ocrDuration ? `duration: ${event.ocrDuration}ms` : null,
+      `source: ${event.textCaptureSource}`,
+      `ocr_chars: ${ocrText.length}`,
+      `ax_chars: ${axText.length}`,
+      event.text ? `text_chars: ${event.text.length}` : 'no_text'
+    ].filter(Boolean).join(', ');
+
+    console.log(`[OCRIngestion] Saved to memory | app=${event.activeApp} | ${ocrSummary}`);
+
     store.set('memoryGraphHealth', {
       ...(store.get('memoryGraphHealth') || {}),
       lastDesktopCaptureAt: new Date().toISOString(),
       desktopCaptureStatus: 'idle',
       lastDesktopCaptureSource: event.textCaptureSource || 'none',
-      lastDesktopCaptureApp: event.activeApp || ''
+      lastDesktopCaptureApp: event.activeApp || '',
+      lastOCRStatus: event.ocrStatus,
+      lastOCRConfidence: event.ocrConfidence
     });
-    
+
     // Throttle expensive background suggestion generation to avoid UI slowdown.
-    const triggerInterval = isReducedLoadMode() ? CAPTURE_TRIGGER_MIN_INTERVAL_MS * 2 : CAPTURE_TRIGGER_MIN_INTERVAL_MS; if ((Date.now() - lastCaptureSuggestionTriggerAt) >= triggerInterval) {
+    const triggerInterval = isReducedLoadMode()
+      ? Math.max(CAPTURE_TRIGGER_MIN_INTERVAL_MS * 2, LOW_POWER_HEAVY_JOB_MIN_GAP_MS)
+      : Math.max(CAPTURE_TRIGGER_MIN_INTERVAL_MS, LOW_POWER_HEAVY_JOB_MIN_GAP_MS);
+    if ((Date.now() - lastCaptureSuggestionTriggerAt) >= triggerInterval) {
       lastCaptureSuggestionTriggerAt = Date.now();
       setTimeout(() => {
-        runSuggestionEngineJob().catch(err => 
+        runSuggestionEngineJob().catch(err =>
           console.log('Background suggestion engine trigger failed:', err?.message || err)
         );
       }, 10000); // 10 second delay to allow ingestion to complete
     }
   } catch (e) {
-    console.error('[captureDesktopSensorSnapshot] L1 ingestion failed:', e);
+    console.error('[captureDesktopSensorSnapshot] L1 ingestion failed:', e.message || e);
+    console.error('[captureDesktopSensorSnapshot] Failed to ingest OCR capture from:', event.activeApp || 'unknown app');
     store.set('memoryGraphHealth', {
       ...(store.get('memoryGraphHealth') || {}),
       desktopCaptureStatus: 'error',
@@ -1282,8 +1473,15 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     });
   }
 
-  sensorCaptureInProgress = false;
-  return event;
+    return event;
+  } catch (error) {
+    console.error('[captureDesktopSensorSnapshot] capture failed:', error?.message || error);
+    throw error;
+  } finally {
+    if (!captureLockReleased) {
+      sensorCaptureInProgress = false;
+    }
+  }
 }
 
 function startSensorCaptureLoop(mode = null) {
@@ -1294,9 +1492,8 @@ function startSensorCaptureLoop(mode = null) {
   }
   if (!settings.enabled) return;
 
-  captureDesktopSensorSnapshot("loop-start").catch((error) => {
-    console.warn("Initial sensor capture failed:", error && error.message ? error.message : error);
-  });
+  // Startup capture is handled by the periodic 30-second screenshot loop.
+  // Skip duplicate immediate capture here to reduce launch-time load.
 
   const currentMode = mode || getPerformanceMode();
   let intervalMs;
@@ -1314,7 +1511,7 @@ function startSensorCaptureLoop(mode = null) {
   }, intervalMs);
 }
 
-// Periodic screenshot capture every 30 seconds
+// Periodic screenshot capture with a fixed 30-second cadence.
 function startPeriodicScreenshotCapture(mode = null) {
   if (periodicScreenshotTimer) {
     clearInterval(periodicScreenshotTimer);
@@ -1322,36 +1519,31 @@ function startPeriodicScreenshotCapture(mode = null) {
   }
 
   const currentMode = mode || getPerformanceMode();
-  let intervalMs;
-  if (currentMode === 'deep-idle') intervalMs = 300000; // 5m
-  else if (currentMode === 'reduced') intervalMs = 120000; // 2m
-  else intervalMs = 30000; // 30s
+  const intervalMs = 30 * 1000;
 
-  console.log(`[Screenshot] Starting periodic screenshot capture every ${intervalMs / 1000}s (Reduced mode: ${currentMode === 'reduced'})`);
+  console.log(`[Screenshot] Starting periodic screenshot capture every ${intervalMs / 1000}s (mode=${currentMode})`);
 
-  // Take first screenshot immediately
-  console.log("[Screenshot] Taking initial screenshot...");
-  observeDesktopState({ forceScreenshot: true })
-    .then((result) => {
-      console.log("[Screenshot] Initial screenshot result:", {
-        screenshot_present: result?.screenshot?.present,
-        file_name: result?.screenshot?.file_name,
-        decision_reason: result?.screenshot_summary?.decision_reason
-      });
-    })
-    .catch((error) => {
-      console.error("[Screenshot] Initial screenshot failed:", error?.message || error);
-    });
-
-  // Then take screenshots periodically
+  // Avoid an immediate startup capture; OCR and embedding work must not compete
+  // with the renderer while the app is still becoming interactive.
   periodicScreenshotTimer = setInterval(() => {
+    if (screenshotsPausedForDisplayOff) {
+      console.log('[Screenshot] Paused because display/system is asleep');
+      return;
+    }
     console.log("[Screenshot] Taking periodic screenshot...");
-    observeDesktopState({ forceScreenshot: true })
+    captureDesktopSensorSnapshot('periodic-screenshot')
       .then((result) => {
-        if (result?.screenshot?.present) {
-          console.log("[Screenshot] Periodic screenshot captured:", result.screenshot.file_name);
+        if (result?.imagePath) {
+          console.log(result?.filtered ? "[Screenshot] Periodic screenshot filtered:" : "[Screenshot] Periodic screenshot captured:", {
+            file: result.screenshot_filename,
+            app: result.activeApp || '',
+            ocr_status: result.ocrStatus,
+            text_source: result.textCaptureSource || 'none',
+            filtered: Boolean(result?.filtered),
+            reason: result?.filter_reason || null
+          });
         } else {
-          console.warn("[Screenshot] Periodic screenshot skipped:", result?.screenshot_summary?.decision_reason || "unknown");
+          console.warn("[Screenshot] Periodic screenshot skipped:", result?.reason || "unknown");
         }
       })
       .catch((error) => {
@@ -1367,7 +1559,7 @@ function scheduleDailyTasks() {
   if (dailySummaryTimer) clearTimeout(dailySummaryTimer);
   if (patternUpdateTimer) clearTimeout(patternUpdateTimer);
   if (morningBriefTimer) clearTimeout(morningBriefTimer);
-  
+
   // Schedule morning brief at 7:00 AM
   const morningBriefTime = new Date();
   morningBriefTime.setHours(7, 0, 0, 0);
@@ -1398,7 +1590,7 @@ function scheduleDailyTasks() {
     summaryTime.setDate(summaryTime.getDate() + 1);
   }
   const summaryDelay = summaryTime.getTime() - now.getTime();
-  
+
   dailySummaryTimer = setTimeout(async () => {
     console.log('Running scheduled daily summary generation...');
     try {
@@ -1407,13 +1599,13 @@ function scheduleDailyTasks() {
     } catch (error) {
       console.error('Error in scheduled daily summary:', error);
     }
-    
+
     // Schedule next day's summary
     scheduleDailyTasks();
   }, summaryDelay);
-  
+
   console.log(`Daily summary scheduled for: ${summaryTime.toLocaleString()}`);
-  
+
   // Schedule pattern update at 11:59 PM
   const patternTime = new Date();
   patternTime.setHours(23, 59, 0, 0);
@@ -1421,34 +1613,34 @@ function scheduleDailyTasks() {
     patternTime.setDate(patternTime.getDate() + 1);
   }
   const patternDelay = patternTime.getTime() - now.getTime();
-  
+
   patternUpdateTimer = setTimeout(async () => {
     console.log('Running scheduled pattern update...');
     try {
       // Update user patterns based on today's activity
       const userProfile = store.get('userProfile') || {};
       const browsingHistory = await getBrowserHistory();
-      
+
       // Analyze patterns and update profile
       await updateUserPatterns(userProfile, browsingHistory);
       store.set('userProfile', userProfile);
-      
+
       console.log('Scheduled pattern update completed');
     } catch (error) {
       console.error('Error in scheduled pattern update:', error);
     }
-    
+
     // Schedule next day's pattern update
     scheduleDailyTasks();
   }, patternDelay);
-  
+
   console.log(`Pattern update scheduled for: ${patternTime.toLocaleString()}`);
 
   // Schedule minutely GSuite sync
   const lastSync = store.get('googleData')?.lastSync;
   const lastSyncMs = parseSyncCursorMs(lastSync);
-  const timeSinceSync = lastSyncMs ? (now.getTime() - lastSyncMs) : MINUTELY_MS;
-  const syncDelay = Math.max(0, MINUTELY_MS - timeSinceSync);
+  const timeSinceSync = lastSyncMs ? (now.getTime() - lastSyncMs) : GSUITE_SYNC_INTERVAL_MS;
+  const syncDelay = Math.max(STARTUP_HEAVY_JOB_DELAY_MS, GSUITE_SYNC_INTERVAL_MS - timeSinceSync);
 
   if (minutelySyncTimer) clearTimeout(minutelySyncTimer);
   minutelySyncTimer = setTimeout(async () => {
@@ -1456,11 +1648,12 @@ function scheduleDailyTasks() {
     startMinutelySyncLoop();
   }, syncDelay);
 
-  console.log(`Minutely sync scheduled for: ${new Date(Date.now() + syncDelay).toLocaleString()}`);
+  console.log(`GSuite sync scheduled for: ${new Date(Date.now() + syncDelay).toLocaleString()}`);
 }
 
 async function runMinutelySync() {
   console.log('Running automated minutely GSuite sync...');
+  if (shouldDeferBackgroundWork('GSuiteSync')) return;
   if (global.__gsuite_sync_lock) {
     console.log('GSuite sync already running; skipping this cycle');
     return;
@@ -1588,17 +1781,17 @@ async function runMinutelySync() {
       const browserHistory = await getBrowserHistory();
       const lastHistory = store.get('lastHistorySync') || 0;
       const recentHistory = browserHistory.filter(h => (h.timestamp || h.last_visit_time || Date.now()) > lastHistory);
-      
+
       for (const h of recentHistory) {
         const ts = h.timestamp || h.last_visit_time || Date.now();
         const domain = (() => {
           try { return new URL(h.url || '').hostname; } catch (_) { return ''; }
         })();
         const stableId = Buffer.from(`${h.url || ''}|${ts}`).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 24);
-        await ingestRawEvent({ 
-          type: 'BrowserVisit', 
-          timestamp: ts, 
-          source: 'Browser', 
+        await ingestRawEvent({
+          type: 'BrowserVisit',
+          timestamp: ts,
+          source: 'Browser',
           text: [
             h.title ? `Title: ${h.title}` : '',
             h.url ? `URL: ${h.url}` : '',
@@ -1611,12 +1804,12 @@ async function runMinutelySync() {
             captured_at: new Date(ts).toISOString(),
             captured_at_local: new Date(ts).toLocaleString(),
             domain
-          } 
+          }
         });
         ingestedCount++;
       }
       store.set('lastHistorySync', Date.now());
-      
+
       console.log(`[runMinutelySync] Ingested ${ingestedCount} new raw events into SQLite L1. Checks: emails=${newEmailCount}, new_events=${newEventCount}, edited_events=${editedEventCount}, cursor_advanced=${shouldAdvanceLastSync}`);
     } catch (gErr) {
       console.warn('[runMinutelySync] L1 ingestion failed:', gErr.message || gErr);
@@ -1640,18 +1833,18 @@ function startMinutelySyncLoop() {
   });
   minutelySyncInterval = setInterval(() => {
     runMinutelySync().catch((e) => console.warn('Minutely sync interval failed:', e?.message || e));
-  }, MINUTELY_MS);
+  }, GSUITE_SYNC_INTERVAL_MS);
 }
 
 function startSourceWarmup() {
   setTimeout(() => {
     runMinutelySync().catch((e) => console.warn('[Warmup] Minutely sync failed:', e?.message || e));
-  }, 8000);
+  }, STARTUP_HEAVY_JOB_DELAY_MS);
 
   setTimeout(() => {
     if (!getSensorSettings().enabled) return;
     captureDesktopSensorSnapshot('startup').catch((e) => console.warn('[Warmup] Startup capture failed:', e?.message || e));
-  }, 12000);
+  }, 3 * 60 * 1000);
 }
 
 // ── Memory Graph Processing Functions ───────────────────────────────
@@ -1668,9 +1861,9 @@ async function hasNewNodesSince(jobKey, layers = []) {
 async function hasNewEventsSince(jobKey) {
   const lastProcessed = store.get(`lastProcessedEventTimestamp:${jobKey}`) || "2000-01-01T00:00:00.000Z";
   const row = await db.getQuery(`SELECT COUNT(*) as count, MAX(timestamp) as max_ts FROM events WHERE timestamp > ?`, [lastProcessed]);
-  return { 
-    hasNew: row && row.count > 0, 
-    maxTs: row && row.max_ts ? row.max_ts : lastProcessed 
+  return {
+    hasNew: row && row.count > 0,
+    maxTs: row && row.max_ts ? row.max_ts : lastProcessed
   };
 }
 
@@ -1686,16 +1879,16 @@ async function runEpisodeGeneration() {
     return;
   }
   if (!canRunHeavyJob(lastEpisodeHeavyRunAt)) {
-    console.log('[EpisodeJob] Skipping to reduce system load (battery/thermal mode)');
+    console.log('[EpisodeJob] Skipping to reduce system load / active use');
     return;
   }
   lastEpisodeHeavyRunAt = Date.now();
   episodeJobLock = true;
-  
+
   try {
     console.log('[EpisodeJob] Running 15-minute episode generation...');
     const { runEpisodeJob } = require('./services/agent/intelligence-engine');
-    
+
     store.set('memoryGraphHealth', {
       ...(store.get('memoryGraphHealth') || {}),
       lastEpisodeAttemptAt: new Date().toISOString(),
@@ -1711,7 +1904,7 @@ async function runEpisodeGeneration() {
       lastEpisodeCount: newEpisodeIds.length,
       episodeStatus: 'idle'
     });
-    
+
     // Send status to UI
     if (mainWindow && mainWindow.webContents) {
       mainWindow.webContents.send('memory-graph-update', {
@@ -1735,6 +1928,7 @@ async function runEpisodeGeneration() {
 
 async function runSemanticWindowGeneration() {
   try {
+    if (shouldDeferBackgroundWork('SemanticWindow')) return;
     const check = await hasNewEventsSince('semantic');
     if (!check.hasNew) {
       console.log('[SemanticWindow] No new events since last run, skipping');
@@ -1785,12 +1979,12 @@ async function runSuggestionEngineJob() {
     return;
   }
   if (!canRunHeavyJob(lastSuggestionHeavyRunAt)) {
-    console.log('[SuggestionEngine] Skipping to reduce system load (battery/thermal mode)');
+    console.log('[SuggestionEngine] Skipping to reduce system load / active use');
     return;
   }
   lastSuggestionHeavyRunAt = Date.now();
   suggestionJobLock = true;
-  
+
   try {
     const llmConfig = getSuggestionLLMConfig();
     const envToggle = String(process.env.PROACTIVE_AUTO_CREATE_TODOS || '').toLowerCase();
@@ -1818,7 +2012,7 @@ async function runSuggestionEngineJob() {
     console.log(`[SuggestionEngine] Running 30-minute suggestion engine (${llmConfig.provider})...`);
     const { generateTopTodosFromMemoryQuery, generateAndPersistTasksFromLLM } = require('./services/agent/suggestion-engine');
     const proactiveMemory = store.get('proactiveMemory') || { core: '' };
-    
+
     store.set('memoryGraphHealth', {
       ...(store.get('memoryGraphHealth') || {}),
       lastSuggestionAttemptAt: new Date().toISOString(),
@@ -1838,7 +2032,7 @@ async function runSuggestionEngineJob() {
       lastSuggestionCount: newSuggestions.length,
       suggestionStatus: 'idle'
     });
-    
+
     // Keep only AI-generated suggestions; no non-AI fallbacks allowed.
     const latestSuggestions = (Array.isArray(newSuggestions) ? newSuggestions : [])
       .filter((item) => item && item.ai_generated !== false)
@@ -1939,11 +2133,11 @@ async function runWeeklyInsightJobScheduled() {
 
     console.log('[WeeklyInsight] Running weekly insight generation...');
     const { runWeeklyInsightJob } = require('./services/agent/intelligence-engine');
-    
+
     await runWeeklyInsightJob(apiKey);
     store.set('lastRunTimestamp:weekly_insight', check.maxAt);
     console.log('[WeeklyInsight] Weekly insights completed');
-    
+
     // Send status to UI
     if (mainWindow && mainWindow.webContents) {
       mainWindow.webContents.send('memory-graph-update', {
@@ -1958,6 +2152,7 @@ async function runWeeklyInsightJobScheduled() {
 
 async function runDailyInsightsScheduled() {
   try {
+    if (shouldDeferBackgroundWork('DailyInsight')) return;
     const apiKey = process.env.DEEPSEEK_API_KEY;
     if (!apiKey) {
       console.warn('[DailyInsight] No DeepSeek API key, skipping daily insights');
@@ -1984,6 +2179,7 @@ async function runDailyInsightsScheduled() {
 
 async function runHourlySemanticPulseJob() {
   try {
+    if (shouldDeferBackgroundWork('SemanticPulse')) return;
     const apiKey = process.env.DEEPSEEK_API_KEY;
     if (!apiKey) {
       console.warn('[SemanticPulse] No DeepSeek API key, skipping hourly pulse');
@@ -1993,7 +2189,7 @@ async function runHourlySemanticPulseJob() {
     const { runHourlySemanticPulse } = require('./services/agent/intelligence-engine');
     const consolidatedIds = await runHourlySemanticPulse(apiKey);
     console.log(`[SemanticPulse] Consolidated ${consolidatedIds.length} semantic nodes`);
-    
+
     if (mainWindow && mainWindow.webContents) {
       mainWindow.webContents.send('memory-graph-update', {
         type: 'hourly_pulse_completed',
@@ -2038,7 +2234,7 @@ function startMemoryGraphProcessing() {
     processorStartedAt: new Date().toISOString(),
     processorTimersActive: true
   });
-  
+
   // Episode generation every 15 minutes
   // Episode generation & semantic window summaries aligned to wall-clock quarter-hours (:00, :15, :30, :45)
   try {
@@ -2068,7 +2264,7 @@ function startMemoryGraphProcessing() {
     if (semanticsTimer) clearInterval(semanticsTimer);
     semanticsTimer = setInterval(runSemanticWindowGeneration, 15 * 60 * 1000);
   }
-  
+
 
     // Hourly semantic pulse aligned to the hour boundary (:00)
     try {
@@ -2087,19 +2283,16 @@ function startMemoryGraphProcessing() {
   // Suggestion engine every 30 minutes
   if (suggestionEngineTimer) clearInterval(suggestionEngineTimer);
   suggestionEngineTimer = setInterval(runSuggestionEngineJob, SUGGESTION_REFRESH_INTERVAL_MINUTES * 60 * 1000);
-  
+
   // Schedule weekly insights for Sunday 11:59 PM
   scheduleWeeklyInsights();
 
   // Schedule daily insights (every day at 23:00 local time by default)
   scheduleDailyInsights();
   scheduleLivingCore();
-  
-  // Warm the graph immediately on startup, then follow with the scheduled loop.
-  setTimeout(() => {
-    runEpisodeGeneration().catch((e) => console.warn('[MemoryGraph] Initial episode generation failed:', e?.message || e));
-  }, 5000);
-  
+
+  // Avoid heavy graph work during initial UI load; rely on scheduled aligned runs.
+
   // Suggestions can lag slightly behind the graph warmup.
   setTimeout(() => {
     runSuggestionEngineJob().catch((e) => console.warn('[MemoryGraph] Initial suggestion generation failed:', e?.message || e));
@@ -2108,24 +2301,24 @@ function startMemoryGraphProcessing() {
 
 function scheduleWeeklyInsights() {
   if (weeklyInsightTimer) clearTimeout(weeklyInsightTimer);
-  
+
   const now = new Date();
   const nextSunday = new Date(now);
   nextSunday.setDate(now.getDate() + ((7 - now.getDay()) % 7 || 7)); // Next Sunday
   nextSunday.setHours(23, 59, 0, 0);
-  
+
   if (nextSunday <= now) {
     nextSunday.setDate(nextSunday.getDate() + 7); // Next week if already past
   }
-  
+
   const delay = nextSunday.getTime() - now.getTime();
-  
+
   weeklyInsightTimer = setTimeout(async () => {
     await runWeeklyInsightJobScheduled();
     // Schedule next week
     scheduleWeeklyInsights();
   }, delay);
-  
+
   console.log(`[WeeklyInsight] Scheduled for: ${nextSunday.toLocaleString()}`);
 }
 
@@ -2186,10 +2379,10 @@ function stopMemoryGraphProcessing() {
 // Update user patterns based on browsing behavior
 async function updateUserPatterns(userProfile, browsingHistory) {
   const today = new Date().toDateString();
-  const todayHistory = browsingHistory.filter(item => 
+  const todayHistory = browsingHistory.filter(item =>
     new Date(item.last_visit_time).toDateString() === today
   );
-  
+
   // Analyze most visited domains
   const domainCounts = {};
   todayHistory.forEach(item => {
@@ -2198,12 +2391,12 @@ async function updateUserPatterns(userProfile, browsingHistory) {
       domainCounts[domain] = (domainCounts[domain] || 0) + 1;
     } catch (e) {}
   });
-  
+
   const topDomains = Object.entries(domainCounts)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5)
     .map(([domain]) => domain);
-  
+
   // Update user profile with new patterns
   userProfile.patterns = {
     ...userProfile.patterns,
@@ -2211,7 +2404,7 @@ async function updateUserPatterns(userProfile, browsingHistory) {
     lastUpdated: new Date().toISOString(),
     analysisDate: today
   };
-  
+
   return userProfile;
 }
 
@@ -2226,7 +2419,7 @@ const DataModels = {
     duration: Number,
     device_type: String
   },
-  
+
   // Gmail events
   MessageEvent: {
     from: String,
@@ -2239,7 +2432,7 @@ const DataModels = {
     is_unreplied: Boolean,
     opened_times: Number
   },
-  
+
   // Calendar events
   CalendarEvent: {
     event_title: String,
@@ -2249,7 +2442,7 @@ const DataModels = {
     is_recurring: Boolean,
     type: String // "Exam", "Interview", "Team meeting", "Workout"
   },
-  
+
   // Drive/Docs events
   DocEvent: {
     doc_id: String,
@@ -2403,7 +2596,7 @@ class ProactiveSuggestionEngine {
   // Step 1: Extract intent clusters from signals
   extractIntentClusters(signals) {
     const clusters = {};
-    
+
     // Initialize clusters
     Object.values(IntentClusters).forEach(cluster => {
       clusters[cluster] = { count: 0, examples: [], signals: [] };
@@ -2464,69 +2657,69 @@ class ProactiveSuggestionEngine {
 
   inferClusterFromPage(visit) {
     const { domain, page_title } = visit;
-    
+
     // Job search patterns
     if (domain.includes('linkedin.com') && page_title.includes('career')) return IntentClusters.JOB_SEARCH;
     if (domain.includes('linkedin.com') && page_title.includes('job')) return IntentClusters.JOB_SEARCH;
     if (domain.includes('indeed.com') || domain.includes('glassdoor.com')) return IntentClusters.JOB_SEARCH;
     if (domain.includes('careers') || page_title.includes('career')) return IntentClusters.JOB_SEARCH;
-    
+
     // Thesis/study patterns
     if (domain.includes('university.edu') || domain.includes('edu')) return IntentClusters.THESIS_STUDY;
     if (page_title.includes('exam') || page_title.includes('thesis') || page_title.includes('research')) return IntentClusters.THESIS_STUDY;
-    
+
     // Relationship/networking patterns
     if (domain.includes('linkedin.com') && page_title.includes('profile')) return IntentClusters.RELATIONSHIP_NETWORKING;
     if (domain.includes('facebook.com') || domain.includes('instagram.com')) return IntentClusters.RELATIONSHIP_NETWORKING;
-    
+
     // Personal care patterns
     if (domain.includes('gym') || domain.includes('fitness') || page_title.includes('workout')) return IntentClusters.PERSONAL_CARE;
     if (domain.includes('youtube.com') && (page_title.includes('exercise') || page_title.includes('fitness'))) return IntentClusters.PERSONAL_CARE;
-    
+
     // Side project patterns
     if (domain.includes('github.com') || domain.includes('notion.so') || page_title.includes('project')) return IntentClusters.SIDE_PROJECT;
-    
+
     // Procrastination/distraction patterns
     if (domain.includes('youtube.com') || domain.includes('reddit.com') || domain.includes('twitter.com')) {
       return IntentClusters.PROCRASTINATION_DISTRACTION;
     }
-    
+
     return null;
   }
 
   inferClusterFromEmail(email) {
     const { subject, body_snippet } = email;
     const content = (subject + ' ' + body_snippet).toLowerCase();
-    
+
     if (content.includes('interview') || content.includes('recruiter') || content.includes('offer')) return IntentClusters.JOB_SEARCH;
     if (content.includes('thesis') || content.includes('research') || content.includes('report')) return IntentClusters.THESIS_STUDY;
     if (content.includes('coffee') || content.includes('meet') || content.includes('catch up')) return IntentClusters.RELATIONSHIP_NETWORKING;
     if (content.includes('project') || content.includes('startup') || content.includes('idea')) return IntentClusters.SIDE_PROJECT;
-    
+
     return null;
   }
 
   inferClusterFromCalendar(event) {
     const { event_title } = event;
     const title = event_title.toLowerCase();
-    
+
     if (title.includes('interview')) return IntentClusters.JOB_SEARCH;
     if (title.includes('exam') || title.includes('study') || title.includes('class')) return IntentClusters.THESIS_STUDY;
     if (title.includes('coffee') || title.includes('meet') || title.includes('call')) return IntentClusters.RELATIONSHIP_NETWORKING;
     if (title.includes('workout') || title.includes('gym') || title.includes('exercise')) return IntentClusters.PERSONAL_CARE;
     if (title.includes('project') || title.includes('startup')) return IntentClusters.SIDE_PROJECT;
-    
+
     return null;
   }
 
   inferClusterFromDoc(doc) {
     const { doc_name } = doc;
     const name = doc_name.toLowerCase();
-    
+
     if (name.includes('resume') || name.includes('cv') || name.includes('cover')) return IntentClusters.JOB_SEARCH;
     if (name.includes('thesis') || name.includes('research') || name.includes('paper')) return IntentClusters.THESIS_STUDY;
     if (name.includes('pitch') || name.includes('proposal') || name.includes('idea')) return IntentClusters.SIDE_PROJECT;
-    
+
     return null;
   }
 
@@ -2906,14 +3099,14 @@ class ProactiveSuggestionEngine {
 
   calculateImportance(candidate) {
     // Check alignment with user goals
-    const alignedGoal = this.userGoals.find(goal => 
+    const alignedGoal = this.userGoals.find(goal =>
       candidate.cluster && goal.cluster === candidate.cluster
     );
-    
+
     if (alignedGoal) {
       return alignedGoal.priority === 'high' ? 1 : alignedGoal.priority === 'medium' ? 0.7 : 0.4;
     }
-    
+
     // Default importance based on cluster
     const clusterImportance = {
       [IntentClusters.JOB_SEARCH]: 0.8,
@@ -3105,19 +3298,19 @@ class ProactiveSuggestionEngine {
     try {
       // Collect signals from last 7 days
       const signals = await this.collectSignals();
-      
+
       // Step 1: Extract intent clusters
       const clusters = this.extractIntentClusters(signals);
-      
+
       // Step 2: Generate candidate actions
       const candidates = this.generateCandidateActions(signals);
-      
+
       // Step 3: Score and prioritize
       const prioritized = this.scoreAndPrioritize(candidates);
-      
+
       // Step 4: Generate specific suggestions
       const suggestions = this.generateSuggestions(prioritized);
-      
+
       return {
         clusters,
         suggestions,
@@ -3132,10 +3325,10 @@ class ProactiveSuggestionEngine {
 
   async collectSignals() {
     const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
-    
+
     // Get browser history (filtered to last 7 days)
     const browserHistory = await getBrowserHistory();
-    const recentBrowserHistory = browserHistory.filter(visit => 
+    const recentBrowserHistory = browserHistory.filter(visit =>
       visit.last_visit_time > sevenDaysAgo
     ).map(visit => ({
       domain: this.extractDomain(visit.url),
@@ -3222,7 +3415,7 @@ class ProactiveSuggestionEngine {
 // Start OAuth server
 oauthApp.get('/oauth2callback', async (req, res) => {
   const { code } = req.query;
-  
+
   try {
     // Exchange code for tokens
     const response = await fetch('https://oauth2.googleapis.com/token', {
@@ -3240,7 +3433,7 @@ oauthApp.get('/oauth2callback', async (req, res) => {
     });
 
     const tokens = await response.json();
-    
+
     // Initialize Google API Auth temporarily to fetch user email
     const auth = new google.auth.OAuth2(
       GOOGLE_CLIENT_ID,
@@ -3263,18 +3456,18 @@ oauthApp.get('/oauth2callback', async (req, res) => {
     const filteredAccounts = currentAccounts.filter(acc => acc.email !== email);
     filteredAccounts.push({ email, tokens });
     store.set('googleAccounts', filteredAccounts);
-    
+
     // Legacy support (to avoid breaking current UI state checks)
     store.set('googleTokens', tokens);
-    
+
     // Send success response and close auth window
     res.send('<html><body><script>window.close();</script>Authentication successful! You can close this window.</body></html>');
-    
+
     if (authWindow) {
       authWindow.close();
       authWindow = null;
     }
-    
+
     // Notify main window
     mainWindow.webContents.send('auth-success');
     // Trigger a full GSuite sync immediately after successful OAuth
@@ -3283,7 +3476,7 @@ oauthApp.get('/oauth2callback', async (req, res) => {
         console.log('[oauth2callback] Triggering full Google sync after auth');
         await fullGoogleSync({ since: null, forceHistoricalBackfill: true });
         if (mainWindow && mainWindow.webContents) mainWindow.webContents.send('gsuite-sync-complete', store.get('googleData'));
-        
+
         // Auto-trigger memory graph processing after Google sync
         console.log('[oauth2callback] Triggering memory graph processing after Google sync');
         setTimeout(async () => {
@@ -3366,7 +3559,7 @@ async function fetchGmailData() {
 function extractActionItems(message) {
   const actions = [];
   const content = getMessageContent(message);
-  
+
   // Look for action-oriented phrases
   const actionPhrases = [
     /please\s+(.+?)(?:\.|$)/gi,
@@ -3376,14 +3569,14 @@ function extractActionItems(message) {
     /due:\s*(.+?)(?:\.|$)/gi,
     /action\s+item:\s*(.+?)(?:\.|$)/gi
   ];
-  
+
   actionPhrases.forEach(phrase => {
     const matches = content.match(phrase);
     if (matches) {
       actions.push(...matches.map(m => m.trim()));
     }
   });
-  
+
   return actions;
 }
 
@@ -3406,13 +3599,13 @@ function getMessageContent(message) {
 function needsReply(message) {
   const content = getMessageContent(message);
   const from = message.payload.headers.find(h => h.name === 'From')?.value || '';
-  
+
   // Check if it's a question
   if (content.includes('?')) return true;
-  
+
   // Check if it's from a person (not automated)
   if (!from.includes('noreply') && !from.includes('no-reply')) return true;
-  
+
   // Check for request phrases
   const requestPhrases = ['please', 'could you', 'would you', 'let me know', 'reply'];
   return requestPhrases.some(phrase => content.toLowerCase().includes(phrase));
@@ -3460,9 +3653,9 @@ async function fetchCalendarData() {
 function needsPreparation(event) {
   const summary = (event.summary || '').toLowerCase();
   const description = (event.description || '').toLowerCase();
-  
+
   const prepKeywords = ['interview', 'meeting', 'presentation', 'call', 'discussion', 'review'];
-  return prepKeywords.some(keyword => 
+  return prepKeywords.some(keyword =>
     summary.includes(keyword) || description.includes(keyword)
   );
 }
@@ -3470,12 +3663,12 @@ function needsPreparation(event) {
 // Get suggested preparation time
 function getSuggestedPrepTime(event) {
   const summary = (event.summary || '').toLowerCase();
-  
+
   if (summary.includes('interview')) return 60; // 1 hour
   if (summary.includes('presentation')) return 120; // 2 hours
   if (summary.includes('meeting')) return 30; // 30 minutes
   if (summary.includes('call')) return 15; // 15 minutes
-  
+
   return 30; // default 30 minutes
 }
 
@@ -3526,13 +3719,13 @@ function needsReview(file) {
 function estimateTimeToComplete(file) {
   const name = (file.name || '').toLowerCase();
   const mimeType = (file.mimeType || '').toLowerCase();
-  
+
   if (mimeType.includes('document') || name.includes('doc')) return 30;
   if (mimeType.includes('presentation') || name.includes('slide')) return 60;
   if (mimeType.includes('spreadsheet') || name.includes('sheet')) return 45;
   if (name.includes('report')) return 90;
   if (name.includes('proposal')) return 120;
-  
+
   return 30; // default 30 minutes
 }
 
@@ -3540,60 +3733,60 @@ function estimateTimeToComplete(file) {
 function extractEmailPriority(email) {
   const subject = (email.subject || '').toLowerCase();
   const from = (email.from || '').toLowerCase();
-  
+
   // High priority indicators
-  if (subject.includes('urgent') || subject.includes('asap') || 
+  if (subject.includes('urgent') || subject.includes('asap') ||
       subject.includes('deadline') || subject.includes('important') ||
       from.includes('manager') || from.includes('boss') || from.includes('ceo')) {
     return 'high';
   }
-  
+
   // Medium priority indicators
   if (subject.includes('meeting') || subject.includes('review') ||
       subject.includes('follow up') || subject.includes('action required')) {
     return 'medium';
   }
-  
+
   return 'low';
 }
 
 function extractEventPriority(event) {
   const summary = (event.summary || '').toLowerCase();
   const description = (event.description || '').toLowerCase();
-  
+
   // High priority events
   if (summary.includes('deadline') || summary.includes('urgent meeting') ||
       summary.includes('client') || summary.includes('presentation') ||
       description.includes('critical') || description.includes('important')) {
     return 'high';
   }
-  
+
   // Medium priority events
   if (summary.includes('meeting') || summary.includes('review') ||
       summary.includes('call') || summary.includes('discussion')) {
     return 'medium';
   }
-  
+
   return 'low';
 }
 
 function extractFilePriority(file) {
   const name = (file.name || '').toLowerCase();
   const mimeType = (file.mimeType || '').toLowerCase();
-  
+
   // High priority files
   if (name.includes('urgent') || name.includes('important') ||
       name.includes('deadline') || name.includes('contract') ||
       mimeType.includes('presentation') || mimeType.includes('spreadsheet')) {
     return 'high';
   }
-  
+
   // Medium priority files
   if (name.includes('report') || name.includes('proposal') ||
       name.includes('project') || mimeType.includes('document')) {
     return 'medium';
   }
-  
+
   return 'low';
 }
 
@@ -3601,15 +3794,15 @@ function extractFilePriority(file) {
 oauthApp.post('/extension-data', express.json(), async (req, res) => {
   try {
     const extensionData = req.body;
-    
+
     // Process browsing data for proactive insights
     const processedData = processBrowsingData(extensionData);
-    
+
     // Store extension data
     const currentData = store.get('extensionData') || {};
     currentData[Date.now()] = processedData;
     store.set('extensionData', currentData);
-    
+
     // Merge with user data
     const userData = store.get('userData') || {};
     userData.extensionData = processedData;
@@ -3647,15 +3840,15 @@ oauthApp.post('/extension-data', express.json(), async (req, res) => {
     } catch (ingestErr) {
       console.warn('[extension-data] browser ingestion failed:', ingestErr?.message || ingestErr);
     }
-    
+
     // Generate proactive tasks based on new data
     generateProactiveTasksFromData(userData);
-    
+
     // Notify renderer
     if (mainWindow) {
       mainWindow.webContents.send('extension-data-updated', processedData);
     }
-    
+
     res.json({ success: true, message: 'Data received successfully' });
   } catch (error) {
     console.error('Extension data error:', error);
@@ -3672,23 +3865,23 @@ function processBrowsingData(extensionData) {
     networkingOpportunities: identifyNetworkingOpportunities(extensionData),
     productivityPatterns: analyzeProductivityPatterns(extensionData)
   };
-  
+
   return { ...extensionData, insights };
 }
 
 // Analyze frequent website visits
 function analyzeFrequentVisits(data) {
   const domainCounts = {};
-  const recentVisits = data.browsingData?.filter(item => 
-    item.type === 'website_visit' && 
+  const recentVisits = data.browsingData?.filter(item =>
+    item.type === 'website_visit' &&
     Date.now() - item.timestamp < 7 * 24 * 60 * 60 * 1000 // Last 7 days
   ) || [];
-  
+
   recentVisits.forEach(visit => {
     const domain = visit.domain;
     domainCounts[domain] = (domainCounts[domain] || 0) + 1;
   });
-  
+
   return Object.entries(domainCounts)
     .sort(([,a], [,b]) => b - a)
     .slice(0, 10)
@@ -3698,14 +3891,14 @@ function analyzeFrequentVisits(data) {
 // Identify abandoned tasks (visited but not acted upon)
 function identifyAbandonedTasks(data) {
   const abandoned = [];
-  
+
   // Look for job applications started but not completed
-  const jobSites = data.browsingData?.filter(item => 
-    item.domain?.includes('linkedin') || 
+  const jobSites = data.browsingData?.filter(item =>
+    item.domain?.includes('linkedin') ||
     item.domain?.includes('indeed') ||
     item.domain?.includes('glassdoor')
   ) || [];
-  
+
   // Group by company
   const companyVisits = {};
   jobSites.forEach(visit => {
@@ -3715,7 +3908,7 @@ function identifyAbandonedTasks(data) {
       companyVisits[company].push(visit);
     }
   });
-  
+
   // Identify companies visited multiple times but no application
   Object.entries(companyVisits).forEach(([company, visits]) => {
     if (visits.length >= 3 && visits.length <= 5) {
@@ -3728,7 +3921,7 @@ function identifyAbandonedTasks(data) {
       });
     }
   });
-  
+
   return abandoned;
 }
 
@@ -3737,12 +3930,12 @@ function extractCompanyFromUrl(url) {
   try {
     const urlObj = new URL(url);
     const path = urlObj.pathname.toLowerCase();
-    
+
     // Look for company patterns in path
     if (path.includes('/company/')) {
       return path.split('/company/')[1]?.split('/')[0];
     }
-    
+
     return null;
   } catch (e) {
     return null;
@@ -3753,10 +3946,10 @@ function extractCompanyFromUrl(url) {
 function analyzeResearchPatterns(data) {
   const researchTopics = {};
   const researchKeywords = ['research', 'tutorial', 'guide', 'how to', 'learn', 'course'];
-  
+
   const searchQueries = data.searchQueries || [];
   searchQueries.forEach(query => {
-    if (researchKeywords.some(keyword => 
+    if (researchKeywords.some(keyword =>
       query.query.toLowerCase().includes(keyword)
     )) {
       const topic = extractTopicFromQuery(query.query);
@@ -3765,7 +3958,7 @@ function analyzeResearchPatterns(data) {
       }
     }
   });
-  
+
   return Object.entries(researchTopics)
     .sort(([,a], [,b]) => b - a)
     .slice(0, 5)
@@ -3775,7 +3968,7 @@ function analyzeResearchPatterns(data) {
 // Extract topic from search query
 function extractTopicFromQuery(query) {
   const words = query.toLowerCase().split(' ');
-  const researchWords = words.filter(word => 
+  const researchWords = words.filter(word =>
     !['how', 'to', 'the', 'a', 'an', 'for', 'and', 'or', 'but'].includes(word)
   );
   return researchWords.slice(0, 3).join(' ');
@@ -3784,13 +3977,13 @@ function extractTopicFromQuery(query) {
 // Identify networking opportunities
 function identifyNetworkingOpportunities(data) {
   const opportunities = [];
-  
+
   // Look for LinkedIn profile visits
-  const linkedinVisits = data.browsingData?.filter(item => 
-    item.domain === 'linkedin.com' && 
+  const linkedinVisits = data.browsingData?.filter(item =>
+    item.domain === 'linkedin.com' &&
     item.path?.includes('/in/')
   ) || [];
-  
+
   linkedinVisits.forEach(visit => {
     const profileName = extractProfileName(visit.url);
     if (profileName) {
@@ -3803,7 +3996,7 @@ function identifyNetworkingOpportunities(data) {
       });
     }
   });
-  
+
   return opportunities;
 }
 
@@ -3828,19 +4021,19 @@ function analyzeProductivityPatterns(data) {
     averageSessionTime: calculateAverageSessionTime(data),
     distractionSites: identifyDistractionSites(data)
   };
-  
+
   return patterns;
 }
 
 // Analyze peak productivity hours
 function analyzePeakHours(data) {
   const hourlyActivity = new Array(24).fill(0);
-  
+
   data.browsingData?.forEach(item => {
     const hour = new Date(item.timestamp).getHours();
     hourlyActivity[hour]++;
   });
-  
+
   return hourlyActivity
     .map((count, hour) => ({ hour, count }))
     .sort((a, b) => b.count - a.count)
@@ -3851,7 +4044,7 @@ function analyzePeakHours(data) {
 function calculateAverageSessionTime(data) {
   const sessions = [];
   let currentSession = null;
-  
+
   data.browsingData?.forEach(item => {
     if (item.type === 'website_visit') {
       if (!currentSession) {
@@ -3864,12 +4057,12 @@ function calculateAverageSessionTime(data) {
       }
     }
   });
-  
+
   if (currentSession) {
     sessions.push(currentSession.end - currentSession.start);
   }
-  
-  return sessions.length > 0 
+
+  return sessions.length > 0
     ? Math.round(sessions.reduce((a, b) => a + b, 0) / sessions.length / 1000 / 60) // minutes
     : 0;
 }
@@ -3877,17 +4070,17 @@ function calculateAverageSessionTime(data) {
 // Identify distraction sites
 function identifyDistractionSites(data) {
   const distractionKeywords = ['youtube', 'twitter', 'instagram', 'facebook', 'reddit', 'tiktok'];
-  
-  const distractionVisits = data.browsingData?.filter(item => 
+
+  const distractionVisits = data.browsingData?.filter(item =>
     distractionKeywords.some(keyword => item.domain?.includes(keyword))
   ) || [];
-  
+
   const domainCounts = {};
   distractionVisits.forEach(visit => {
     const domain = visit.domain;
     domainCounts[domain] = (domainCounts[domain] || 0) + 1;
   });
-  
+
   return Object.entries(domainCounts)
     .sort(([,a], [,b]) => b - a)
     .slice(0, 5)
@@ -3898,7 +4091,7 @@ function identifyDistractionSites(data) {
 async function generateProactiveTasksFromData(userData) {
   try {
     const tasks = [];
-    
+
     // Tasks from Gmail
     if (userData.googleData?.gmail) {
       userData.googleData.gmail.forEach(email => {
@@ -3914,7 +4107,7 @@ async function generateProactiveTasksFromData(userData) {
             reason: 'Email needs reply but not yet answered'
           });
         }
-        
+
         if (email.actionItems.length > 0) {
           email.actionItems.forEach(action => {
             tasks.push({
@@ -3931,7 +4124,7 @@ async function generateProactiveTasksFromData(userData) {
         }
       });
     }
-    
+
     // Tasks from Calendar
     if (userData.googleData?.calendar) {
       userData.googleData.calendar.forEach(event => {
@@ -3949,7 +4142,7 @@ async function generateProactiveTasksFromData(userData) {
         }
       });
     }
-    
+
     // Tasks from Drive
     if (userData.googleData?.drive) {
       userData.googleData.drive.forEach(file => {
@@ -3967,7 +4160,7 @@ async function generateProactiveTasksFromData(userData) {
         }
       });
     }
-    
+
     return tasks;
   } catch (error) {
     console.error('Error generating proactive tasks:', error);
@@ -4241,25 +4434,25 @@ function extractDomain(url) {
 // Get productivity score for URL
 function getProductivityScore(url) {
   const domain = new URL(url).hostname.toLowerCase();
-  
+
   // High productivity
-  if (domain.includes('github') || domain.includes('stackoverflow') || 
+  if (domain.includes('github') || domain.includes('stackoverflow') ||
       domain.includes('notion') || domain.includes('figma')) {
     return 0.9;
   }
-  
+
   // Medium productivity
-  if (domain.includes('linkedin') || domain.includes('medium') || 
+  if (domain.includes('linkedin') || domain.includes('medium') ||
       domain.includes('slack') || domain.includes('discord')) {
     return 0.6;
   }
-  
+
   // Low productivity
-  if (domain.includes('twitter') || domain.includes('facebook') || 
+  if (domain.includes('twitter') || domain.includes('facebook') ||
       domain.includes('youtube') || domain.includes('reddit')) {
     return 0.3;
   }
-  
+
   return 0.5; // Neutral
 }
 
@@ -4268,7 +4461,7 @@ async function getExtensionData() {
   try {
     console.log('Getting real browser history...');
     const browserHistory = await getBrowserHistory();
-    
+
     // Convert browser history to extension data format
     const urls = browserHistory.map(item => ({
       url: item.url,
@@ -4281,13 +4474,13 @@ async function getExtensionData() {
       synced: true,
       browser: item.browser || 'Chrome'
     }));
-    
+
     // Calculate stats
     const today = new Date().toDateString();
-    const todayUrls = urls.filter(url => 
+    const todayUrls = urls.filter(url =>
       new Date(url.timestamp).toDateString() === today
     );
-    
+
     const stats = {
       totalUrls: urls.length,
       todayUrls: todayUrls.length,
@@ -4297,9 +4490,9 @@ async function getExtensionData() {
       productivity: getProductivityStats(urls),
       lastSync: Date.now()
     };
-    
+
     console.log(`Retrieved ${urls.length} URLs from browser history`);
-    
+
     // Store for AI processing
     global.extensionData = {
       urls: urls,
@@ -4307,7 +4500,7 @@ async function getExtensionData() {
       lastReceived: Date.now(),
       source: 'direct-browser-access'
     };
-    
+
     return {
       urls: urls,
       searchQueries: [], // Could be extracted from URLs with search patterns
@@ -4435,7 +4628,7 @@ async function repairEmailEventTimestamps() {
 async function getGoogleData({ since } = {}) {
   try {
     let accounts = store.get('googleAccounts') || [];
-    
+
     // Legacy fallback migration
     if (accounts.length === 0) {
       const storedTokens = store.get('googleTokens');
@@ -4694,41 +4887,41 @@ async function getGoogleData({ since } = {}) {
 async function generateDailySummary() {
   try {
     console.log('Generating AI daily summary with historical context...');
-    
+
     // Define today's date for use throughout the function
     const today = new Date().toISOString().slice(0, 10);
-    
+
     // Initialize the proactive suggestion engine
     const engine = new ProactiveSuggestionEngine();
-    
+
     // Generate proactive suggestions using the new algorithm
     const proactiveResult = await engine.generateProactiveSuggestions();
-    
+
     // Get real browser history
     const browserHistory = await getBrowserHistory();
     console.log(`Retrieved ${browserHistory.length} URLs from browser history`);
-    
+
     // Get Google data
     const googleData = await getGoogleData();
     const sensorEvents = getSensorEvents();
-    
+
     // Prepare data for AI analysis
-    const urlLines = browserHistory.slice(0, 100).map(item => 
+    const urlLines = browserHistory.slice(0, 100).map(item =>
       `${item.url} | ${item.title} | ${new Date(item.last_visit_time).toLocaleString()}`
     ).join('\n');
-    
-    const emailLines = (googleData.gmail || []).slice(0, 20).map(email => 
+
+    const emailLines = (googleData.gmail || []).slice(0, 20).map(email =>
       `From: ${email.from} | Subject: ${email.subject} | Date: ${new Date(email.timestamp).toLocaleString()}`
     ).join('\n');
-    
-    const eventLines = (googleData.calendar || []).slice(0, 10).map(event => 
+
+    const eventLines = (googleData.calendar || []).slice(0, 10).map(event =>
       `${event.event_title} | ${new Date(event.start_time).toLocaleString()}`
     ).join('\n');
-    
-    const driveLines = (googleData.drive || []).slice(0, 10).map(doc => 
+
+    const driveLines = (googleData.drive || []).slice(0, 10).map(doc =>
       `${doc.doc_name} | Modified: ${new Date(doc.last_modified).toLocaleString()}`
     ).join('\n');
-    
+
     // Get existing user profile and historical summaries
     const existingProfile = store.get('userProfile') || {};
     const historicalSummaries = store.get('historicalSummaries') || {};
@@ -4858,20 +5051,20 @@ async function generateDailySummary() {
           }
         });
       });
-      
+
       // 1. Process app data with intelligence engine
       const engine = require('./services/agent/intelligence-engine');
       const appDataMap = { [appId]: { rawItems: items, appName: appId } };
       const graphResult = await engine.buildGlobalGraph({ appDataMap, apiKey, store });
-      
+
       if (graphResult && graphResult.nodes) {
         console.log(`[generateDailySummary] Built graph for ${appId}: ${graphResult.nodes.length} nodes`);
-        
+
         // Extract app core from the graph results
         const appCoreNode = graphResult.nodes.find(n => n.type === 'app_core');
         if (appCoreNode) {
           appCores[appId] = appCoreNode.data.narrative || appCoreNode.data.title || `${appId} Core`;
-          
+
           // Add App-Core Node
           const appCoreId = `core_${appId.toLowerCase()}`;
           addNode({ id: appCoreId, type: 'app_core', data: { title: `${appId} Core`, narrative: appCores[appId] } });
@@ -4884,7 +5077,7 @@ async function generateDailySummary() {
             addEdge(ep.id, appCoreId, 'informs_core', 'Specific reconstructed experience informs app core.');
           });
 
-          // Add Semantic Nodes & Edges from graph results  
+          // Add Semantic Nodes & Edges from graph results
           const semanticNodes = graphResult.nodes.filter(n => n.type === 'semantic');
           semanticNodes.forEach(sem => {
             addNode({ id: sem.id, type: 'semantic', data: sem.data });
@@ -4910,12 +5103,12 @@ async function generateDailySummary() {
 
     // 2. Build Global Core
     const currentGlobal = (store.get('proactiveMemory') || {}).core || '';
-    
+
     // Simple global core generation - combine app cores
-    const newGlobal = Object.values(appCores).length > 0 
+    const newGlobal = Object.values(appCores).length > 0
       ? `Integrated core memory from ${Object.keys(appCores).join(', ')} apps`
       : 'Building initial core memory...';
-    
+
     addNode({ id: 'global_core', type: 'global_core', data: { title: 'Global Core Memory', narrative: newGlobal } });
     Object.keys(appCores).forEach(appId => {
       addEdge(`core_${appId.toLowerCase()}`, 'global_core', 'contributes_to_core', 'App core contributes to global core memory.');
@@ -4963,7 +5156,7 @@ async function generateDailySummary() {
         .filter(e => e.to === tn.id || e.from === tn.id)
         .map(e => nodes.find(n => n.id === (e.to === tn.id ? e.from : e.to)))
         .filter(Boolean);
-      
+
       const context = {
         task: tn.data,
         neighbors: neighbors.map(n => ({ type: n.type, ...n.data })),
@@ -5078,15 +5271,15 @@ async function processSyncResult(result) {
 
   // 3. Intelligence Engine (Section 5)
   const summariesArray = Object.values(result.summaries).sort((a, b) => a.date.localeCompare(b.date));
-  
+
   // Simple pattern extraction - skip for now to avoid error
   const patterns = { work_hours: [], productivity_peaks: [], recurring_tasks: [] };
-  
+
   const allEventsFlat = summariesArray.flatMap(s => s.events || []);
-  
+
   // Simple preferences extraction - skip for now to avoid error
   const deepPrefs = { deep_work_focus: [], productivity_patterns: [], communication_style: [] };
-  
+
   const rebuiltGraph = await rebuildLayeredMemoryGraphFromEvents(allEventsFlat, process.env.DEEPSEEK_API_KEY);
 
   // 4. Update User Profile
@@ -5195,7 +5388,7 @@ ipcMain.handle('get-event-details', async (event, eventId) => {
 ipcMain.handle('search-daily-summaries', (event, query) => {
   const historicalSummaries = store.get('historicalSummaries') || {};
   const searchIndex = store.get('searchIndex') || { people: {}, topics: {} };
-  
+
   const q = (query || '').toLowerCase().trim();
   if (!q) return [];
 
@@ -5231,22 +5424,22 @@ function deduplicateTasks(tasks) {
   const seenTitles = new Set();
   return tasks.filter(task => {
     if (!task || !task.title) return false;
-    
+
     // Normalize title for strict comparison
     const normalized = task.title.toLowerCase()
       .replace(/[^a-z0-9]/g, '')
       .trim();
-    
+
     // Skip if we've already seen this exact task
     if (seenTitles.has(normalized)) return false;
-    
+
     // Fuzzy duplicate check: skip if a very similar title exists
     for (let seen of seenTitles) {
       if (normalized.includes(seen) || seen.includes(normalized)) {
         if (Math.abs(normalized.length - seen.length) < 5) return false;
       }
     }
-    
+
     seenTitles.add(normalized);
     return true;
   });
@@ -5635,7 +5828,7 @@ function getTopDomains(browserHistory, limit = 5) {
       domainCounts[domain] = (domainCounts[domain] || 0) + 1;
     } catch (e) {}
   });
-  
+
   return Object.entries(domainCounts)
     .sort((a, b) => b[1] - a[1])
     .slice(0, limit)
@@ -5645,10 +5838,10 @@ function getTopDomains(browserHistory, limit = 5) {
 function calculateProductivityScore(browserHistory) {
   const productiveDomains = ['github.com', 'notion.so', 'docs.google.com', 'linkedin.com'];
   const distractingDomains = ['youtube.com', 'reddit.com', 'twitter.com', 'facebook.com'];
-  
+
   let productive = 0;
   let distracting = 0;
-  
+
   browserHistory.forEach(item => {
     try {
       const domain = new URL(item.url).hostname;
@@ -5659,7 +5852,7 @@ function calculateProductivityScore(browserHistory) {
       }
     } catch (e) {}
   });
-  
+
   const total = productive + distracting;
   return total > 0 ? Math.round((productive / total) * 100) : 50;
 }
@@ -6593,7 +6786,7 @@ function traverseGraphFromCore(query, limit = 14, maxDepth = 4) {
       if (node.type === 'semantic') printableType = 'Semantic';
       if (node.type === 'episode') printableType = 'Episode';
       if (node.type === 'raw') printableType = 'Raw Data';
-      
+
       trace.push(`Traversed to ${printableType} (depth ${current.depth}): Found contextual node ${node.id}`);
     }
 
@@ -6766,7 +6959,7 @@ ipcMain.handle('search-graph', async (event, query, filters = {}) => {
   try {
     const db = require('./services/db');
     const q = `%${query || ''}%`;
-    const targetLayer = filters.layer || null; 
+    const targetLayer = filters.layer || null;
 
     console.log('[search-graph] Query:', query, 'Filters:', filters);
 
@@ -6786,11 +6979,11 @@ ipcMain.handle('search-graph', async (event, query, filters = {}) => {
       console.log('[search-graph] Found nodes:', nodeRows.length);
       results.push(...nodeRows.map(r => {
         const data = JSON.parse(r.data);
-        return { 
-          ...data, 
-          id: r.id, 
-          node_type: r.type, 
-          layer: 'Graph', 
+        return {
+          ...data,
+          id: r.id,
+          node_type: r.type,
+          layer: 'Graph',
           _raw: r.data,
           // Extract normalized fields for the UI
           timestamp: data.timestamp || data.start || data.date || null,
@@ -6799,7 +6992,7 @@ ipcMain.handle('search-graph', async (event, query, filters = {}) => {
         };
       }));
     }
-    
+
     // 2. Search raw events (L1 - "blog data")
     if (!targetLayer || targetLayer === 'Raw Data') {
       const eventRows = await db.allQuery(
@@ -6807,11 +7000,11 @@ ipcMain.handle('search-graph', async (event, query, filters = {}) => {
         [q, q, q]
       );
       console.log('[search-graph] Found events:', eventRows.length);
-      results.push(...eventRows.map(r => ({ 
-        title: `Raw ${r.type} event`, 
-        narrative: r.text || 'No description', 
-        id: r.id, 
-        node_type: 'raw_event', 
+      results.push(...eventRows.map(r => ({
+        title: `Raw ${r.type} event`,
+        narrative: r.text || 'No description',
+        id: r.id,
+        node_type: 'raw_event',
         layer: 'Raw Data',
         timestamp: r.timestamp,
         _raw: JSON.stringify({ metadata: JSON.parse(r.metadata), text: r.text })
@@ -6820,7 +7013,7 @@ ipcMain.handle('search-graph', async (event, query, filters = {}) => {
 
     // Sort/Normalize results
     results = results.sort((a,b) => (b.timestamp || 0) - (a.timestamp || 0));
-    
+
     // Filter by node_type if specified in sub-filters
     if (filters.nodeType) {
       const beforeFilter = results.length;
@@ -7143,6 +7336,8 @@ ipcMain.handle("get-full-memory-graph", async () => {
 ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
   try {
     const { answerChatQuery } = require('./services/agent/chat-engine');
+    const db = require('./services/db');
+    console.log('[ChatMemory] Using SQLite memory DB:', typeof db.getDbPath === 'function' ? db.getDbPath() : 'unknown');
     const proactiveMemory = store.get('proactiveMemory') || { core: '' };
     const historicalSummaries = store.get('historicalSummaries') || {};
     const searchIndex = store.get('searchIndex') || { people: {}, topics: {} };
@@ -7201,9 +7396,52 @@ ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
     return response;
   } catch (e) {
     console.error('Chat error:', e);
+    const errorMessage = String(e?.message || e || 'Unknown chat error');
     return {
       content: "I encountered an error while thinking. Please try again.",
-      retrieval: { usedSources: [], mode: 'error' }
+      thinking_trace: {
+        thinking_summary: `The assistant recovered from an internal error: ${errorMessage}`,
+        filters: [],
+        search_queries: { context: [], messages: [], lexical: [], web: [] },
+        results_summary: {
+          headline: 'The response pipeline failed before completion.',
+          details: ['A fallback response was returned so the chat can continue.']
+        },
+        data_sources: ['System error fallback'],
+        stage_trace: [
+          {
+            step: 'error_recovery',
+            label: 'Error recovery',
+            status: 'failed',
+            detail: errorMessage
+          }
+        ],
+        reasoning_chain: [
+          {
+            stage: 'error_recovery',
+            summary: 'Encountered an internal exception and returned a safe fallback.',
+            detail: errorMessage
+          }
+        ],
+        answer_basis: 'error_fallback'
+      },
+      retrieval: {
+        usedSources: ['System error fallback'],
+        memory_sources: ['System error fallback'],
+        mode: 'error',
+        stage_trace: [
+          {
+            step: 'error_recovery',
+            label: 'Error recovery',
+            status: 'failed',
+            detail: errorMessage
+          }
+        ],
+        thinking_trace: {
+          thinking_summary: `The assistant recovered from an internal error: ${errorMessage}`,
+          data_sources: ['System error fallback']
+        }
+      }
     };
   }
 });
@@ -8768,7 +9006,7 @@ function registerNativeHost() {
     if (!fs.existsSync(targetDir)) {
       fs.mkdirSync(targetDir, { recursive: true });
     }
-    
+
     // Update the path in the JSON to the absolute path of the wrapper script
     const manifest = JSON.parse(fs.readFileSync(sourcePath, 'utf8'));
     manifest.path = path.join(__dirname, 'native-host.sh');
@@ -8779,10 +9017,10 @@ function registerNativeHost() {
     const existingOrigins = Array.isArray(manifest.allowed_origins) ? manifest.allowed_origins : [];
     const configuredOrigins = configuredIds.map(id => `chrome-extension://${id}/`);
     manifest.allowed_origins = Array.from(new Set([...existingOrigins, ...configuredOrigins]));
-    
+
     fs.writeFileSync(targetPath, JSON.stringify(manifest, null, 2));
     console.log(`Native Messaging Host registered at: ${targetPath}`);
-    
+
     // Ensure the shell script is executable
     const shellScriptPath = path.join(__dirname, 'native-host.sh');
     fs.chmodSync(shellScriptPath, '755');
@@ -8813,7 +9051,7 @@ function parseTextResponse(text) {
   // Simple fallback parsing if JSON fails
   const tasks = [];
   const lines = text.split('\n');
-  
+
   lines.forEach((line, index) => {
     if (line.includes('-') || line.includes('•')) {
       const taskText = line.replace(/^[-•]\s*/, '').trim();
@@ -8833,14 +9071,14 @@ function parseTextResponse(text) {
       }
     }
   });
-  
+
   return tasks.slice(0, 7); // Limit to 7 tasks
 }
 
 // Health check endpoint for extension
 oauthApp.get('/health', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
+  res.json({
+    status: 'healthy',
     timestamp: Date.now(),
     version: '1.0.0'
   });
@@ -9041,9 +9279,9 @@ async function runPuppeteerGoogleTest(queryOverride) {
 oauthApp.post('/api/sync-extension-data', async (req, res) => {
   try {
     const { urls, stats, timestamp, source } = req.body;
-    
+
     console.log(`Received ${urls?.length || 0} URLs from ${source}`);
-    
+
     // Store extension data
     if (urls && Array.isArray(urls)) {
       // Store in memory or database for AI processing
@@ -9053,36 +9291,36 @@ oauthApp.post('/api/sync-extension-data', async (req, res) => {
         lastReceived: timestamp,
         source: source
       };
-      
+
       // Update last sync time
       store.set('lastExtensionSync', timestamp);
-      
+
       // Trigger proactive task generation if AI is enabled
       if (store.get('aiEnabled') !== false) {
         // Use the extension data for AI task generation
         console.log('Using extension data for proactive task generation');
       }
     }
-    
-    res.json({ 
-      success: true, 
+
+    res.json({
+      success: true,
       message: `Processed ${urls?.length || 0} URLs`,
       timestamp: Date.now()
     });
-    
+
   } catch (error) {
     console.error('Error processing extension data:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      error: error.message
     });
   }
 });
 
 // Health check endpoint for extension
 oauthApp.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
+  res.json({
+    status: 'healthy',
     timestamp: Date.now(),
     version: '1.0.0'
   });
@@ -9105,7 +9343,7 @@ ipcMain.handle('start-google-auth', async () => {
     `access_type=offline`;
 
   const { shell } = require('electron');
-  
+
   // Clear any existing tokens before starting a fresh flow
   store.delete('googleTokens');
 
@@ -9279,6 +9517,59 @@ ipcMain.handle('toggle-automation', async (_event, automationId, enabled) => {
 
 // Automation scheduler: polls every minute for due automations
 let automationSchedulerTimer = null;
+let recursiveImprovementTimer = null;
+
+function recursiveImprovementEnabled() {
+  const env = String(process.env.RECURSIVE_AGENT_ENABLED || 'false').toLowerCase();
+  return env !== 'false' && env !== '0' && env !== 'no';
+}
+
+function recursiveImprovementIntervalMs() {
+  const mins = Math.max(10, Number(process.env.RECURSIVE_AGENT_INTERVAL_MINUTES || 45));
+  return mins * 60 * 1000;
+}
+
+async function runRecursiveImprovementOnce(trigger = 'scheduled') {
+  if (!recursiveImprovementEnabled()) return { skipped: true, reason: 'disabled' };
+  if (shouldDeferBackgroundWork('RecursiveImprovement')) return { skipped: true, reason: 'active_use' };
+  try {
+    const apiKey = process.env.DEEPSEEK_API_KEY || null;
+    const { runRecursiveImprovementCycle } = require('./services/agent/recursive-improvement-engine');
+    const cycle = await runRecursiveImprovementCycle({ apiKey });
+
+    if (mainWindow && mainWindow.webContents) {
+      mainWindow.webContents.send('recursive-improvement-cycle', {
+        trigger,
+        cycle
+      });
+    }
+
+    return { skipped: false, cycle };
+  } catch (error) {
+    console.warn('[RecursiveImprovement] cycle failed:', error?.message || error);
+    return { skipped: false, error: error?.message || String(error) };
+  }
+}
+
+function startRecursiveImprovementLoop() {
+  if (!recursiveImprovementEnabled()) {
+    console.log('[RecursiveImprovement] Disabled by configuration');
+    return;
+  }
+  if (recursiveImprovementTimer) return;
+
+  const intervalMs = recursiveImprovementIntervalMs();
+  recursiveImprovementTimer = setInterval(() => {
+    runRecursiveImprovementOnce('scheduled').catch(() => null);
+  }, intervalMs);
+
+  setTimeout(() => {
+    runRecursiveImprovementOnce('bootstrap').catch(() => null);
+  }, STARTUP_HEAVY_JOB_DELAY_MS);
+
+  console.log(`[RecursiveImprovement] Started (interval: ${Math.round(intervalMs / 60000)}m)`);
+}
+
 function startAutomationScheduler() {
   if (automationSchedulerTimer) return;
   automationSchedulerTimer = setInterval(async () => {
@@ -9294,7 +9585,18 @@ function startAutomationScheduler() {
         try {
           const { answerChatQuery } = require('./services/agent/chat-engine');
           const apiKey = process.env.DEEPSEEK_API_KEY;
-          const result = await answerChatQuery(automation.prompt, [], { apiKey, standing_notes: '' });
+          const result = await answerChatQuery({
+            apiKey,
+            query: String(automation.prompt || '').trim(),
+            options: {
+              standing_notes: '',
+              mode: 'chat',
+              recursion_enabled: true,
+              from_automation: true,
+              automation_id: automation.id,
+              automation_name: automation.name
+            }
+          });
 
           // Persist result to memory as a raw event
           const { ingestRawEvent } = require('./services/ingestion');
@@ -9333,6 +9635,29 @@ function startAutomationScheduler() {
   console.log('[AutomationScheduler] Started');
 }
 
+ipcMain.handle('run-recursive-improvement', async () => {
+  return await runRecursiveImprovementOnce('manual');
+});
+
+ipcMain.handle('get-recursive-improvement-status', async () => {
+  try {
+    const { getLatestRecursiveImprovementLog } = require('./services/agent/recursive-improvement-engine');
+    const latest = await getLatestRecursiveImprovementLog();
+    return {
+      enabled: recursiveImprovementEnabled(),
+      interval_minutes: Math.round(recursiveImprovementIntervalMs() / 60000),
+      latest
+    };
+  } catch (error) {
+    return {
+      enabled: recursiveImprovementEnabled(),
+      interval_minutes: Math.round(recursiveImprovementIntervalMs() / 60000),
+      latest: null,
+      error: error?.message || String(error)
+    };
+  }
+});
+
 ipcMain.handle('sync-google-data', async () => {
   return await fullGoogleSync();
 });
@@ -9358,7 +9683,7 @@ async function fullGoogleSync({ since, forceHistoricalBackfill = false } = {}) {
     const googleDelta = await getGoogleData({ since: sinceFloor });
     const syncMeta = googleDelta._meta || {};
     const shouldAdvanceLastSync = !syncMeta.hardFailure;
-    
+
     const googleData = mergeGoogleData(existingGoogleData, {
       ...googleDelta,
       lastSync: shouldAdvanceLastSync ? new Date().toISOString() : (existingGoogleData.lastSync || null)
@@ -9450,7 +9775,7 @@ ipcMain.handle('get-google-data', () => {
 ipcMain.handle('get-memory-graph-status', async () => {
   try {
     const db = require('./services/db');
-    
+
     const eventCount = await db.getQuery(`SELECT COUNT(*) as count FROM events`).catch(() => ({ count: 0 }));
     const nodeCounts = await db.allQuery(`SELECT layer, COUNT(*) as count FROM memory_nodes GROUP BY layer`).catch(() => []);
     const edgeCount = await db.getQuery(`SELECT COUNT(*) as count FROM memory_edges`).catch(() => ({ count: 0 }));
@@ -9466,7 +9791,7 @@ ipcMain.handle('get-memory-graph-status', async () => {
       `SELECT version, status, completed_at FROM graph_versions ORDER BY started_at DESC LIMIT 1`
     ).catch(() => null);
     const health = store.get('memoryGraphHealth') || {};
-    
+
     const counts = {
       events: eventCount.count || 0,
       nodes: nodeCounts.reduce((acc, row) => {
@@ -9486,7 +9811,7 @@ ipcMain.handle('get-memory-graph-status', async () => {
       }, {}),
       gmailRawEvents: (sourceCounts.find((row) => String(row.source_type || '').toLowerCase().includes('email')) || {}).count || 0
     };
-    
+
     // Get processing status
     const status = {
       episodeJobLocked: episodeJobLock,
@@ -9498,7 +9823,7 @@ ipcMain.handle('get-memory-graph-status', async () => {
       latestGraphVersion: graphVersion || null,
       health
     };
-    
+
     return { counts, status };
   } catch (error) {
     console.error('[MemoryGraph] Status query failed:', error);
@@ -9744,7 +10069,7 @@ ipcMain.handle('search-memory-graph', async (event, query, options = {}) => {
 ipcMain.handle('get-related-nodes', async (event, nodeId, relationType = null) => {
   try {
     const db = require('./services/db');
-    
+
     let sql = `
       SELECT n.id, n.layer, n.title, n.summary, n.metadata, n.anchor_at, n.created_at, n.updated_at, e.edge_type
       FROM memory_nodes n
@@ -9752,12 +10077,12 @@ ipcMain.handle('get-related-nodes', async (event, nodeId, relationType = null) =
       WHERE (e.from_node_id = ? OR e.to_node_id = ?) AND n.id != ?
     `;
     const params = [nodeId, nodeId, nodeId];
-    
+
     if (relationType) {
       sql += ` AND e.edge_type = ?`;
       params.push(relationType);
     }
-    
+
     const results = await db.allQuery(sql, params);
     return results.map(row => ({
       id: row.id,
@@ -9835,15 +10160,15 @@ ipcMain.handle('search-raw-events', async (event, query) => {
   try {
     const db = require('./services/db');
     const q = `%${query || ''}%`;
-    
+
     const results = await db.allQuery(`
       SELECT id, type, timestamp, occurred_at, date, source, text, metadata
-      FROM events 
+      FROM events
       WHERE text LIKE ? OR type LIKE ? OR source LIKE ?
       ORDER BY COALESCE(occurred_at, timestamp) DESC
       LIMIT 50
     `, [q, q, q]);
-    
+
     return results.map(row => ({
       ...row,
       metadata: JSON.parse(row.metadata || '{}')
@@ -10055,7 +10380,7 @@ ipcMain.handle('extension-run-diagnostic', async (event, opts) => {
 
 function extractPriorityFromText(text) {
   const lowerText = text.toLowerCase();
-  if (lowerText.includes('urgent') || lowerText.includes('asap') || 
+  if (lowerText.includes('urgent') || lowerText.includes('asap') ||
       lowerText.includes('deadline') || lowerText.includes('critical')) {
     return 'high';
   } else if (lowerText.includes('important') || lowerText.includes('priority')) {
@@ -10244,7 +10569,7 @@ function buildDailySummariesLocal(googleData, browserHistory) {
 // Helper function to categorize URL
 function categorizeURL(url) {
   const domain = new URL(url).hostname.toLowerCase();
-  
+
   if (domain.includes('github') || domain.includes('stackoverflow') || domain.includes('linkedin')) {
     return 'work';
   }
@@ -10260,7 +10585,7 @@ function categorizeURL(url) {
   if (domain.includes('coursera') || domain.includes('udemy')) {
     return 'learning';
   }
-  
+
   return 'general';
 }
 
@@ -10488,10 +10813,26 @@ app.whenReady().then(async () => {
     });
     powerMonitor.on('idle', () => updatePerformanceState());
     powerMonitor.on('active', () => updatePerformanceState());
+    powerMonitor.on('suspend', () => {
+      screenshotsPausedForDisplayOff = true;
+      console.log('[Screenshot] Paused: system/display suspended');
+    });
+    powerMonitor.on('resume', () => {
+      screenshotsPausedForDisplayOff = false;
+      console.log('[Screenshot] Resumed: system/display awake');
+    });
+    powerMonitor.on('display-sleep', () => {
+      screenshotsPausedForDisplayOff = true;
+      console.log('[Screenshot] Paused: display asleep');
+    });
+    powerMonitor.on('display-wake', () => {
+      screenshotsPausedForDisplayOff = false;
+      console.log('[Screenshot] Resumed: display awake');
+    });
   } catch (error) {
     console.warn('[Performance] powerMonitor hooks unavailable:', error?.message || error);
   }
-  
+
   // Start OAuth server
   const startOAuthServer = (port) => {
     const server = oauthApp.listen(port, () => {
@@ -10513,23 +10854,26 @@ app.whenReady().then(async () => {
 
   // Initialize daily task scheduling
   scheduleDailyTasks();
-  generateMorningBrief({ force: false, scheduled: false }).catch((e) => {
-    console.warn('Initial morning brief generation failed:', e?.message || e);
-  });
+  setTimeout(() => {
+    generateMorningBrief({ force: false, scheduled: false }).catch((e) => {
+      console.warn('Initial morning brief generation failed:', e?.message || e);
+    });
+  }, STARTUP_HEAVY_JOB_DELAY_MS);
   startSensorCaptureLoop();
-  startSourceWarmup();
-  startPeriodicScreenshotCapture();
-  
+  setTimeout(() => startSourceWarmup(), STARTUP_HEAVY_JOB_DELAY_MS);
+  setTimeout(() => startPeriodicScreenshotCapture(), 15000);
+
   // Initialize memory graph processing
-  startMemoryGraphProcessing();
+  setTimeout(() => startMemoryGraphProcessing(), STARTUP_HEAVY_JOB_DELAY_MS);
 
   // Start user-defined automation scheduler
-  startAutomationScheduler();
+  setTimeout(() => startAutomationScheduler(), STARTUP_HEAVY_JOB_DELAY_MS);
+  setTimeout(() => startRecursiveImprovementLoop(), STARTUP_HEAVY_JOB_DELAY_MS + 60 * 1000);
 
   // ── Auto-trigger initial sync on first launch ──────────────────────────
   const syncDone = store.get('initialSyncDone') || false;
   if (!syncDone) {
-    console.log('[initialSync] First launch detected — scheduling initial historical sync in 5s...');
+    console.log(`[initialSync] First launch detected — scheduling initial historical sync in ${Math.round(STARTUP_INITIAL_SYNC_DELAY_MS / 60000)}m...`);
     setTimeout(async () => {
       try {
         if (mainWindow && mainWindow.webContents) {
@@ -10578,7 +10922,7 @@ app.whenReady().then(async () => {
           mainWindow.webContents.send('initial-sync-error', { error: err.message });
         }
       }
-    }, 5000);
+    }, STARTUP_INITIAL_SYNC_DELAY_MS);
   }
 
   app.on('activate', () => {
@@ -10596,7 +10940,7 @@ app.on('window-all-closed', () => {
   if (dailySummaryTimer) clearTimeout(dailySummaryTimer);
   if (patternUpdateTimer) clearTimeout(patternUpdateTimer);
   if (screenshotCleanupTimer) clearInterval(screenshotCleanupTimer);
-  
+
   if (process.platform !== 'darwin') {
     app.quit();
   }
@@ -10615,11 +10959,11 @@ app.on('before-quit', () => {
 ipcMain.handle('extension-message', (event, message) => {
   // Process messages from Chrome extension
   console.log('Extension message:', message);
-  
+
   // Store data from extension
   const currentData = store.get('extensionData') || {};
   currentData[Date.now()] = message;
   store.set('extensionData', currentData);
-  
+
   return { received: true };
 });

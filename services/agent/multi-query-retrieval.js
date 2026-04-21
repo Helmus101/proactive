@@ -43,6 +43,12 @@ function normalizeDataSource(dataSource) {
   return 'auto';
 }
 
+function isOperationalRawRow(row) {
+  const metadata = asObj(row.metadata);
+  const hay = `${row.data_source || ''} ${metadata.data_source || ''} ${metadata.storage_data_source || ''} ${metadata.source_type || ''}`.toLowerCase();
+  return /\b(raw|screenshot_ocr|raw_event|screen_capture|sensors?)\b/.test(hay);
+}
+
 function normalizeTerms(text) {
   return String(text || '')
     .toLowerCase()
@@ -206,7 +212,7 @@ async function retrieveMultiQueryContext({ query, options = {}, limit = 24 } = {
   const filteredChunks = chunkRows.filter((row) => {
     if (!rowMatchesApp(row, appFilter)) return false;
     if (!rowInDateRange(row, dateRange)) return false;
-    if (resolvedDataSource === 'raw' && row.data_source !== 'raw') return false;
+    if (resolvedDataSource === 'raw' && !isOperationalRawRow(row)) return false;
     if (resolvedDataSource === 'summaries' && row.data_source !== 'summaries') return false;
     return true;
   });

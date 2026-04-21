@@ -7,9 +7,13 @@ function graphDerivation() {
   // eslint-disable-next-line global-require
   return require('./graph-derivation');
 }
+// Lazy require ReasoningPipeline to avoid circular require with retrieval-thought-system
+function reasoningPipeline() {
+  // eslint-disable-next-line global-require
+  return require('./reasoning-pipeline').ReasoningPipeline;
+}
 const { upsertMemoryNode, updateMemoryNode, upsertMemoryEdge, upsertRetrievalDoc } = require('./graph-store');
 const { generateEmbedding, cosineSimilarity } = require('../embedding-engine');
-const { ReasoningPipeline } = require('./reasoning-pipeline');
 
 const DEEPSEEK_ENDPOINT = 'https://api.deepseek.com/v1/chat/completions';
 let lastAiParseLogAt = 0;
@@ -22,6 +26,14 @@ const TASK_TTLS = {
   synthesis: 48 * 60 * 60 * 1000,   // 48h (was 24h) - longer cache for synthesis
   default: 24 * 60 * 60 * 1000
 };
+
+function safeWarn(...args) {
+  try {
+    console.warn(...args);
+  } catch (_) {
+    // swallow EPIPE / stream write failures from detached terminals
+  }
+}
 
 async function updateLlmMetrics(cached = false) {
   try {
@@ -39,7 +51,7 @@ async function updateLlmMetrics(cached = false) {
       [key, JSON.stringify(metrics), 'metrics', new Date().toISOString()]
     );
   } catch (e) {
-    console.warn('[Intelligence] Failed to update metrics:', e.message);
+    safeWarn('[Intelligence] Failed to update metrics:', e.message);
   }
 }
 
@@ -56,7 +68,7 @@ async function pruneKVCache(type = 'llm_response', maxSize = MAX_CACHE_SIZE) {
       );
     }
   } catch (e) {
-    console.warn(`[Intelligence] Cache pruning failed for type ${type}:`, e.message);
+    safeWarn(`[Intelligence] Cache pruning failed for type ${type}:`, e.message);
   }
 }
 
@@ -66,7 +78,7 @@ async function pruneLlmCache() {
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
     await db.runQuery('DELETE FROM kv_cache WHERE created_at < ? AND type = ?', [sevenDaysAgo, 'llm_response']);
   } catch (e) {
-    console.warn('[Intelligence] Failed to prune expired entries:', e.message);
+    safeWarn('[Intelligence] Failed to prune expired entries:', e.message);
   }
 
   await pruneKVCache('llm_response', MAX_CACHE_SIZE);
@@ -428,7 +440,7 @@ async function runEnrichmentJob(apiKey) {
         });
       }
     } catch (e) {
-      console.warn(`[runEnrichmentJob] Failed to enrich node ${node.id}:`, e.message);
+      safeWarn(`[runEnrichmentJob] Failed to enrich node ${node.id}:`, e.message);
     }
   }
 
@@ -704,7 +716,7 @@ ${JSON.stringify(blob)}`;
 
     return createdIds;
   } catch (e) {
-    console.warn('[runSemanticSummaryWindow] failed:', e?.message || e);
+    safeWarn('[runSemanticSummaryWindow] failed:', e?.message || e);
     return [];
   }
 }
@@ -784,7 +796,7 @@ async function runDailyInsights(apiKey) {
     }
     return created;
   } catch (e) {
-    console.warn('[runDailyInsights] failed:', e?.message || e);
+    safeWarn('[runDailyInsights] failed:', e?.message || e);
     return [];
   }
 }
@@ -883,7 +895,7 @@ Return strict JSON:
     
     return [CORE_NODE_ID];
   } catch (e) {
-    console.warn('[runLivingCoreJob] failed:', e?.message || e);
+    safeWarn('[runLivingCoreJob] failed:', e?.message || e);
     return [];
   }
 }
@@ -1015,7 +1027,7 @@ async function runHourlySemanticPulse(apiKey) {
     }
     return consolidatedNodes.map(n => n.id);
   } catch (e) {
-    console.warn('[runHourlySemanticPulse] failed:', e?.message || e);
+    safeWarn('[runHourlySemanticPulse] failed:', e?.message || e);
     return [];
   }
 }
@@ -1040,7 +1052,8 @@ async function buildGlobalGraph() {
 }
 
 async function runReasoningPipeline(context) {
-  const pipeline = new ReasoningPipeline();
+  const ReasoningPipelineClass = reasoningPipeline();
+  const pipeline = new ReasoningPipelineClass();
   return await pipeline.run(context);
 }
 

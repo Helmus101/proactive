@@ -169,7 +169,7 @@ async function ensureTextChunksColumns() {
 function extractEntities(text) {
   if (!text) return [];
   const entities = new Set();
-  
+
   // Match Title-Cased names roughly (e.g., John Martins)
   const nameRegex = /([A-Z][a-z]+ [A-Z][a-z]+)/g;
   let match;
@@ -294,15 +294,211 @@ function stripLikelyUiChromeLines(lines = []) {
     // App specific UI noise
     if (/^(unread|starred|important|muted|snoozed|promotions|social|updates|forums)$/i.test(value)) return false;
     if (/^(all mail|spam|bin|drafts|sent|inbox|scheduled)$/i.test(value)) return false;
-    
+
     // Aggressive OCR filtering additions
     if (/^(loading|please wait|sign in|log in|sign up|password|username|email address|forgot password)$/i.test(value)) return false;
     if (/^(\d+ messages?|\d+ notifications?|\d+ unread)$/i.test(value)) return false;
     if (/^(cookies|privacy policy|terms of service|accept|decline|manage cookies)$/i.test(value)) return false;
-    if (/^https?:\/\/[^\s]+$/i.test(value)) return false; 
+    if (/^https?:\/\/[^\s]+$/i.test(value)) return false;
 
     return true;
   });
+}
+
+function normalizeCompactCaptureText(text = '', metadata = {}) {
+  const source = String(text || '').toLowerCase();
+  const stopWords = new Set([
+    'the', 'a', 'an', 'and', 'or', 'but', 'if', 'then', 'than', 'to', 'for', 'of', 'in', 'on', 'at', 'by',
+    'from', 'with', 'without', 'about', 'into', 'over', 'under', 'is', 'are', 'was', 'were', 'be', 'been',
+    'being', 'do', 'does', 'did', 'done', 'have', 'has', 'had', 'having', 'i', 'you', 'he', 'she', 'it',
+    'we', 'they', 'me', 'my', 'mine', 'your', 'yours', 'our', 'ours', 'their', 'theirs', 'this', 'that',
+    'these', 'those', 'here', 'there', 'where', 'when', 'why', 'how', 'what', 'which', 'who', 'whom',
+    'can', 'could', 'should', 'would', 'may', 'might', 'must', 'will', 'shall', 'also', 'just', 'very'
+  ]);
+
+  const tokens = source
+    .replace(/https?:\/\/[^\s]+/g, ' ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3 && !stopWords.has(token));
+
+  const app = String(metadata?.app || metadata?.activeApp || '').toLowerCase().trim();
+  const windowTitle = String(metadata?.window_title || metadata?.activeWindowTitle || '').toLowerCase().trim();
+  const seeded = [
+    ...tokens,
+    ...app.split(/\s+/).filter((token) => token.length >= 3),
+    ...windowTitle.split(/\s+/).filter((token) => token.length >= 3)
+  ];
+
+  return Array.from(new Set(seeded)).slice(0, 180).join(' ').trim();
+}
+
+function stableMetadataId(prefix, value) {
+  const clean = String(value || '').trim().toLowerCase();
+  if (!clean) return null;
+  return `${prefix}_${crypto.createHash('sha1').update(clean).digest('hex').slice(0, 16)}`;
+}
+
+function normalizeMetadataList(items = [], limit = 24) {
+  return Array.from(new Set((items || [])
+    .flatMap((item) => Array.isArray(item) ? item : [item])
+    .filter(Boolean)
+    .map((item) => String(item).trim())
+    .filter(Boolean)))
+    .slice(0, limit);
+}
+
+function inferSourceIntegrity(type = '', source = '', metadata = {}) {
+  const hay = `${type || ''} ${source || ''} ${metadata.source_type || ''}`.toLowerCase();
+  if (/\bemail|gmail|calendar|drive|document|api|gsuite|google\b/.test(hay)) return 'api';
+  if (/\bscreen|desktop|capture|sensor|ocr\b/.test(hay)) return Number(metadata.ocrConfidence || metadata.ocr_confidence || 0) >= 0.75 ? 'ocr_high' : 'ocr';
+  if (metadata.url || metadata.domain) return 'browser';
+  return 'unknown';
+}
+
+function inferRelationshipTier(participants = [], metadata = {}) {
+  const explicit = String(metadata.relationship_tier || metadata.social_tier || '').trim();
+  if (explicit) return explicit;
+  const count = Array.isArray(participants) ? participants.length : 0;
+  if (!count) return null;
+  if (metadata.from || metadata.organizer || metadata.attendees) return 'network';
+  return 'observed_contact';
+}
+
+function socialHalfLifeDaysForTier(tier) {
+  const normalized = String(tier || '').toLowerCase();
+  if (normalized === 'inner_circle') return 7;
+  if (normalized === 'close_friend') return 10;
+  if (normalized === 'active_lead') return 3;
+  if (normalized === 'network') return 21;
+  if (normalized === 'observed_contact') return 30;
+  return null;
+}
+
+function inferAppId(appName = '', metadata = {}) {
+  const explicit = String(metadata.app_id || metadata.bundleId || metadata.bundle_id || metadata.application_id || '').trim();
+  if (/^(com|app|org|io|dev|net)\.[a-z0-9_.-]+$/i.test(explicit)) {
+    const normalized = explicit.toLowerCase();
+    if (normalized === 'com.google.chrome') return 'com.google.chrome';
+    if (normalized === 'com.microsoft.vscode') return 'com.microsoft.vscode';
+    return explicit;
+  }
+
+  // Older screenshot ingestion wrote display names like "Google Chrome" into
+  // metadata.app_id. Treat those as app names so retrieval filters can use
+  // stable bundle-style IDs.
+  const app = String(appName || explicit || metadata.app || metadata.activeApp || '').toLowerCase();
+  if (/\b(vs code|visual studio code|vscode)\b/.test(app)) return 'com.microsoft.vscode';
+  if (/\bcursor\b/.test(app)) return 'com.todesktop.230313mzl4w4u92';
+  if (/\bchrome\b/.test(app)) return 'com.google.chrome';
+  if (/\bsafari\b/.test(app)) return 'com.apple.Safari';
+  if (/\bgmail\b/.test(app)) return 'com.google.gmail';
+  if (/\bcalendar\b/.test(app)) return 'com.google.calendar';
+  if (/\bslack\b/.test(app)) return 'com.tinyspeck.slackmacgap';
+  if (/\bterminal\b/.test(app)) return 'com.apple.Terminal';
+  if (/\bfigma\b/.test(app)) return 'com.figma.Desktop';
+  return app ? `app.${app.replace(/[^a-z0-9]+/g, '.').replace(/^\.+|\.+$/g, '')}` : null;
+}
+
+function inferOperationalDataSource(type, source, metadata = {}) {
+  const explicit = metadata.raw_data_source || metadata.evidence_source || metadata.origin_data_source;
+  if (explicit) return String(explicit).trim();
+  const hay = `${type || ''} ${source || ''} ${metadata.source_type || ''}`.toLowerCase();
+  if (/\b(screen|desktop|capture|ocr|sensor)\b/.test(hay)) return 'screenshot_ocr';
+  if (/\b(email|gmail|mail|thread)\b/.test(hay)) return 'email_api';
+  if (/\b(calendar|event|meeting)\b/.test(hay)) return 'calendar_api';
+  if (/\b(browser|history|visit|url)\b/.test(hay)) return 'browser_history';
+  if (/\bfile|drive|document|doc\b/.test(hay)) return 'file_api';
+  return 'raw_event';
+}
+
+function buildCanonicalEventMetadata({
+  id,
+  type,
+  source,
+  timestampISO,
+  date,
+  metadata = {},
+  entities = [],
+  participants = [],
+  topics = [],
+  sentimentScore = 0,
+  sessionId = null,
+  status = 'active',
+  desktopInterpretation = null
+} = {}) {
+  const meta = metadata && typeof metadata === 'object' ? metadata : {};
+  const sourceApp = inferEventApp(source, meta);
+  const appId = inferAppId(sourceApp, meta);
+  const dataSource = inferOperationalDataSource(type, source, meta);
+  const contextTitle = String(meta.window_title || meta.activeWindowTitle || meta.title || meta.subject || meta.summary || '').trim();
+  const canonicalParticipants = normalizeMetadataList(participants, 16);
+  const canonicalTopics = normalizeMetadataList(topics, 16);
+  const entityLabels = normalizeMetadataList([
+    ...entities,
+    ...canonicalParticipants.map((item) => `person:${item}`),
+    ...canonicalTopics.map((item) => /^topic:/i.test(item) ? item : `topic:${item}`)
+  ], 32);
+  const entityIds = normalizeMetadataList(entityLabels.map((item) => stableMetadataId('ent', item)), 32);
+  const personIds = normalizeMetadataList(canonicalParticipants.map((item) => stableMetadataId('person', item)), 16);
+  const topicIds = normalizeMetadataList(canonicalTopics.map((item) => stableMetadataId('topic', item)), 16);
+  const relationshipTier = inferRelationshipTier(canonicalParticipants, meta);
+  const socialHalfLifeDays = socialHalfLifeDaysForTier(relationshipTier);
+  const activityType = desktopInterpretation?.activityType || meta.activity_type || meta.activityType || null;
+  const contentType = desktopInterpretation?.contentType || meta.content_type || meta.contentType || null;
+  const occurredAt = timestampISO || meta.occurred_at || meta.timestamp || null;
+
+  return {
+    memory_schema_version: 2,
+    raw_event_id: id || meta.id || null,
+    timestamp: occurredAt,
+    occurred_at: occurredAt,
+    date: date || meta.date || (occurredAt ? String(occurredAt).slice(0, 10) : null),
+    source_app: sourceApp,
+    app_id: appId,
+    app: meta.app || meta.activeApp || sourceApp,
+    source_type: meta.source_type || type || null,
+    data_source: dataSource,
+    storage_data_source: inferDataSource(type, meta),
+    source_integrity: inferSourceIntegrity(type, source, meta),
+    context_title: contextTitle,
+    window_title: meta.window_title || meta.activeWindowTitle || null,
+    url: meta.url || meta.webViewLink || meta.link || null,
+    domain: meta.domain || null,
+    entity_labels: entityLabels,
+    entity_tags: entityLabels,
+    entity_ids: entityIds,
+    person_labels: canonicalParticipants,
+    person_ids: personIds,
+    topic_labels: canonicalTopics,
+    topic_ids: topicIds,
+    session_id: sessionId || meta.session_id || null,
+    sentiment_score: Number.isFinite(Number(sentimentScore)) ? Number(sentimentScore) : 0,
+    status: status || meta.status || 'active',
+    activity_type: activityType,
+    content_type: contentType,
+    action_markers: normalizeMetadataList(desktopInterpretation?.actionMarkers || meta.action_markers || [], 12),
+    relationship_tier: relationshipTier,
+    social_half_life_days: socialHalfLifeDays,
+    relationship_signal: canonicalParticipants.length ? {
+      participant_count: canonicalParticipants.length,
+      sentiment_score: Number.isFinite(Number(sentimentScore)) ? Number(sentimentScore) : 0,
+      last_interaction_at: occurredAt,
+      tier: relationshipTier,
+      half_life_days: socialHalfLifeDays
+    } : null,
+    retrieval_breadcrumb: [
+      dataSource ? `[SOURCE: ${dataSource}]` : '',
+      sourceApp ? `[APP: ${sourceApp}]` : '',
+      appId ? `[APP_ID: ${appId}]` : '',
+      contextTitle ? `[CONTEXT: ${contextTitle}]` : '',
+      occurredAt ? `[TIME: ${String(occurredAt).slice(0, 19)}]` : '',
+      contentType ? `[SURFACE: ${contentType}]` : '',
+      activityType ? `[ACTIVITY: ${activityType}]` : '',
+      canonicalParticipants.length ? `[PEOPLE: ${canonicalParticipants.slice(0, 5).join(', ')}]` : ''
+    ].filter(Boolean).join('')
+  };
 }
 
 function inferDesktopContentType(text, metadata = {}) {
@@ -341,7 +537,7 @@ function inferDesktopActivity(contentType, text, metadata = {}) {
     /\b(save|commit|push|publish|submit|send|post|create|new|add|insert|update|deployment|deploy|checkout|merge|rebase)\b/i,
     /\b(untitled|new folder|new document|new file|draft|unsaved|modified|\*)\b/i
   ];
-  
+
   const viewingSignals = [
     /\b(viewing|reading|browsing|searching|looking|watching|previewing|read-only)\b/i,
     /\b(details|overview|summary|info|about|help|faq)\b/i
@@ -349,7 +545,7 @@ function inferDesktopActivity(contentType, text, metadata = {}) {
 
   const hasCreatingSignal = creatingSignals.some(sig => sig.test(lowered)) || /\b(github.*(compare|pull|new)|compose|drafting|replying|editing)\b/i.test(windowTitle);
   const hasViewingSignal = viewingSignals.some(sig => sig.test(lowered));
-  
+
   const isKnownEditor = (app && /\b(cursor|vscode|intellij|sublime|textedit|notes|notion|google docs|pages|word|figma|canva|linear|github|slack|discord|teams|obsidian|craft|scrivener|overleaf|replit|terminal|iterm|xcode|android studio|unity|blender|photoshop|illustrator|premiere|after effects)\b/i.test(app.toLowerCase()));
   const isReadOnlyWindow = /\b(view|preview|read-only|readonly|history|log|output|logs|terminal output)\b/i.test(windowTitle.toLowerCase());
 
@@ -512,6 +708,7 @@ function interpretDesktopCapture(text, metadata = {}) {
   const uncertainty = cleanedText.length < 40 ? 'high' : (cleanedText.length < 120 ? 'medium' : 'low');
   const focusSnippet = (cleanedLines.slice(0, 6).join(' ') || raw.replace(/\s+/g, ' ').trim()).slice(0, 420);
   const captureCategory = CAPTURE_CATEGORY_MAP[contentType] || 'desktop';
+  const compactText = normalizeCompactCaptureText(cleanedText || raw, meta);
 
   const searchText = [
     meta.app || meta.activeApp ? `App: ${meta.app || meta.activeApp}` : '',
@@ -531,6 +728,7 @@ function interpretDesktopCapture(text, metadata = {}) {
     activityConfidence: activity.confidence || 'low',
     activityEvidence: Array.isArray(activity.evidence) ? activity.evidence.slice(0, 3) : [],
     contentType,
+    compactText,
     captureCategory,
     actionMarkers,
     entityRefs,
@@ -553,7 +751,7 @@ function sanitizeSourceText({ type, source, text, metadata }) {
   return String(text || '').replace(/\s+/g, ' ').trim();
 }
 
-function chunkText(text, { size = 700, overlap = 120 } = {}) {
+function chunkText(text, { size = 1200, overlap = 120, maxChunks = 8 } = {}) {
   const source = String(text || '').trim();
   if (!source) return [];
   const chunks = [];
@@ -572,7 +770,31 @@ function chunkText(text, { size = 700, overlap = 120 } = {}) {
     start += stride;
   }
 
-  return chunks.slice(0, 48);
+  return chunks.slice(0, Math.max(1, Number(maxChunks || 8)));
+}
+
+function buildChunkBreadcrumb({ metadata = {}, source = '', timestampISO = null, eventType = '' } = {}) {
+  const meta = metadata && typeof metadata === 'object' ? metadata : {};
+  const app = String(meta.source_app || meta.app || meta.activeApp || source || '').trim();
+  const appId = String(meta.app_id || '').trim();
+  const dataSource = String(meta.data_source || meta.storage_data_source || '').trim();
+  const windowTitle = String(meta.context_title || meta.window_title || meta.activeWindowTitle || meta.title || '').trim();
+  const fileHint = String(meta.file || meta.path || meta.document || '').trim();
+  const time = String(timestampISO || meta.occurred_at || meta.timestamp || '').trim();
+  const tags = [
+    dataSource ? `[SOURCE: ${dataSource}]` : '',
+    app ? `[APP: ${app}]` : '',
+    appId ? `[APP_ID: ${appId}]` : '',
+    windowTitle ? `[WINDOW: ${windowTitle}]` : '',
+    fileHint ? `[FILE: ${fileHint}]` : '',
+    eventType ? `[TYPE: ${String(eventType)}]` : '',
+    time ? `[TIME: ${time}]` : '',
+    meta.content_type ? `[SURFACE: ${String(meta.content_type)}]` : '',
+    meta.activity_type ? `[ACTIVITY: ${String(meta.activity_type)}]` : '',
+    Array.isArray(meta.entity_tags) && meta.entity_tags.length ? `[ENTITIES: ${meta.entity_tags.slice(0, 6).join(', ')}]` : '',
+    Array.isArray(meta.person_labels) && meta.person_labels.length ? `[PEOPLE: ${meta.person_labels.slice(0, 4).join(', ')}]` : ''
+  ].filter(Boolean);
+  return tags.join('');
 }
 
 function inferEventApp(source, metadata) {
@@ -734,17 +956,33 @@ async function indexEventChunks({
   metadata
 }) {
   await ensureTextChunksColumns();
-  const chunks = chunkText(text);
+  const operationalSource = inferOperationalDataSource(eventType, source, metadata);
+  const isScreenLike = operationalSource === 'screenshot_ocr';
+  const chunks = chunkText(text, {
+    size: isScreenLike ? 1800 : 1200,
+    overlap: isScreenLike ? 80 : 120,
+    maxChunks: isScreenLike ? 2 : 8
+  });
   if (!chunks.length) return { count: 0 };
 
   const app = inferEventApp(source, metadata);
   const dataSource = inferDataSource(eventType, metadata);
+  const breadcrumb = buildChunkBreadcrumb({
+    metadata,
+    source,
+    timestampISO,
+    eventType
+  });
 
   await db.runQuery(`DELETE FROM text_chunks WHERE event_id = ?`, [eventId]).catch(() => {});
 
   for (const chunk of chunks) {
     const chunkId = `chk_${eventId}_${chunk.index}`;
-    const embedding = await generateEmbedding(chunk.text, process.env.OPENAI_API_KEY);
+    const chunkWithContext = breadcrumb ? `${breadcrumb} ${chunk.text}`.trim() : chunk.text;
+    const embedding = await generateEmbedding(
+      chunkWithContext,
+      isScreenLike ? null : process.env.OPENAI_API_KEY
+    );
     await db.runQuery(
       `INSERT OR REPLACE INTO text_chunks
        (id, event_id, node_id, chunk_index, text, embedding, timestamp, date, app, data_source, metadata)
@@ -754,15 +992,18 @@ async function indexEventChunks({
         eventId,
         null,
         chunk.index,
-        chunk.text,
+        chunkWithContext,
         JSON.stringify(embedding || []),
         timestampISO,
         date,
         app,
         dataSource,
         JSON.stringify({
+          ...metadata,
           source,
-          event_type: eventType
+          event_type: eventType,
+          breadcrumb,
+          raw_chunk_text: chunk.text
         })
       ]
     );
@@ -776,12 +1017,84 @@ async function indexEventChunks({
   return { count: chunks.length };
 }
 
+async function upsertIngestionSemanticNodes({ envelope = {}, entities = [], eventId = '' }) {
+  const now = new Date().toISOString();
+  const anchorAt = envelope?.occurred_at || now;
+  const anchorDate = String(anchorAt).slice(0, 10);
+  const labels = Array.from(new Set([
+    ...(Array.isArray(entities) ? entities : []),
+    ...((envelope?.topics || []).slice(0, 8))
+  ].filter(Boolean).map((item) => String(item).trim()))).slice(0, 16);
+
+  for (const label of labels) {
+    const subtype = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(label)
+      ? 'person'
+      : (/\b(project|launch|deadline|task|exam|meeting|follow-up)\b/i.test(label) ? 'task' : 'fact');
+    const nodeId = `sem_ing_${crypto.createHash('sha1').update(`${subtype}|${label.toLowerCase()}`).digest('hex').slice(0, 18)}`;
+    const nodeMeta = {
+      name: label,
+      summary: `Observed in ${envelope?.source_type || 'event'} capture`,
+      source_type_group: envelope?.type_group || null,
+      latest_activity_at: now,
+      anchor_at: anchorAt,
+      anchor_date: anchorDate,
+      source_refs: [eventId]
+    };
+
+    await db.runQuery(
+      `INSERT OR REPLACE INTO memory_nodes
+       (id, layer, subtype, title, summary, canonical_text, confidence, status, source_refs, metadata, graph_version, created_at, updated_at, embedding, anchor_date, anchor_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+               COALESCE((SELECT created_at FROM memory_nodes WHERE id = ?), ?), ?,
+               COALESCE((SELECT embedding FROM memory_nodes WHERE id = ?), '[]'), ?, ?)`,
+      [
+        nodeId,
+        'semantic',
+        subtype,
+        label,
+        nodeMeta.summary,
+        `${label}\n${envelope?.title || ''}`.trim(),
+        0.62,
+        'active',
+        JSON.stringify([eventId].filter(Boolean)),
+        JSON.stringify(nodeMeta),
+        'ingestion_fastpath_v1',
+        nodeId,
+        now,
+        nodeId,
+        now,
+        anchorDate,
+        anchorAt
+      ]
+    ).catch(() => {});
+
+    await upsertRetrievalDoc({
+      docId: `node:${nodeId}`,
+      sourceType: 'node',
+      nodeId,
+      timestamp: now,
+      text: `[Semantic:${subtype}] ${label}\nObserved in ${envelope?.app || envelope?.source || 'system'}\n${envelope?.title || ''}`,
+      metadata: {
+        layer: 'semantic',
+        subtype,
+        title: label,
+        anchor_at: anchorAt,
+        anchor_date: anchorDate,
+        source_refs: [eventId].filter(Boolean),
+        source_type_group: envelope?.type_group || null
+      }
+    }).catch(() => {});
+  }
+}
+
 /**
  * Standardize an external payload into the universal L1 format and store in SQLite
  */
 async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
   await ensureEventsDateColumn();
   await ensureEventEnvelopeColumns();
+  const { calculateSentimentScore } = require('./embedding-engine');
+
   const normalizedTime = pickOccurredAt(
     type,
     metadata && typeof metadata === 'object' ? metadata : {},
@@ -835,19 +1148,70 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
   const redaction = redactSensitiveText(sourceText || '');
   const safeText = redaction.text;
   const entities = extractEntities(safeText || '');
+
+  // Calculate sentiment score from text content
+  const sentimentScore = calculateSentimentScore(safeText || rawInputText);
+
+  // Generate or use session_id for activity grouping (same app, continuous activity within 60min)
+  const sessionId = safeMetadataInput.session_id || crypto.randomUUID();
+
+  // Determine status based on action markers and context
+  let eventStatus = 'active';
+  if (desktopInterpretation?.actionMarkers?.includes('follow_up_needed')) {
+    eventStatus = 'pending';
+  } else if (desktopInterpretation?.actionMarkers?.includes('completed')) {
+    eventStatus = 'completed';
+  } else if (desktopInterpretation?.actionMarkers?.includes('blocked')) {
+    eventStatus = 'blocked';
+  }
+
+  const preliminaryEnvelope = normalizeEventEnvelope({
+    id,
+    type,
+    timestamp: tStr,
+    source,
+    text: safeText,
+    metadata: {
+      ...safeMetadataInput,
+      timestamp: tStr,
+      occurred_at: tStr
+    },
+    entities
+  });
+  const canonicalMemoryMetadata = buildCanonicalEventMetadata({
+    id,
+    type,
+    source,
+    timestampISO: preliminaryEnvelope.occurred_at || tStr,
+    date: preliminaryEnvelope.occurred_date || dStr,
+    metadata: safeMetadataInput,
+    entities,
+    participants: preliminaryEnvelope.participants || [],
+    topics: preliminaryEnvelope.topics || [],
+    sentimentScore,
+    sessionId,
+    status: eventStatus,
+    desktopInterpretation
+  });
+
   const safeMetadata = {
     ...safeMetadataInput,
+    ...canonicalMemoryMetadata,
     timestamp: (metadata && metadata.timestamp) ? metadata.timestamp : tStr,
     occurred_at: (metadata && metadata.occurred_at) ? metadata.occurred_at : tStr,
     date: (metadata && metadata.date) ? metadata.date : dStr,
     event_date: dStr,
-    data_source: inferDataSource(type, metadata),
+    data_source: canonicalMemoryMetadata.data_source || inferOperationalDataSource(type, source, safeMetadataInput),
+    storage_data_source: inferDataSource(type, metadata),
     redaction: {
       applied: redaction.applied,
       redacted: redaction.redacted
     },
     raw_text: rawInputText,
     redacted_text: safeText,
+    sentiment_score: sentimentScore,
+    session_id: sessionId,
+    status: eventStatus,
     ...(desktopInterpretation ? {
       activity_summary: desktopInterpretation.activitySummary,
       activity_type: desktopInterpretation.activityType,
@@ -858,7 +1222,8 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
       action_markers: desktopInterpretation.actionMarkers,
       entity_refs: desktopInterpretation.entityRefs,
       capture_uncertainty: desktopInterpretation.uncertainty,
-      cleaned_capture_text: desktopInterpretation.cleanedText
+      cleaned_capture_text: desktopInterpretation.cleanedText,
+      compact_capture_text: desktopInterpretation.compactText
     } : {})
   };
   const envelope = normalizeEventEnvelope({
@@ -874,8 +1239,8 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
   try {
     await db.runQuery(
       `INSERT OR IGNORE INTO events
-       (id, type, timestamp, date, source, source_type, source_account, occurred_at, ingested_at, observation_time, event_time, app, window_title, url, domain, participants, title, raw_text, redacted_text, source_ref, text, metadata, ocr_hash)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, type, timestamp, date, source, source_type, source_account, occurred_at, ingested_at, observation_time, event_time, app, window_title, url, domain, participants, title, raw_text, redacted_text, source_ref, text, metadata, ocr_hash, sentiment_score, session_id, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         envelope.source_type,
@@ -899,14 +1264,17 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
         envelope.source_ref,
         safeText || '',
         JSON.stringify(safeMetadata),
-        ocrHash
+        ocrHash,
+        sentimentScore,
+        sessionId,
+        eventStatus
       ]
     );
 
     // Write entity lookups
     for (const ent of entities) {
       await db.runQuery(
-        `INSERT OR IGNORE INTO event_entities (event_id, entity) VALUES (?, ?)`, 
+        `INSERT OR IGNORE INTO event_entities (event_id, entity) VALUES (?, ?)`,
         [id, ent]
       );
     }
@@ -919,20 +1287,24 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
         app: envelope.app,
         timestamp: envelope.occurred_at,
         text: [
-          envelope.source_type,
-          envelope.source,
-          envelope.app,
-          envelope.domain,
-          envelope.window_title,
-          envelope.title,
-          envelope.participants.join(' '),
-          envelope.topics.join(' '),
-          envelope.identifiers.join(' '),
+          safeMetadata.retrieval_breadcrumb,
+          `Source: ${envelope.source_type}`,
+          `App: ${envelope.app}`,
+          envelope.domain ? `Domain: ${envelope.domain}` : '',
+          envelope.window_title ? `Window: ${envelope.window_title}` : '',
+          envelope.title ? `Title: ${envelope.title}` : '',
+          safeMetadata.person_labels?.length ? `People: ${safeMetadata.person_labels.join(', ')}` : '',
+          safeMetadata.topic_labels?.length ? `Topics: ${safeMetadata.topic_labels.join(', ')}` : '',
+          safeMetadata.action_markers?.length ? `Signals: ${safeMetadata.action_markers.join(', ')}` : '',
+          safeMetadata.compact_capture_text,
           envelope.text
         ].filter(Boolean).join('\n'),
         metadata: {
+          ...canonicalMemoryMetadata,
           envelope,
-          data_source: safeMetadata.data_source
+          data_source: safeMetadata.data_source,
+          storage_data_source: safeMetadata.storage_data_source,
+          source_refs: [id]
         }
       });
 
@@ -946,7 +1318,15 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
         metadata: safeMetadata
       });
     }
-    
+
+    if (safeMetadata.data_source !== 'screenshot_ocr') {
+      await upsertIngestionSemanticNodes({
+        envelope,
+        entities,
+        eventId: id
+      });
+    }
+
     // Dispatch to real-time cognitive router for high-priority micro-updates
     cognitiveRouter.dispatch(envelope);
 
@@ -961,6 +1341,9 @@ module.exports = {
   extractEntities,
   redactSensitiveText,
   chunkText,
+  buildCanonicalEventMetadata,
+  inferAppId,
+  inferOperationalDataSource,
   normalizeEventEnvelope,
   ingestRawEvent
 };

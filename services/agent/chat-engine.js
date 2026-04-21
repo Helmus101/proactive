@@ -195,6 +195,53 @@ function formatStageDetail(items = [], fallback = '') {
   return cleaned.length ? cleaned.join(' ') : fallback;
 }
 
+function normalizeAssistantContent(raw, fallback = "I couldn't produce an answer from the current memory context.") {
+  if (typeof raw === 'string') {
+    const text = raw.trim();
+    return text || fallback;
+  }
+  if (Array.isArray(raw)) {
+    const joined = raw
+      .map((item) => (typeof item === 'string' ? item : (item?.text || item?.content || item?.answer || '')))
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+    return joined || fallback;
+  }
+  if (raw && typeof raw === 'object') {
+    const candidate = raw.content || raw.answer || raw.response || raw.text || raw.message || raw.output || null;
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+    if (Array.isArray(candidate)) {
+      const joined = candidate.map((item) => String(item || '')).join('\n').trim();
+      if (joined) return joined;
+    }
+    try {
+      const serialized = JSON.stringify(raw, null, 2).trim();
+      return serialized || fallback;
+    } catch (_) {
+      return fallback;
+    }
+  }
+  return fallback;
+}
+
+function sanitizeAssistantOutput(raw = '') {
+  const text = String(raw || '');
+  return text
+    .replace(/<memory_correction>[\s\S]*?<\/memory_correction>/gi, '')
+    .replace(/<memory_search>[\s\S]*?<\/memory_search>/gi, '')
+    .replace(/<memory_drilldown>[\s\S]*?<\/memory_drilldown>/gi, '')
+    .replace(/<memory_update>[\s\S]*?<\/memory_update>/gi, '')
+    .replace(/<memory_link>[\s\S]*?<\/memory_link>/gi, '')
+    .replace(/<contact_create>[\s\S]*?<\/contact_create>/gi, '')
+    .replace(/<contact_update>[\s\S]*?<\/contact_update>/gi, '')
+    .replace(/<memory_create>[\s\S]*?<\/memory_create>/gi, '')
+    .replace(/<automation_create>[\s\S]*?<\/automation_create>/gi, '')
+    .replace(/<action_create>[\s\S]*?<\/action_create>/gi, '')
+    .replace(/<ui_card>[\s\S]*?<\/ui_card>/gi, '')
+    .trim();
+}
+
 function buildStageEvent(step, status, overrides = {}) {
   return {
     step,
@@ -799,6 +846,29 @@ function needsRawDrilldown(query) {
   return /\b(exact|verbatim|quote|quoted|precise|wording|what did .* say|show me the email|exact email|exact message)\b/.test(lower);
 }
 
+function wantsActiveRawRetrieval(query = '', thought = {}) {
+  const lower = String(query || '').toLowerCase();
+  const summaryVsRaw = thought?.summary_vs_raw || '';
+  const metadataFilters = thought?.metadata_filters || {};
+  const filters = thought?.filters || {};
+  const sourceScope = [
+    ...(Array.isArray(filters.source_types) ? filters.source_types : (filters.source_types ? [filters.source_types] : [])),
+    ...(Array.isArray(thought.source_scope) ? thought.source_scope : [])
+  ].map((item) => String(item || '').toLowerCase());
+  const dataSourceScope = [
+    ...(Array.isArray(filters.data_source) ? filters.data_source : (filters.data_source ? [filters.data_source] : [])),
+    ...(Array.isArray(metadataFilters.data_source) ? metadataFilters.data_source : (metadataFilters.data_source ? [metadataFilters.data_source] : []))
+  ].map((item) => String(item || '').toLowerCase());
+  const hasOperationalMetadata = Object.keys(metadataFilters).some((key) => metadataFilters[key] !== null && metadataFilters[key] !== undefined);
+
+  return summaryVsRaw === 'raw'
+    || needsRawDrilldown(query)
+    || /\b(raw|recent|latest|today|yesterday|screenshot|ocr|screen|email|message|calendar|browser history|exact|verbatim)\b/.test(lower)
+    || sourceScope.some((item) => /communication|screen|capture|desktop|calendar|event|email|message|browser|visit/.test(item))
+    || dataSourceScope.some((item) => /raw|ocr|event|email_api|calendar_api|browser_history|screenshot/.test(item))
+    || hasOperationalMetadata;
+}
+
 async function fetchDrilldownEvidence(refs = []) {
   const ids = Array.from(new Set((refs || []).filter(Boolean))).slice(0, 60);
   if (!ids.length) return [];
@@ -831,13 +901,210 @@ function retrievalLooksSparse(retrieval) {
   return seedCount < 2 || evidenceCount < 3;
 }
 
+function retrievalHasVectorOrRawEvidence(retrieval) {
+  const evidence = Array.isArray(retrieval?.evidence) ? retrieval.evidence : [];
+  return evidence.some((item) => {
+    const reason = String(item?.reason || item?.match_reason || '').toLowerCase();
+    const layer = String(item?.layer || item?.type || '').toLowerCase();
+    return /semantic|chunk|lexical|recency|downward|episode_source_ref/.test(reason)
+      || layer === 'raw'
+      || layer === 'event'
+      || Boolean(item?.event_id);
+  });
+}
+
+function shouldUseDailySummarySupplement(retrieval, summaryContext = '', options = {}) {
+  if (!summaryContext) return false;
+  if (options?.force_daily_summary_context) return true;
+  const evidenceCount = Number(retrieval?.evidence_count || retrieval?.evidence?.length || 0);
+  const vectorSeedCount = (retrieval?.seed_results || []).filter((item) => /semantic|chunk|lexical|recency/i.test(String(item?.reason || ''))).length;
+  return evidenceCount === 0 || vectorSeedCount === 0;
+}
+
+function mergePlannerQueries(baseThought = {}, plan = null) {
+  const refined = Array.isArray(plan?.refined_queries) ? plan.refined_queries : [];
+  if (!refined.length) return baseThought;
+  const merged = Array.from(new Set([
+    ...refined.map((item) => String(item || '').trim()).filter(Boolean),
+    ...((baseThought.semantic_queries || []).map((item) => String(item || '').trim()).filter(Boolean))
+  ])).slice(0, 15);
+  return {
+    ...baseThought,
+    semantic_queries: merged,
+    search_queries: merged,
+    query_sets: {
+      ...(baseThought.query_sets || {}),
+      memory_queries: merged
+    }
+  };
+}
+
+function extractMemoryKeywords(query = '') {
+  const stop = new Set([
+    'the', 'and', 'for', 'that', 'with', 'from', 'this', 'have', 'what', 'when', 'where',
+    'who', 'how', 'your', 'about', 'into', 'over', 'under', 'been', 'were', 'they', 'them',
+    'okay', 'please', 'just', 'need', 'want', 'did', 'are', 'was', 'has', 'had', 'can', 'you'
+  ]);
+  return String(query || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 3 && !stop.has(t))
+    .slice(0, 6);
+}
+
+async function lookupDirectMemoryFacts(query = '', limit = 8) {
+  const terms = extractMemoryKeywords(query);
+  if (!terms.length) return [];
+  const clauses = [];
+  const params = [];
+  clauses.push(`COALESCE(source, '') != 'Chat'`);
+  clauses.push(`COALESCE(type, source_type, '') != 'ChatMessage'`);
+  for (const term of terms) {
+    clauses.push(`(
+      LOWER(COALESCE(title, '')) LIKE ? OR
+      LOWER(COALESCE(summary, '')) LIKE ? OR
+      LOWER(COALESCE(canonical_text, '')) LIKE ?
+    )`);
+    const like = `%${term}%`;
+    params.push(like, like, like);
+  }
+  params.push(Math.max(1, Number(limit || 8)));
+
+  const rows = await db.allQuery(
+    `SELECT id, layer, subtype, title, summary, canonical_text, updated_at
+     FROM memory_nodes
+     WHERE (${clauses.join(' OR ')})
+       AND layer IN ('semantic', 'insight', 'core', 'episode')
+     ORDER BY
+       CASE layer
+         WHEN 'semantic' THEN 0
+         WHEN 'insight' THEN 1
+         WHEN 'core' THEN 2
+         ELSE 3
+       END,
+       datetime(updated_at) DESC
+     LIMIT ?`,
+    params
+  ).catch(() => []);
+
+  return (rows || []).map((row) => ({
+    id: row.id,
+    layer: row.layer || 'semantic',
+    title: row.title || '',
+    text: String(row.summary || row.canonical_text || row.title || '').slice(0, 1200),
+    score: 0.56,
+    reason: `Direct fact lookup matched ${(row.subtype || row.layer || 'memory')}`
+  })).filter((item) => item.text);
+}
+
+function normalizeList(value) {
+  return (Array.isArray(value) ? value : (value ? [value] : []))
+    .map((item) => String(item || '').trim())
+    .filter(Boolean);
+}
+
+async function lookupDirectRawEvents(query = '', thought = {}, limit = 8) {
+  const terms = extractMemoryKeywords(query)
+    .filter((term) => !['conversation', 'context', 'today', 'watching'].includes(term))
+    .slice(0, 6);
+  if (!terms.length) return [];
+
+  const filters = thought?.filters || {};
+  const metadataFilters = thought?.metadata_filters || {};
+  const clauses = [];
+  const params = [];
+
+  const dateRange = thought?.applied_date_range || filters.date_range || thought?.date_range || null;
+  if (dateRange?.start && dateRange?.end) {
+    clauses.push(`COALESCE(occurred_at, timestamp) >= ? AND COALESCE(occurred_at, timestamp) <= ?`);
+    params.push(dateRange.start, dateRange.end);
+  }
+
+  const apps = normalizeList(filters.app || thought?.app_scope || metadataFilters.app);
+  if (apps.length) {
+    clauses.push(`(${apps.map(() => `(LOWER(COALESCE(app, '')) LIKE ? OR (COALESCE(app, '') = '' AND LOWER(COALESCE(metadata, '')) LIKE ?))`).join(' OR ')})`);
+    for (const app of apps) {
+      const like = `%${app.toLowerCase()}%`;
+      params.push(like, like);
+    }
+  }
+
+  const sourceTypes = normalizeList(filters.source_types || thought?.source_scope || metadataFilters.source_types);
+  if (sourceTypes.length) {
+    const expanded = new Set(sourceTypes.map((item) => item.toLowerCase()));
+    if (expanded.has('desktop')) ['screen', 'capture', 'screenshot', 'screenshot_ocr', 'raw_event'].forEach((item) => expanded.add(item));
+    clauses.push(`(${Array.from(expanded).map(() => `(LOWER(COALESCE(source_type, '')) LIKE ? OR LOWER(COALESCE(type, '')) LIKE ? OR LOWER(COALESCE(metadata, '')) LIKE ?)`).join(' OR ')})`);
+    params.push(...Array.from(expanded).flatMap((item) => [`%${item}%`, `%${item}%`, `%${item}%`]));
+  }
+
+  const lexicalClauses = [];
+  for (const term of terms) {
+    lexicalClauses.push(`(
+      LOWER(COALESCE(title, '')) LIKE ? OR
+      LOWER(COALESCE(text, '')) LIKE ? OR
+      LOWER(COALESCE(raw_text, '')) LIKE ? OR
+      LOWER(COALESCE(redacted_text, '')) LIKE ? OR
+      LOWER(COALESCE(metadata, '')) LIKE ?
+    )`);
+    const like = `%${term.toLowerCase()}%`;
+    params.push(like, like, like, like, like);
+  }
+  clauses.push(`(${lexicalClauses.join(' OR ')})`);
+
+  params.push(Math.max(8, Number(limit || 8)));
+  const rows = await db.allQuery(
+    `SELECT id, source_type, occurred_at, timestamp, title, text, raw_text, redacted_text, app, metadata
+     FROM events
+     WHERE ${clauses.join(' AND ')}
+     ORDER BY
+       CASE
+         WHEN LOWER(COALESCE(text, '') || ' ' || COALESCE(raw_text, '') || ' ' || COALESCE(metadata, '')) LIKE '%official trailer%' THEN 0
+         WHEN LOWER(COALESCE(text, '') || ' ' || COALESCE(raw_text, '') || ' ' || COALESCE(metadata, '')) LIKE '%youtube%' THEN 1
+         ELSE 2
+       END,
+       COALESCE(occurred_at, timestamp) DESC
+     LIMIT ?`,
+    params
+  ).catch(() => []);
+
+  return (rows || []).map((row, index) => {
+    const metadata = safeJsonParse(row.metadata, {});
+    const text = String(metadata.cleaned_capture_text || row.redacted_text || row.raw_text || row.text || '').trim();
+    const rankHay = `${row.title || ''} ${text}`.toLowerCase();
+    const exactVideoBonus = (rankHay.includes('official trailer') ? 0.18 : 0)
+      + (rankHay.includes('youtube') ? 0.08 : 0)
+      + (rankHay.includes('audio playing') ? 0.08 : 0)
+      + (rankHay.includes('captured text') ? 0.05 : 0);
+    return {
+      id: row.id,
+      event_id: row.id,
+      layer: 'event',
+      type: 'event',
+      subtype: row.source_type || metadata.event_type || null,
+      title: row.title || metadata.context_title || row.source_type || row.id,
+      text: text.slice(0, 8000),
+      app: row.app || metadata.source_app || metadata.app || null,
+      timestamp: row.occurred_at || row.timestamp || metadata.occurred_at || null,
+      score: Number((0.98 + exactVideoBonus - (index * 0.02)).toFixed(6)),
+      useful_score: Number((1.1 + exactVideoBonus - (index * 0.02)).toFixed(6)),
+      reason: 'direct_raw_event_lexical',
+      source_refs: [row.id]
+    };
+  })
+    .filter((item) => item.text)
+    .sort((a, b) => (b.useful_score || 0) - (a.useful_score || 0));
+}
+
 async function executeParallelRetrieval(baseQuery, baseThought, options, onProgress = null) {
   const bundle = [
     String(baseQuery || '').trim(),
     ...((baseThought.semantic_queries || []).map((item) => String(item || '').trim())),
     ...((baseThought.message_queries || []).map((item) => String(item || '').trim()))
   ].filter(Boolean);
-  const queries = Array.from(new Set(bundle)).slice(0, 15);
+  const maxParallelQueries = options?.economy ? 2 : 2;
+  const queries = Array.from(new Set(bundle)).slice(0, maxParallelQueries);
 
   // Detect when a query requires deep context (e.g., long-term relationship, patterns)
   const requiresDeepContext = /\b(relationship|pattern|over the last|long-term|habit|habitual|recurring|years?|months?)\b/i.test(baseQuery);
@@ -850,8 +1117,8 @@ async function executeParallelRetrieval(baseQuery, baseThought, options, onProgr
       ...options,
       retrieval_thought: { ...baseThought, semantic_queries: [q] }
     },
-    seedLimit: Math.max(5, Math.floor(20 / queries.length)),
-    hopLimit: 8,
+    seedLimit: Math.max(3, Math.floor(8 / Math.max(1, queries.length))),
+    hopLimit: requiresDeepContext ? 3 : 2,
     recursionDepth,
     passiveOnly: options.passiveOnly || false,
     onProgress
@@ -862,7 +1129,61 @@ async function executeParallelRetrieval(baseQuery, baseThought, options, onProgr
     .map((r) => r.value);
 
   if (successfulResults.length === 0) {
-    throw new Error('All parallel retrieval attempts failed.');
+    const errors = results
+      .filter((r) => r.status === 'rejected')
+      .map((r) => String(r.reason?.message || r.reason || 'unknown retrieval error'))
+      .slice(0, 3);
+
+    const fallback = {
+      retrieval_run_id: `fallback_${Date.now()}`,
+      retrieval_plan: {
+        ...(baseThought || {}),
+        recursion_depth: recursionDepth,
+        retrieval_error: 'all_parallel_attempts_failed'
+      },
+      thought_summary: ['All parallel retrieval attempts failed; using safe empty retrieval fallback.'],
+      trace_summary: errors.length ? errors : ['Parallel retrieval failure with no detailed error message.'],
+      evidence: [],
+      evidence_count: 0,
+      expanded_nodes: [],
+      seed_nodes: [],
+      edge_paths: [],
+      drilldown_refs: [],
+      lazy_source_refs: [],
+      contextText: '',
+      generated_queries: {
+        semantic: baseThought?.semantic_queries || [],
+        messages: baseThought?.message_queries || [],
+        web: baseThought?.web_queries || [],
+        lexical_terms: baseThought?.lexical_terms || []
+      },
+      query_sets: baseThought?.query_sets || {
+        memory_queries: baseThought?.semantic_queries || [String(baseQuery || '').trim()].filter(Boolean),
+        message_queries: baseThought?.message_queries || [],
+        web_queries: baseThought?.web_queries || []
+      },
+      router: {
+        source_mode: baseThought?.source_mode || baseThought?.strategy_mode || 'memory_only',
+        router_reason: baseThought?.router_reason || 'Parallel retrieval failed; returned empty fallback retrieval.',
+        time_scope: baseThought?.time_scope || null,
+        summary_vs_raw: baseThought?.summary_vs_raw || 'summary'
+      },
+      fallback_reason: 'all_parallel_attempts_failed',
+      retrieval_errors: errors
+    };
+
+    try {
+      onProgress?.({
+        step: 'parallel_retrieval_fallback',
+        status: 'completed',
+        label: 'Parallel retrieval fallback',
+        detail: `All retrieval branches failed; continuing with empty fallback. ${errors[0] || ''}`.trim(),
+        counts: { failed_queries: Number(queries.length || 0) },
+        preview_items: errors
+      });
+    } catch (_) {}
+
+    return fallback;
   }
 
   if (successfulResults.length === 1) return successfulResults[0];
@@ -917,10 +1238,14 @@ async function executeParallelRetrieval(baseQuery, baseThought, options, onProgr
 
 async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   const stageTrace = [];
+  const compatStageBuffer = [];
   const emit = (data) => {
     try {
       if (data && (data.step === 'primary_search_results' || data.step === 'iterative_expansion')) {
-        stageTrace.push(buildStageEvent(data.step, data.status || 'completed', data));
+        const event = buildStageEvent(data.step, data.status || 'completed', data);
+        stageTrace.push(event);
+        compatStageBuffer.push(event);
+        return;
       }
       onStep?.(data);
     } catch (_) {}
@@ -930,10 +1255,17 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   if (!apiKey) {
     apiKey = process.env.DEEPSEEK_API_KEY || options?.apiKey || null;
   }
-  const emitStage = (step, status, overrides = {}) => {
+  const flushCompatStages = () => {
+    if (!compatStageBuffer.length) return;
+    while (compatStageBuffer.length) {
+      onStep?.(compatStageBuffer.shift());
+    }
+  };
+
+  const emitStage = (step, status, overrides = {}, surface = true) => {
     const event = buildStageEvent(step, status, overrides);
     stageTrace.push(event);
-    emit(event);
+    if (surface) emit(event);
     return event;
   };
 
@@ -950,7 +1282,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   }).catch(e => console.warn('Failed to persist user chat turn:', e));
 
   // 1. Router Stage
-  emitStage('routing', 'started', { label: 'Hypothesis', detail: 'Deciding whether this query should use memory, web, or hybrid retrieval.' });
+  emitStage('routing', 'started', { label: 'Hypothesis', detail: 'Deciding whether this query should use memory, web, or hybrid retrieval.' }, false);
   const { baseThought, retrievalQuery, chatHistory } = await runRouterStage({ query, options });
   const summaryHits = searchSummaryRollups(query, options?.historical_summaries || {}, options?.search_index || {}, 6);
   const summaryContext = formatSummaryContext(summaryHits);
@@ -992,13 +1324,13 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   });
 
   // 2. Planner Stage
-  emitStage('planning', 'started', { label: 'Planner', detail: 'Generating a concise execution plan and refining key query terms.' });
+  emitStage('planning', 'started', { label: 'Planner', detail: 'Generating a concise execution plan and refining key query terms.' }, false);
   let plan = await runPlannerStage({ query: retrievalQuery, routerOutput: baseThought, apiKey });
   emitStage('planning', 'completed', {
     label: 'Planner',
     detail: plan ? 'Created a formal execution plan with refined queries.' : 'Using default routing plan.',
     preview_items: plan?.reasoning_plan || []
-  });
+  }, false);
 
   // 3. Retriever Stage (always memory first, then web if needed)
   let retrieval = {
@@ -1042,20 +1374,21 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
 
   while (!judgment.sufficient && iteration < maxIterations) {
     iteration++;
-    emitStage('retrieving', 'started', { label: iteration > 1 ? `Phase 1: Initial memory search (Attempt ${iteration})` : 'Phase 1: Initial memory search', detail: 'Applying time-first filters, searching all memory layers, and collecting top candidates.' });
+    emitStage('memory_search', 'started', { label: iteration > 1 ? `Phase 1: Initial memory search (Attempt ${iteration})` : 'Phase 1: Initial memory search', detail: 'Applying time-first filters, searching all memory layers, and collecting top candidates.' });
 
     // Use refined queries if available and it's not the first pass or if they exist
     const currentThought = (iteration > 1 && judgment.suggested_queries)
       ? { ...baseThought, semantic_queries: judgment.suggested_queries }
-      : (plan?.refined_queries ? { ...baseThought, semantic_queries: plan.refined_queries } : baseThought);
+      : mergePlannerQueries(baseThought, plan);
 
     retrieval = await executeParallelRetrieval(retrievalQuery, currentThought, {
       mode: 'chat',
       app: options?.app,
       date_range: currentThought.applied_date_range || options?.date_range,
       source_types: options?.source_types,
+      metadata_filters: currentThought.metadata_filters || options?.metadata_filters || {},
       retrieval_thought: currentThought,
-      passiveOnly: iteration === 1
+      passiveOnly: false
     }, emit);
 
     if (iteration === 1 && retrievalLooksSparse(retrieval)) {
@@ -1064,6 +1397,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
         app: options?.app,
         date_range: currentThought.applied_date_range || options?.date_range,
         source_types: options?.source_types,
+        metadata_filters: currentThought.metadata_filters || options?.metadata_filters || {},
         retrieval_thought: currentThought,
         passiveOnly: false
       }, emit);
@@ -1076,9 +1410,11 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       let widenedApps = null;
       if (currentThought.filters?.app) {
         const families = inferSurfaceFamilies(retrievalQuery, '', currentThought.filters.app);
-        if (families.includes('communication')) widenedApps = ['Gmail', 'Slack', 'Messages', 'WhatsApp', 'Signal'];
-        else if (families.includes('coding')) widenedApps = ['GitHub', 'Cursor', 'Xcode', 'VSCode'];
-        else if (families.includes('browser')) widenedApps = ['Chrome', 'Safari', 'Arc'];
+        const widenedSet = new Set();
+        if (families.includes('communication')) ['Gmail', 'Slack', 'Messages', 'WhatsApp', 'Signal'].forEach((item) => widenedSet.add(item));
+        if (families.includes('coding')) ['GitHub', 'Cursor', 'Xcode', 'VSCode'].forEach((item) => widenedSet.add(item));
+        if (families.includes('browser')) ['Chrome', 'Safari', 'Arc'].forEach((item) => widenedSet.add(item));
+        widenedApps = widenedSet.size ? Array.from(widenedSet) : null;
       }
 
       if (widenedRange || widenedApps) {
@@ -1095,10 +1431,57 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
           app: widenedApps || options?.app,
           date_range: widenedRange || currentThought.applied_date_range,
           source_types: options?.source_types,
+          metadata_filters: widenedThought.metadata_filters || options?.metadata_filters || {},
           retrieval_thought: widenedThought
         }, onStep);
       }
     }
+
+    if (wantsActiveRawRetrieval(retrievalQuery, currentThought)) {
+      const directRawEvents = await lookupDirectRawEvents(retrievalQuery, currentThought, 8);
+      if (directRawEvents.length) {
+        const existingIds = new Set((retrieval.evidence || []).map((item) => item?.event_id || item?.id).filter(Boolean));
+        const freshRawEvents = directRawEvents.filter((item) => !existingIds.has(item.event_id || item.id));
+        if (freshRawEvents.length) {
+          retrieval.evidence = [...freshRawEvents, ...(retrieval.evidence || [])];
+          retrieval.evidence_count = Number(retrieval.evidence.length || 0);
+          retrieval.drilldown_refs = Array.from(new Set([
+            ...freshRawEvents.map((item) => item.event_id || item.id),
+            ...(retrieval.drilldown_refs || [])
+          ].filter(Boolean))).slice(0, 32);
+          retrieval.packed_context_stats = {
+            ...(retrieval.packed_context_stats || {}),
+            packed_evidence: retrieval.evidence_count,
+            direct_raw_event_hits: freshRawEvents.length
+          };
+          emitStage('direct_raw_event_lookup', 'completed', {
+            label: 'Direct raw event lookup',
+            detail: `Recovered ${freshRawEvents.length} raw events with lexical/date/app filters.`,
+            counts: { direct_raw_event_hits: freshRawEvents.length },
+            preview_items: freshRawEvents.slice(0, 3).map((item) => item.text || item.title || item.id)
+          });
+        }
+      }
+    }
+
+    emitStage('memory_search', 'completed', { label: 'Phase 1: Initial memory search', detail: 'Completed memory retrieval pass.' });
+    flushCompatStages();
+
+    emitStage('seed_selection', 'completed', {
+      label: 'Seed selection',
+      detail: `Selected ${retrieval.seed_results?.length || retrieval.seed_nodes?.length || 0} candidate seeds from memory retrieval.`,
+      counts: {
+        seed_results: Number(retrieval.seed_results?.length || retrieval.seed_nodes?.length || 0)
+      }
+    });
+
+    emitStage('edge_expansion', 'completed', {
+      label: 'Edge expansion',
+      detail: `Expanded ${retrieval.graph_expansion_results?.length || retrieval.expanded_nodes?.length || 0} graph nodes from the selected seeds.`,
+      counts: {
+        graph_nodes: Number(retrieval.graph_expansion_results?.length || retrieval.expanded_nodes?.length || 0)
+      }
+    });
 
     emitStage('ranking', 'completed', {
       label: 'Phase 2: Node expansion + rerank',
@@ -1109,19 +1492,41 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       preview_items: (retrieval.evidence || []).slice(0, 3).map((item) => item.text || item.id)
     });
 
-    if (summaryContext) {
-      retrieval.contextText = `[Daily Summary Snapshots]\n${summaryContext}\n\n${retrieval.contextText || ''}`.trim();
+    if (shouldUseDailySummarySupplement(retrieval, summaryContext, options)) {
+      retrieval.contextText = `${retrieval.contextText || ''}\n\n[Supplemental Daily Summary Snapshots]\n${summaryContext}`.trim();
+      retrieval.summary_context_used = true;
+    } else {
+      retrieval.summary_context_used = false;
+    }
+
+    if (retrievalLooksSparse(retrieval) && !wantsActiveRawRetrieval(retrievalQuery, currentThought)) {
+      const directFacts = await lookupDirectMemoryFacts(retrievalQuery, 8);
+      if (directFacts.length) {
+        const existingIds = new Set((retrieval.evidence || []).map((item) => item?.id).filter(Boolean));
+        const mergedFacts = directFacts.filter((item) => !existingIds.has(item.id));
+        if (mergedFacts.length) {
+          retrieval.evidence = [...(retrieval.evidence || []), ...mergedFacts];
+          retrieval.evidence_count = Number(retrieval.evidence.length || 0);
+          const lines = mergedFacts.slice(0, 8).map((item) => `- [${item.layer}] ${item.text}`);
+          retrieval.contextText = `${retrieval.contextText || ''}\n\n[Direct Memory Facts]\n${lines.join('\n')}`.trim();
+          emitStage('direct_memory_fallback', 'completed', {
+            label: 'Direct memory fact lookup',
+            detail: `Recovered ${mergedFacts.length} semantic/core facts from memory_nodes lexical matching.`,
+            counts: { direct_fact_hits: mergedFacts.length },
+            preview_items: mergedFacts.slice(0, 3).map((item) => item.title || item.id)
+          });
+        }
+      }
     }
 
     const webAssessment = assessWebSearchNecessity(query, currentThought, retrieval);
     const shouldSearchWeb = webAssessment.shouldSearchWeb;
-    
+    const webSearchQuery = (judgment.suggested_queries?.[0]) || (currentThought?.semantic_queries?.[0]) || query;
+    emitStage('web_search', 'started', {
+      label: 'Web search',
+      detail: `${webAssessment.reason} Searching the web using: ${webSearchQuery}`
+    });
     if (shouldSearchWeb) {
-      const webSearchQuery = (judgment.suggested_queries?.[0]) || (currentThought?.semantic_queries?.[0]) || query;
-      emitStage('web_search', 'started', {
-        label: 'Web search',
-        detail: `${webAssessment.reason} Searching the web using: ${webSearchQuery}`
-      });
       webResults = await searchFreeWeb(webSearchQuery, 4);
       emitStage('web_search', 'completed', {
         label: 'Web search',
@@ -1130,9 +1535,10 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
         preview_items: webResults.slice(0, 3).map((item) => item.title || item.url)
       });
     } else {
-      emitStage('web_search', 'skipped', {
+      emitStage('web_search', 'completed', {
         label: 'Web search',
-        detail: webAssessment.reason
+        detail: webAssessment.reason,
+        status: 'completed'
       });
     }
 
@@ -1141,13 +1547,19 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       : [];
 
     // 4. Judge Stage
-    emitStage('judging', 'started', { label: 'Evidence test', detail: 'Checking whether the current memory and web evidence supports the answer.' });
-    judgment = await runJudgeStage({ query: retrievalQuery, plan, evidence: [...(retrieval.evidence || []), ...webResults], apiKey });
+    emitStage('judging', 'started', { label: 'Evidence test', detail: 'Checking whether the current memory and web evidence supports the answer.' }, false);
+    judgment = await runJudgeStage({
+      query: retrievalQuery,
+      plan,
+      retrieval,
+      evidence: [...(retrieval.evidence || []), ...webResults],
+      apiKey
+    });
     emitStage('judging', 'completed', {
       label: 'Evidence test',
       detail: judgment.reason,
       status: judgment.sufficient ? 'completed' : 'retry'
-    });
+    }, false);
 
     if (judgment.sufficient || !apiKey) break;
   }
@@ -1179,7 +1591,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     while (!reflection.approved && synthIteration < maxSynthIterations) {
       synthIteration++;
       emitStage('synthesis', 'started', { label: synthIteration > 1 ? `Answer drafting (Attempt ${synthIteration})` : 'Answer drafting', detail: 'Reasoning over the packed context bundle to draft the answer.' });
-      content = await runSynthesizerStage({
+      content = normalizeAssistantContent(await runSynthesizerStage({
         query,
         retrieval,
         chatHistory,
@@ -1188,17 +1600,17 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
         webResults,
         apiKey,
         reflectorFeedback: synthIteration > 1 ? reflection : null
-      });
+      }));
 
       // 6. Reflector Stage (with confidence gating)
-      emitStage('reflecting', 'started', { label: 'Critique', detail: 'Reviewing the draft for completeness, accuracy, and hallucination risk.' });
+      emitStage('reflecting', 'started', { label: 'Critique', detail: 'Reviewing the draft for completeness, accuracy, and hallucination risk.' }, false);
       reflection = await runReflectorStage({ query, evidence: [...(retrieval.evidence || []), ...webResults], answer: content, apiKey, confidenceScore: judgment?.confidence_score });
       retrieval.reflection = reflection;
       emitStage('reflecting', 'completed', {
         label: 'Reflecting',
         detail: reflection.reason,
         status: reflection.approved ? 'completed' : 'retry'
-      });
+      }, false);
 
       if (reflection.approved) break;
     }
@@ -1215,6 +1627,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
 
   // Update thinkingTrace again to include reflection if it happened
   thinkingTrace.reflector = reflection;
+  content = sanitizeAssistantOutput(normalizeAssistantContent(content));
 
   // Persist assistant chat turn as a raw event
   await ingestRawEvent({
@@ -1232,146 +1645,8 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     detail: 'Stored this chat turn back into memory as raw chat events.'
   });
 
-  const correctionMatch = content.match(/<memory_correction>([\s\S]*?)<\/memory_correction>/i);
-  if (correctionMatch && correctionMatch[1]) {
-    const correctionText = correctionMatch[1].trim();
-    content = content.replace(/<memory_correction>[\s\S]*?<\/memory_correction>/i, '').trim();
-
-    const { upsertMemoryNode, stableHash } = require('./graph-store');
-    const correctionId = `core_corr_${stableHash(correctionText)}`;
-    await upsertMemoryNode({
-      id: correctionId,
-      layer: 'core',
-      subtype: 'user_correction',
-      title: 'User Context Correction',
-      summary: correctionText,
-      canonicalText: correctionText,
-      confidence: 1.0,
-      metadata: { source: 'chat_engine', updated_from_chat: true },
-      anchorAt: new Date().toISOString(),
-      anchorDate: new Date().toISOString().slice(0, 10)
-    }).catch(e => console.error('Failed to write core memory correction:', e));
-  }
-
-  // Handle new memory management tools via XML tags
-  const { dispatchTool } = require('./tool-dispatcher');
-
-  const searchMatch = content.match(/<memory_search>([\s\S]*?)<\/memory_search>/i);
-  if (searchMatch && searchMatch[1]) {
-    const queryText = searchMatch[1].trim();
-    content = content.replace(/<memory_search>[\s\S]*?<\/memory_search>/i, '').trim();
-    await dispatchTool({ tool: 'memory_search', input: { query: queryText } }).catch(() => null);
-  }
-
-  const drilldownMatch = content.match(/<memory_drilldown>([\s\S]*?)<\/memory_drilldown>/i);
-  if (drilldownMatch && drilldownMatch[1]) {
-    const nodeId = drilldownMatch[1].trim();
-    content = content.replace(/<memory_drilldown>[\s\S]*?<\/memory_drilldown>/i, '').trim();
-    await dispatchTool({ tool: 'memory_drilldown', input: { node_id: nodeId } }).catch(() => null);
-  }
-
-  const updateMatch = content.match(/<memory_update>([\s\S]*?)<\/memory_update>/i);
-  if (updateMatch && updateMatch[1]) {
-    try {
-      const input = JSON.parse(updateMatch[1].trim());
-      content = content.replace(/<memory_update>[\s\S]*?<\/memory_update>/i, '').trim();
-      await dispatchTool({ tool: 'memory_update', input }).catch(() => null);
-    } catch (_) {}
-  }
-
-  const linkMatch = content.match(/<memory_link>([\s\S]*?)<\/memory_link>/i);
-  if (linkMatch && linkMatch[1]) {
-    try {
-      const input = JSON.parse(linkMatch[1].trim());
-      content = content.replace(/<memory_link>[\s\S]*?<\/memory_link>/i, '').trim();
-      await dispatchTool({ tool: 'memory_link', input }).catch(() => null);
-    } catch (_) {}
-  }
-
-  // New action tags
   const uiBlocks = [];
-
-  const contactCreateMatch = content.match(/<contact_create>([\s\S]*?)<\/contact_create>/i);
-  if (contactCreateMatch && contactCreateMatch[1]) {
-    try {
-      const input = JSON.parse(contactCreateMatch[1].trim());
-      content = content.replace(/<contact_create>[\s\S]*?<\/contact_create>/i, '').trim();
-      const toolResult = await dispatchTool({ tool: 'contact_create', input }).catch(() => null);
-      if (toolResult?.status === 'success') {
-        uiBlocks.push({
-          type: 'info',
-          title: `Contact created: ${input.name}`,
-          body: [input.email, input.phone, input.notes].filter(Boolean).join(' · ') || 'No additional details.',
-          actions: [{ label: 'View contact', action: 'view_contact', data: { node_id: toolResult.output?.node_id, name: input.name } }]
-        });
-      }
-    } catch (_) {}
-  }
-
-  const contactUpdateMatch = content.match(/<contact_update>([\s\S]*?)<\/contact_update>/i);
-  if (contactUpdateMatch && contactUpdateMatch[1]) {
-    try {
-      const input = JSON.parse(contactUpdateMatch[1].trim());
-      content = content.replace(/<contact_update>[\s\S]*?<\/contact_update>/i, '').trim();
-      const toolResult = await dispatchTool({ tool: 'contact_update', input }).catch(() => null);
-      if (toolResult?.status === 'success') {
-        uiBlocks.push({
-          type: 'info',
-          title: `Contact updated: ${input.name}`,
-          body: `Updated: ${(toolResult.output?.updated_fields || []).join(', ')}`,
-          actions: [{ label: 'View contact', action: 'view_contact', data: { node_id: toolResult.output?.node_id, name: input.name } }]
-        });
-      }
-    } catch (_) {}
-  }
-
-  const memCreateMatch = content.match(/<memory_create>([\s\S]*?)<\/memory_create>/i);
-  if (memCreateMatch && memCreateMatch[1]) {
-    try {
-      const input = JSON.parse(memCreateMatch[1].trim());
-      content = content.replace(/<memory_create>[\s\S]*?<\/memory_create>/i, '').trim();
-      const toolResult = await dispatchTool({ tool: 'memory_create', input }).catch(() => null);
-      if (toolResult?.status === 'success') {
-        uiBlocks.push({
-          type: 'info',
-          title: `Saved to memory: ${input.title}`,
-          body: input.summary,
-          actions: []
-        });
-      }
-    } catch (_) {}
-  }
-
-  const autoCreateMatch = content.match(/<automation_create>([\s\S]*?)<\/automation_create>/i);
-  if (autoCreateMatch && autoCreateMatch[1]) {
-    try {
-      const input = JSON.parse(autoCreateMatch[1].trim());
-      content = content.replace(/<automation_create>[\s\S]*?<\/automation_create>/i, '').trim();
-      const toolResult = await dispatchTool({ tool: 'automation_create', input }).catch(() => null);
-      if (toolResult?.status === 'success') {
-        const intervalLabel = input.interval_minutes >= 60
-          ? `every ${Math.round(input.interval_minutes / 60)}h`
-          : `every ${input.interval_minutes}m`;
-        uiBlocks.push({
-          type: 'info',
-          title: `Automation scheduled: ${input.name}`,
-          body: `Runs ${intervalLabel} — "${input.prompt}"`,
-          actions: [{ label: 'View automations', action: 'view_automations', data: {} }]
-        });
-      }
-    } catch (_) {}
-  }
-
-  // Explicit ui_card tags (LLM-authored interactive cards)
-  const uiCardRegex = /<ui_card>([\s\S]*?)<\/ui_card>/gi;
-  let uiCardMatch;
-  while ((uiCardMatch = uiCardRegex.exec(content)) !== null) {
-    try {
-      const card = JSON.parse(uiCardMatch[1].trim());
-      uiBlocks.push(card);
-    } catch (_) {}
-  }
-  content = content.replace(/<ui_card>[\s\S]*?<\/ui_card>/gi, '').trim();
+  content = sanitizeAssistantOutput(content);
 
   return {
     content,
@@ -1420,23 +1695,44 @@ function isSimpleQuery(query) {
   return simple.test(query) && !complex.test(query);
 }
 
-function heuristicJudge(evidence) {
+function lexicalOverlapRatio(query = '', evidence = []) {
+  const stop = new Set(['what', 'when', 'where', 'which', 'with', 'from', 'this', 'that', 'have', 'doing', 'memory', 'context', 'according', 'today']);
+  const tokens = String(query || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9._/-\s]/g, ' ')
+    .split(/\s+/)
+    .map((item) => item.trim())
+    .filter((item) => item.length >= 4 && !stop.has(item))
+    .slice(0, 12);
+  if (!tokens.length) return 1;
+  const hay = (evidence || []).map((item) => `${item?.text || ''} ${item?.title || ''} ${item?.reason || ''}`).join(' ').toLowerCase();
+  const hits = tokens.filter((token) => hay.includes(token)).length;
+  return hits / tokens.length;
+}
+
+function heuristicJudge(evidence, query = '', retrieval = null) {
   const evidenceCount = (evidence || []).length;
   const topScores = evidence.slice(0, 5).map(e => Number(e.score || 0.5));
   const avgTopScore = topScores.length ? topScores.reduce((a, b) => a + b) / topScores.length : 0;
-  const evidenceQuality = (evidenceCount >= 5 && avgTopScore >= 0.65) 
+  const overlap = lexicalOverlapRatio(query, evidence);
+  const hasVectorOrRaw = retrieval ? retrievalHasVectorOrRawEvidence(retrieval) : (evidence || []).some((item) => {
+    const reason = String(item?.reason || '').toLowerCase();
+    const layer = String(item?.layer || item?.type || '').toLowerCase();
+    return /semantic|chunk|lexical|recency|downward/.test(reason) || layer === 'raw' || layer === 'event' || Boolean(item?.event_id);
+  });
+  const evidenceQuality = (evidenceCount >= 5 && avgTopScore >= 0.65)
     ? 'strong'
     : (evidenceCount >= 3 && avgTopScore >= 0.55)
     ? 'moderate'
     : 'weak';
-  const sufficient = evidenceQuality !== 'weak' || evidenceCount >= 8;
-  const confidenceScore = Math.min(0.99, Math.max(0.3, 
-    (evidenceCount / 10) * 0.5 + (avgTopScore * 0.5)
+  const sufficient = hasVectorOrRaw && overlap >= 0.18 && (evidenceQuality !== 'weak' || evidenceCount >= 8);
+  const confidenceScore = Math.min(0.99, Math.max(0.3,
+    (evidenceCount / 10) * 0.38 + (avgTopScore * 0.42) + (overlap * 0.2)
   ));
   return {
     sufficient,
     confidence_score: confidenceScore,
-    reason: `[Heuristic] ${evidenceQuality} evidence: ${evidenceCount} items, avg score ${avgTopScore.toFixed(2)}.`,
+    reason: `[Heuristic] ${evidenceQuality} evidence: ${evidenceCount} items, avg score ${avgTopScore.toFixed(2)}, query overlap ${overlap.toFixed(2)}, vector/raw support ${hasVectorOrRaw ? 'yes' : 'no'}.`,
     suggested_queries: []
   };
 }
@@ -1489,10 +1785,11 @@ Return JSON: {"reasoning_plan": ["step1",...], "refined_queries": ["q1",...], "e
   }
 }
 
-async function runJudgeStage({ query, plan, evidence, apiKey }) {
-  if (!apiKey || !evidence?.length) return { sufficient: true, reason: 'No API key or no evidence for judging.' };
+async function runJudgeStage({ query, plan, retrieval = null, evidence, apiKey }) {
+  if (!evidence?.length) return { sufficient: false, reason: 'No evidence for judging.' };
 
-  const heuristicResult = heuristicJudge(evidence);
+  const heuristicResult = heuristicJudge(evidence, query, retrieval);
+  if (!apiKey) return heuristicResult;
   if (isCreditSaverMode() || heuristicResult.confidence_score > 0.72) {
     return heuristicResult;
   }
@@ -1519,16 +1816,16 @@ async function runReflectorStage({ query, evidence, answer, apiKey, confidenceSc
   if (!apiKey) return { approved: true, reason: 'No API key for reflection.' };
 
   if (Number(confidenceScore || 0.5) > 0.85) {
-    return { 
-      approved: true, 
-      reason: 'Confidence gate passed (>0.85). Skipping reflector.' 
+    return {
+      approved: true,
+      reason: 'Confidence gate passed (>0.85). Skipping reflector.'
     };
   }
 
   const answerLength = String(answer || '').length;
   if (answerLength < 50) {
-    return { 
-      approved: false, 
+    return {
+      approved: false,
       reason: 'Answer too short.',
       critique: 'Response incomplete.',
       suggestions: 'Expand with more detail.'
@@ -1562,69 +1859,113 @@ Return JSON: {"approved": bool, "critique": "string", "reason": "string"}`;
   }
 }
 
+function compactEvidenceLine(text = '', maxChars = 420) {
+  const cleaned = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!cleaned) return '';
+  const lower = cleaned.toLowerCase();
+  if (/^(full ocr:|content:|captured text:|window:|app:)/.test(lower) && cleaned.length > 260) {
+    return cleaned.slice(0, Math.min(220, maxChars));
+  }
+  return cleaned.slice(0, Math.max(80, maxChars));
+}
+
+function buildSynthesisPolicy({ query = '', evidence = [], retrieval = null }) {
+  const q = String(query || '').toLowerCase();
+  const budget = Number(retrieval?.retrieval_plan?.context_budget_tokens || 2000);
+  const highConfidenceCount = (evidence || []).filter((item) => Number(item?.score || 0) >= 0.7).length;
+  const likelyFactual = /\b(when|what|who|where|which|did|does|is|are|was|were|list|show|find|recall|remember)\b/.test(q);
+  const likelyReasoning = /\b(why|how|compare|difference|pattern|insight|explain|summarize)\b/.test(q);
+
+  const maxTokens = likelyFactual ? 650 : (likelyReasoning ? 900 : 800);
+  const temperature = likelyFactual ? 0.12 : (likelyReasoning ? 0.2 : 0.16);
+  const contextBudget = Math.max(700, Math.min(budget, highConfidenceCount >= 5 ? budget : Math.floor(budget * 0.8)));
+  const evidenceLimit = highConfidenceCount >= 5 ? 8 : 5;
+  const rawLimit = likelyFactual ? 4 : 6;
+
+  return {
+    maxTokens,
+    temperature,
+    contextBudget,
+    evidenceLimit,
+    rawLimit,
+    lineMaxChars: likelyFactual ? 320 : 440
+  };
+}
+
 async function runSynthesizerStage({ query, retrieval, chatHistory, standingNotes, drilldownEvidence, webResults, apiKey, reflectorFeedback = null }) {
-  const budget = retrieval?.retrieval_plan?.context_budget_tokens || 2000;
+  const policy = buildSynthesisPolicy({ query, evidence: retrieval?.evidence || [], retrieval });
+  const budget = policy.contextBudget;
   let usedTokens = 0;
   const contextLines = [];
   const seenText = new Set();
 
   const addLine = (line) => {
-    const textKey = line.trim();
+    const compact = compactEvidenceLine(line, policy.lineMaxChars);
+    const textKey = compact.trim();
     if (!textKey || seenText.has(textKey)) return;
-    const tokens = estimateTokensHeuristic(line);
+    const tokens = estimateTokensHeuristic(compact);
     if (usedTokens + tokens > budget) return;
-    contextLines.push(line);
+    contextLines.push(compact);
     usedTokens += tokens;
     seenText.add(textKey);
   };
 
-  // 1. Core context from retrieval (already somewhat deduplicated)
+  // 1. Priority evidence from vector/metadata retrieval. This must outrank
+  // compressive summaries so chat answers are grounded in the selected nodes.
+  const evidence = Array.isArray(retrieval?.evidence) ? retrieval.evidence : [];
+  [...evidence]
+    .sort((a, b) => Number(b.useful_score || b.score || 0) - Number(a.useful_score || a.score || 0))
+    .slice(0, Math.max(policy.evidenceLimit, 8))
+    .forEach(item => {
+      const metadataHint = [
+        item.app ? `app:${item.app}` : '',
+        item.timestamp ? `time:${item.timestamp}` : '',
+        item.reason ? `reason:${item.reason}` : '',
+        Array.isArray(item.usefulness_reasons) && item.usefulness_reasons.length ? `useful:${item.usefulness_reasons.join(',')}` : ''
+      ].filter(Boolean).join(' ');
+      addLine(`- [${item.layer || 'memory'}${metadataHint ? ` ${metadataHint}` : ''}] ${String(item.text || item.title || '').replace(/\s+/g, ' ').trim().slice(0, 700)}`);
+    });
+
+  // 2. Drilldown / raw evidence for exact wording or source-backed answers.
+  (drilldownEvidence || []).slice(0, policy.rawLimit).forEach(row => {
+    addLine(`- [raw:${row.source_type || 'event'}] ${String(row.text || row.title || '').replace(/\s+/g, ' ').trim().slice(0, 1000)}`);
+  });
+
+  // 3. Graph context after selected evidence. This may include supplemental
+  // daily summaries only when retrieval was sparse.
   if (retrieval.contextText) {
     retrieval.contextText.split('\n').forEach(addLine);
   }
 
-  // 2. Priority evidence
-  const evidence = Array.isArray(retrieval?.evidence) ? retrieval.evidence : [];
-  [...evidence]
-    .sort((a, b) => Number(b.score || 0) - Number(a.score || 0))
-    .slice(0, 15)
-    .forEach(item => {
-      addLine(`- [${item.layer || 'memory'}] ${String(item.text || item.title || '').replace(/\s+/g, ' ').trim().slice(0, 500)}`);
-    });
-
-  // 3. Drilldown / Raw evidence
-  (drilldownEvidence || []).slice(0, 10).forEach(row => {
-    addLine(`- [raw:${row.source_type || 'event'}] ${String(row.text || row.title || '').replace(/\s+/g, ' ').trim().slice(0, 1000)}`);
-  });
-
-  // 4. Web Results
+  // 4. Web results.
   (webResults || []).slice(0, 5).forEach(item => {
     addLine(`- [web] ${item.title}: ${item.snippet} (${item.url})`);
   });
 
+  const contextMemoryXml = (() => {
+    const lines = contextLines.slice(0, 48);
+    if (!lines.length) return '<context_memory></context_memory>';
+    const xmlRows = lines.map((line, index) => {
+      const escaped = String(line || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+      return `  <source id="${index + 1}">${escaped}</source>`;
+    }).join('\n');
+    return `<context_memory>\n${xmlRows}\n</context_memory>`;
+  })();
+
   const prompt = `[System]
 Weave assistant. Conversational, grounded, direct, concise. No invented facts.
-
-[Available Actions]
-You can take actions by embedding XML tags anywhere in your response. They are processed silently and removed before display.
-
-Create a contact (use when user asks to add/create a person):
-<contact_create>{"name":"Full Name","email":"email@example.com","phone":"+1234567890","notes":"optional notes"}</contact_create>
-
-Update a contact's profile (use when user asks to add info to an existing contact):
-<contact_update>{"name":"Person Name","updates":{"email":"new@email.com","phone":"...","notes":"..."}}</contact_update>
-
-Save something to memory (use when user explicitly asks to remember something):
-<memory_create>{"layer":"semantic","subtype":"fact","title":"Short title","summary":"What to remember"}</memory_create>
-
-Create a scheduled automation (use when user asks to run something every X minutes/hours):
-<automation_create>{"name":"Automation Name","description":"What it does","prompt":"The prompt to run on schedule","interval_minutes":30}</automation_create>
-
-Show an interactive card to the user (use to confirm actions or offer follow-up options):
-<ui_card>{"type":"info","title":"Card Title","body":"Card description","actions":[{"label":"Button Label","action":"action_id","data":{}}]}</ui_card>
+You are in READ-ONLY chatbot mode.
+Do not create contacts, automations, actions, memory writes, or UI cards.
+Do not output XML tags or tool instructions.
+Answer strictly from the grounded memory/web context in <context_memory>. If evidence is missing, clearly say what is missing and ask one concise follow-up question.
 
 [Grounded Context]
-${contextLines.join('\n') || 'None'}
+${contextMemoryXml}
 
 [Conversation History]
 ${formatChatHistoryForPrompt(chatHistory)}
@@ -1638,8 +1979,8 @@ ${reflectorFeedback ? `[Reflector Feedback]\nRejected for: ${reflectorFeedback.c
 ${query}`;
 
   try {
-    const content = await callLLM(prompt, apiKey, 0.22, { task: 'synthesis', maxTokens: 1200 });
-    return content || "I couldn't produce an answer from the current memory context.";
+    const content = await callLLM(prompt, apiKey, policy.temperature, { task: 'synthesis', maxTokens: policy.maxTokens });
+    return sanitizeAssistantOutput(normalizeAssistantContent(content));
   } catch (llmError) {
     return buildGroundedFallbackAnswer(query, retrieval, drilldownEvidence);
   }
