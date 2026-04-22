@@ -80,14 +80,17 @@ let dailyInsightTimer = null;
 let weeklyInsightTimer = null;
 let livingCoreTimer = null;
 let semanticsPulseTimer = null;
+let relationshipGraphTimer = null;
 let episodeJobLock = false;
 let suggestionJobLock = false;
 let lastSuggestionLockSkipLogAt = 0;
 let suggestionRunQueued = false;
 let lastCaptureSuggestionTriggerAt = 0;
-const MAX_PRACTICAL_SUGGESTIONS = 10;
+const MAX_PRACTICAL_SUGGESTIONS = 7;
 const CAPTURE_TRIGGER_MIN_INTERVAL_MS = 15 * 60 * 1000;
 const SUGGESTION_REFRESH_INTERVAL_MINUTES = 30;
+const PERIODIC_SCREENSHOT_INTERVAL_MS = 30 * 1000;
+const PERIODIC_SCREENSHOT_WAKE_DELAY_MS = 2500;
 const LOW_POWER_OCR_MIN_INTERVAL_MS = 5 * 60 * 1000;
 const LOW_POWER_HEAVY_JOB_MIN_GAP_MS = 30 * 60 * 1000;
 const CAPTURE_VISUAL_DIFF_THRESHOLD = Number(process.env.CAPTURE_VISUAL_DIFF_THRESHOLD || 0.05);
@@ -99,6 +102,9 @@ let lastEpisodeHeavyRunAt = 0;
 let lastSuggestionHeavyRunAt = 0;
 let lastAcceptedCaptureFingerprint = null;
 let screenshotsPausedForDisplayOff = false;
+let periodicScreenshotNextDueAt = 0;
+let periodicScreenshotRunning = false;
+let periodicScreenshotPauseReason = '';
 const performanceState = {
   onBattery: false,
   thermalState: 'unknown'
@@ -116,6 +122,14 @@ function getPerformanceMode() {
 function isReducedLoadMode() {
   const mode = getPerformanceMode();
   return mode === 'reduced' || mode === 'deep-idle';
+}
+
+function getPeriodicScreenshotIntervalMs(mode = getPerformanceMode()) {
+  return PERIODIC_SCREENSHOT_INTERVAL_MS;
+}
+
+function getPeriodicScreenshotWakeDelayMs(mode = getPerformanceMode()) {
+  return PERIODIC_SCREENSHOT_WAKE_DELAY_MS;
 }
 
 function canRunHeavyJob(lastRunAt = 0) {
@@ -181,7 +195,9 @@ function getStudySessionState() {
 function emitStudySessionUpdate() {
   const payload = getStudySessionState();
   if (mainWindow && mainWindow.webContents) {
-    mainWindow.webContents.send('study-session-update', payload);
+    try {
+      mainWindow.webContents.send('study-session-update', payload);
+    } catch (_) {}
   }
 }
 
@@ -195,36 +211,10 @@ function setStudySessionState(nextState = {}) {
   return activeStudySession;
 }
 
-function inferStudySignal(text = '', metadata = {}) {
-  const rawText = String(text || '').trim();
-  const windowTitle = String(metadata?.activeWindowTitle || '').trim();
-  const appName = String(metadata?.activeApp || '').trim();
-  const hay = `${rawText} ${windowTitle} ${appName}`.toLowerCase().trim();
-  if (!hay) return '';
-  if (/\bquiz|exam|grade|result|score|feedback\b/.test(hay)) return 'revision';
-  if (/\bproblem|exercise|worksheet|question|leetcode|solve|proof\b/.test(hay)) return 'solving';
-  if (/\bessay|draft|write|thesis|paragraph|summary|proposal|report\b/.test(hay)) return 'drafting';
-  if (/\bread|chapter|lecture|slides|notes|article|paper|documentation\b/.test(hay)) return 'reading';
-  if (/\bcalendar|meeting|agenda|switch|tab|window\b/.test(hay)) return 'context-switch';
-  if (/\b(youtube|netflix|spotify|tiktok|instagram|x\\.com|twitter|reddit)\b/.test(hay) && !/\b(lecture|course|tutorial|documentation|lesson|study)\b/.test(hay)) return 'distraction';
-  // Do not force "idle" when there is readable context; let downstream extractor infer concrete activity.
-  if (rawText.length < 12 && !windowTitle && !appName) return 'idle';
-  return '';
-}
-
-function pruneOldSensorCaptures(events = []) {
-  // Pruning disabled to ensure nothing is deleted
-  return Array.isArray(events) ? events : [];
-}
-
 function startScreenshotCleanupLoop() {
   const runCleanup = () => {
-    const before = getSensorEvents();
-    const after = pruneOldSensorCaptures(before);
-    if (after.length !== before.length) {
-      store.set('sensorEvents', after);
-      console.log(`[SensorCapture] Pruned ${before.length - after.length} expired screenshots (>${SCREENSHOT_RETENTION_DAYS} days)`);
-    }
+    // Keep the cleanup loop lightweight; we only clear stale temp references now.
+    pendingAITasks = [];
   };
 
   runCleanup();
@@ -528,211 +518,18 @@ const { google } = require('googleapis');
 
 // Browser automation
 const puppeteer = require('puppeteer-core');
-const { WebSocketServer } = require('ws');
-const NATIVE_HOST_NAME = 'com.proactive.browser_agent';
-const EXTENSION_BRIDGE_PORT = 3003;
 
-// Local relay used by the native host to bridge desktop <-> extension messages.
+// The browser-extension/native-host bridge has been removed.
 let extensionSocket = null;
 let extensionLastSeen = null;
-let extensionTransport = 'native-messaging';
-let wss = null;
-let relayHeartbeatInterval = null;
+let extensionTransport = 'disabled';
 
-function emitExtensionConnectionEvent(type, extra = {}) {
-  if (mainWindow && mainWindow.webContents) {
-    mainWindow.webContents.send('extension-event', { type, timestamp: Date.now(), ...extra });
-  }
-}
-
-function ensureNativeHostAllowsExtensionId(extensionId) {
-  const id = String(extensionId || '').trim();
-  if (!/^[a-p]{32}$/.test(id)) return false;
-
-  const origin = `chrome-extension://${id}/`;
-  const sourcePath = path.join(__dirname, `${NATIVE_HOST_NAME}.json`);
-  const targetPath = path.join(
-    app.getPath('home'),
-    'Library',
-    'Application Support',
-    'Google',
-    'Chrome',
-    'NativeMessagingHosts',
-    `${NATIVE_HOST_NAME}.json`
-  );
-
-  let changed = false;
-  const patchManifest = (manifestPath) => {
-    try {
-      if (!fs.existsSync(manifestPath)) return;
-      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-      const origins = Array.isArray(manifest.allowed_origins) ? manifest.allowed_origins : [];
-      if (!origins.includes(origin)) {
-        manifest.allowed_origins = [...origins, origin];
-        fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
-        changed = true;
-      }
-    } catch (e) {
-      console.warn('[NativeHost] Failed to patch manifest origin:', manifestPath, e?.message || e);
-    }
-  };
-
-  patchManifest(sourcePath);
-  patchManifest(targetPath);
-  if (changed) {
-    console.log(`[NativeHost] Added allowed origin for extension ${id}`);
-  }
-  return changed;
-}
-
-function isExtensionConnected() {
-  if (!extensionSocket) return false;
-  if (!extensionLastSeen) return true;
-  return (Date.now() - extensionLastSeen) < 45000;
-}
-
-async function waitForExtensionConnection(timeoutMs = 90000, pollMs = 500) {
-  const start = Date.now();
-  while ((Date.now() - start) < timeoutMs) {
-    if (isExtensionConnected()) return true;
-    await new Promise((resolve) => setTimeout(resolve, pollMs));
-  }
-  return false;
-}
-
-function bindExtensionRelayServer(server) {
-  if (!server) return;
-  server.on('connection', (ws) => {
-    ws.isAlive = true;
-    ws.on('pong', () => { ws.isAlive = true; });
-
-    console.log('Native host bridge connected to Proactive relay');
-    extensionSocket = ws;
-    extensionLastSeen = Date.now();
-    extensionTransport = 'native-messaging';
-    flushPendingAITasks();
-    emitExtensionConnectionEvent('connected', { transport: 'native-messaging' });
-
-    ws.on('message', (data) => {
-      try {
-        const message = JSON.parse(data.toString());
-        const bridgeMessage = (
-          message.type === 'HOST_STATUS' ||
-          message.type === 'EXTENSION_BRIDGE_STATUS' ||
-          message.type === 'APP_BRIDGE_PONG' ||
-          message.type === 'run-diagnostic-result' ||
-          message.type === 'task-progress' ||
-          message.type === 'task-result' ||
-          message.type === 'ACTION_RESULT' ||
-          message.type === 'ACTION_PROGRESS' ||
-          message.type === 'action_result' ||
-          message.type === 'action-result' ||
-          (typeof message.task_id !== 'undefined' && typeof message.status !== 'undefined')
-        );
-
-        if (bridgeMessage) {
-          extensionLastSeen = Date.now();
-        }
-        if (message.extensionId) {
-          ensureNativeHostAllowsExtensionId(message.extensionId);
-        }
-        if (message.transport) {
-          extensionTransport = String(message.transport);
-        }
-        if (message.type === 'HOST_STATUS' || message.type === 'EXTENSION_BRIDGE_STATUS') {
-          emitExtensionConnectionEvent('connected', {
-            transport: 'native-messaging',
-            status: message.status || 'connected'
-          });
-        }
-        if (message.type === 'puppeteer-execute') {
-          (async () => {
-            try {
-              const task = message.task || {};
-              console.log('Received puppeteer-execute for', task.title, task.url);
-              const result = await runPuppeteerTask(task);
-              ws.send(JSON.stringify({ type: 'task-result', status: result.status === 'success' ? 'success' : 'error', result: result }));
-            } catch (err) {
-              ws.send(JSON.stringify({ type: 'task-result', status: 'error', error: err.message }));
-            }
-          })();
-        }
-        if (bridgeMessage) {
-          console.log('Extension event (raw):', message.type || '<action-result>', message.progress || message.result || '');
-          if (mainWindow && mainWindow.webContents) {
-            try { mainWindow.webContents.send('extension-event', message); } catch (e) { console.warn('Failed to forward extension-event to renderer', e); }
-          }
-        }
-      } catch (_) {}
-    });
-
-    ws.on('close', () => {
-      if (extensionSocket === ws) {
-        console.log('Native host bridge disconnected');
-        extensionSocket = null;
-        extensionLastSeen = null;
-        extensionTransport = 'native-messaging';
-        emitExtensionConnectionEvent('disconnected', { transport: 'native-messaging' });
-      }
-    });
-  });
-
-  if (relayHeartbeatInterval) clearInterval(relayHeartbeatInterval);
-  relayHeartbeatInterval = setInterval(() => {
-    if (!wss) return;
-    wss.clients.forEach((ws) => {
-      if (ws.isAlive === false) return ws.terminate();
-      ws.isAlive = false;
-      ws.ping();
-      try {
-        ws.send(JSON.stringify({ type: 'APP_BRIDGE_PING', timestamp: Date.now() }));
-      } catch (_) {}
-    });
-
-    if (extensionSocket && extensionLastSeen && (Date.now() - extensionLastSeen) > 60000) {
-      try { extensionSocket.terminate(); } catch (_) {}
-      extensionSocket = null;
-      extensionLastSeen = null;
-      extensionTransport = 'native-messaging';
-      emitExtensionConnectionEvent('disconnected', { transport: 'native-messaging', reason: 'heartbeat-timeout' });
-    }
-  }, 30000);
-
-  server.on('close', () => {
-    if (relayHeartbeatInterval) {
-      clearInterval(relayHeartbeatInterval);
-      relayHeartbeatInterval = null;
-    }
-  });
-}
-
-function startExtensionRelayServer() {
-  try {
-    const server = new WebSocketServer({ port: EXTENSION_BRIDGE_PORT });
-    server.on('listening', () => {
-      wss = server;
-      console.log(`Native host relay listening on port ${EXTENSION_BRIDGE_PORT}`);
-    });
-    server.on('error', (err) => {
-      if (err?.code === 'EADDRINUSE') {
-        console.warn(`[Native host relay] Port ${EXTENSION_BRIDGE_PORT} already in use. Desktop-extension bridge disabled for this run.`);
-        emitExtensionConnectionEvent('disconnected', { transport: 'native-messaging', reason: 'relay-port-in-use' });
-      } else {
-        console.warn('[Native host relay] Failed to start:', err?.message || err);
-      }
-      try { server.close(); } catch (_) {}
-    });
-    bindExtensionRelayServer(server);
-  } catch (err) {
-    if (err?.code === 'EADDRINUSE') {
-      console.warn(`[Native host relay] Port ${EXTENSION_BRIDGE_PORT} already in use. Desktop-extension bridge disabled for this run.`);
-    } else {
-      console.warn('[Native host relay] Startup error:', err?.message || err);
-    }
-  }
-}
-
-startExtensionRelayServer();
+function isExtensionConnected() { return false; }
+async function waitForExtensionConnection() { return false; }
+function sendTaskToExtension() { throw new Error('Browser extension support has been removed'); }
+function sendExtensionRequest() { throw new Error('Browser extension support has been removed'); }
+async function sendExtensionRequestWithRetry() { throw new Error('Browser extension support has been removed'); }
+function flushPendingAITasks() { pendingAITasks = []; }
 
 // Scheduled tasks
 let dailySummaryTimer = null;
@@ -863,11 +660,35 @@ function suggestionQueueKey(item = {}) {
   return `${title}|${action}|${type}`;
 }
 
+function hasConcreteSuggestionAction(text = '') {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  if (/\b(open|draft|reply|send|prepare|confirm|research|finish|complete|schedule|summarize|update|submit|resolve|fix|call|book|share|drill|resume|close|start|run|review)\b/i.test(value)) {
+    return !/\b(review|open)\s+(this|it|item|context|memory|something|task)$/i.test(value);
+  }
+  return false;
+}
+
+function isActionableSuggestion(item = {}) {
+  if (!item || item.completed) return false;
+  const title = String(item.title || '').trim();
+  const reason = String(item.reason || item.description || item.body || '').trim();
+  const primaryLabel = String(item.primary_action?.label || item.recommended_action || '').trim();
+  const actions = Array.isArray(item.suggested_actions) ? item.suggested_actions : [];
+  const plan = Array.isArray(item.plan) ? item.plan : [];
+  const stepPlan = Array.isArray(item.step_plan) ? item.step_plan : [];
+  if (!title || !reason) return false;
+  if (/\b(take the next step|keep momentum|be proactive|work on this|handle this|make progress|stay on top)\b/i.test(title)) return false;
+  if (!hasConcreteSuggestionAction(title) && !hasConcreteSuggestionAction(primaryLabel) && !actions.some((action) => hasConcreteSuggestionAction(action?.label || action?.payload?.action || ''))) return false;
+  if (!primaryLabel && !actions.length && !plan.length && !stepPlan.length) return false;
+  return true;
+}
+
 function mergeSuggestionQueues(existing = [], incoming = [], limit = MAX_PRACTICAL_SUGGESTIONS) {
   const all = [
     ...(Array.isArray(existing) ? existing : []),
     ...(Array.isArray(incoming) ? incoming : [])
-  ].filter((item) => item && !item.completed);
+  ].filter(isActionableSuggestion);
 
   const deduped = [];
   const seen = new Set();
@@ -898,7 +719,7 @@ function mergeSuggestionQueues(existing = [], incoming = [], limit = MAX_PRACTIC
     return Number(b?.createdAt || 0) - Number(a?.createdAt || 0);
   });
 
-  return deduped.slice(0, Math.max(1, Number(limit || MAX_PRACTICAL_SUGGESTIONS)));
+  return deduped.slice(0, Math.max(1, Math.min(MAX_PRACTICAL_SUGGESTIONS, Number(limit || MAX_PRACTICAL_SUGGESTIONS))));
 }
 
 function ensureSensorStorageDir() {
@@ -1261,8 +1082,8 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   const fingerprint = buildPerceptualFingerprintFromPngBuffer(capturePngBuffer);
   const visualDiffPct = Number((fingerprintDiffPercent(lastAcceptedCaptureFingerprint, fingerprint) * 100).toFixed(2));
   const visualChangeSignificant = !lastAcceptedCaptureFingerprint || !fingerprint || visualDiffPct >= (CAPTURE_VISUAL_DIFF_THRESHOLD * 100);
-  const forceCapture = /manual|reset/i.test(String(reason || ''));
   const isPeriodicScreenshot = /periodic-screenshot/i.test(String(reason || ''));
+  const forceCapture = isPeriodicScreenshot || /manual|reset/i.test(String(reason || ''));
 
   if (fingerprint) {
     lastAcceptedCaptureFingerprint = fingerprint;
@@ -1511,45 +1332,126 @@ function startSensorCaptureLoop(mode = null) {
   }, intervalMs);
 }
 
-// Periodic screenshot capture with a fixed 30-second cadence.
-function startPeriodicScreenshotCapture(mode = null) {
+function clearPeriodicScreenshotTimer() {
   if (periodicScreenshotTimer) {
-    clearInterval(periodicScreenshotTimer);
+    clearTimeout(periodicScreenshotTimer);
     periodicScreenshotTimer = null;
   }
+}
+
+function scheduleNextPeriodicScreenshot(delayMs) {
+  clearPeriodicScreenshotTimer();
+  const safeDelayMs = Math.max(1000, Number(delayMs || getPeriodicScreenshotIntervalMs()));
+  periodicScreenshotTimer = setTimeout(() => {
+    runPeriodicScreenshotTick().catch((error) => {
+      console.error("[Screenshot] Periodic screenshot loop failed:", error?.message || error);
+      if (!screenshotsPausedForDisplayOff && periodicScreenshotRunning) {
+        const intervalMs = getPeriodicScreenshotIntervalMs();
+        periodicScreenshotNextDueAt = Date.now() + intervalMs;
+        scheduleNextPeriodicScreenshot(intervalMs);
+      }
+    });
+  }, safeDelayMs);
+}
+
+async function runPeriodicScreenshotTick() {
+  periodicScreenshotTimer = null;
+
+  if (!periodicScreenshotRunning) return;
+
+  if (screenshotsPausedForDisplayOff) {
+    console.log('[Screenshot] Paused because display/system is asleep');
+    return;
+  }
+
+  const now = Date.now();
+  const intervalMs = getPeriodicScreenshotIntervalMs();
+  if (!periodicScreenshotNextDueAt || periodicScreenshotNextDueAt <= now) {
+    const missedIntervals = periodicScreenshotNextDueAt
+      ? Math.max(1, Math.ceil((now - periodicScreenshotNextDueAt + 1) / intervalMs))
+      : 1;
+    periodicScreenshotNextDueAt = (periodicScreenshotNextDueAt || now) + (missedIntervals * intervalMs);
+  }
+
+  console.log("[Screenshot] Taking periodic screenshot...");
+  try {
+    const result = await captureDesktopSensorSnapshot('periodic-screenshot');
+    if (result?.imagePath) {
+      console.log(result?.filtered ? "[Screenshot] Periodic screenshot filtered:" : "[Screenshot] Periodic screenshot captured:", {
+        file: result.screenshot_filename,
+        app: result.activeApp || '',
+        ocr_status: result.ocrStatus,
+        text_source: result.textCaptureSource || 'none',
+        filtered: Boolean(result?.filtered),
+        reason: result?.filter_reason || null
+      });
+    } else {
+      console.warn("[Screenshot] Periodic screenshot skipped:", result?.reason || "unknown");
+    }
+  } catch (error) {
+    console.error("[Screenshot] Periodic screenshot failed:", error?.message || error);
+  } finally {
+    if (!screenshotsPausedForDisplayOff && periodicScreenshotRunning) {
+      const nextIntervalMs = getPeriodicScreenshotIntervalMs();
+      while (periodicScreenshotNextDueAt <= Date.now()) {
+        periodicScreenshotNextDueAt += nextIntervalMs;
+      }
+      scheduleNextPeriodicScreenshot(periodicScreenshotNextDueAt - Date.now());
+    }
+  }
+}
+
+function pausePeriodicScreenshotCapture(reason = 'display/system asleep') {
+  screenshotsPausedForDisplayOff = true;
+  periodicScreenshotPauseReason = String(reason || 'paused');
+  clearPeriodicScreenshotTimer();
+  periodicScreenshotNextDueAt = 0;
+  console.log(`[Screenshot] Paused: ${reason}`);
+}
+
+function resumePeriodicScreenshotCapture(reason = 'display/system awake') {
+  const wasPaused = screenshotsPausedForDisplayOff;
+  screenshotsPausedForDisplayOff = false;
+  periodicScreenshotPauseReason = '';
+
+  if (!periodicScreenshotRunning) {
+    console.log(`[Screenshot] Resume requested but periodic capture is not running: ${reason}`);
+    return;
+  }
+
+  lastAcceptedCaptureFingerprint = null;
+  const wakeDelayMs = getPeriodicScreenshotWakeDelayMs();
+  periodicScreenshotNextDueAt = Date.now() + wakeDelayMs;
+  console.log(`[Screenshot] Resumed: ${reason}; next capture in ${Math.round(wakeDelayMs / 100) / 10}s`);
+  scheduleNextPeriodicScreenshot(wakeDelayMs);
+
+  if (!wasPaused) {
+    console.log('[Screenshot] Wake/resume event received while already active; timer refreshed');
+  }
+}
+
+// Periodic screenshot capture with a fixed 30-second cadence.
+function startPeriodicScreenshotCapture(mode = null, options = {}) {
+  clearPeriodicScreenshotTimer();
 
   const currentMode = mode || getPerformanceMode();
-  const intervalMs = 30 * 1000;
+  const intervalMs = getPeriodicScreenshotIntervalMs(currentMode);
+  const initialDelayMs = Math.max(1000, Number(options.initialDelayMs || getPeriodicScreenshotWakeDelayMs(currentMode)));
 
-  console.log(`[Screenshot] Starting periodic screenshot capture every ${intervalMs / 1000}s (mode=${currentMode})`);
+  periodicScreenshotRunning = true;
+  periodicScreenshotNextDueAt = Date.now() + initialDelayMs;
+
+  console.log(`[Screenshot] Starting periodic screenshot capture every ${Math.round(intervalMs / 1000)}s (mode=${currentMode}, first=${Math.round(initialDelayMs / 100) / 10}s)`);
 
   // Avoid an immediate startup capture; OCR and embedding work must not compete
   // with the renderer while the app is still becoming interactive.
-  periodicScreenshotTimer = setInterval(() => {
-    if (screenshotsPausedForDisplayOff) {
-      console.log('[Screenshot] Paused because display/system is asleep');
-      return;
-    }
-    console.log("[Screenshot] Taking periodic screenshot...");
-    captureDesktopSensorSnapshot('periodic-screenshot')
-      .then((result) => {
-        if (result?.imagePath) {
-          console.log(result?.filtered ? "[Screenshot] Periodic screenshot filtered:" : "[Screenshot] Periodic screenshot captured:", {
-            file: result.screenshot_filename,
-            app: result.activeApp || '',
-            ocr_status: result.ocrStatus,
-            text_source: result.textCaptureSource || 'none',
-            filtered: Boolean(result?.filtered),
-            reason: result?.filter_reason || null
-          });
-        } else {
-          console.warn("[Screenshot] Periodic screenshot skipped:", result?.reason || "unknown");
-        }
-      })
-      .catch((error) => {
-        console.error("[Screenshot] Periodic screenshot failed:", error?.message || error);
-      });
-  }, intervalMs);
+  scheduleNextPeriodicScreenshot(initialDelayMs);
+}
+
+function stopPeriodicScreenshotCapture() {
+  periodicScreenshotRunning = false;
+  clearPeriodicScreenshotTimer();
+  periodicScreenshotNextDueAt = 0;
 }
 
 // Schedule daily tasks
@@ -1811,6 +1713,9 @@ async function runMinutelySync() {
       store.set('lastHistorySync', Date.now());
 
       console.log(`[runMinutelySync] Ingested ${ingestedCount} new raw events into SQLite L1. Checks: emails=${newEmailCount}, new_events=${newEventCount}, edited_events=${editedEventCount}, cursor_advanced=${shouldAdvanceLastSync}`);
+      if (ingestedCount > 0) {
+        runRelationshipGraphUpdate({ backfill: false }).catch((e) => console.warn('[runMinutelySync] Relationship graph update failed:', e?.message || e));
+      }
     } catch (gErr) {
       console.warn('[runMinutelySync] L1 ingestion failed:', gErr.message || gErr);
       store.set('memoryGraphHealth', {
@@ -1865,6 +1770,30 @@ async function hasNewEventsSince(jobKey) {
     hasNew: row && row.count > 0,
     maxTs: row && row.max_ts ? row.max_ts : lastProcessed
   };
+}
+
+async function runRelationshipGraphUpdate(options = {}) {
+  try {
+    const { runRelationshipGraphJob } = require('./services/relationship-graph');
+    const result = await runRelationshipGraphJob(options);
+    store.set('memoryGraphHealth', {
+      ...(store.get('memoryGraphHealth') || {}),
+      lastRelationshipGraphRunAt: new Date().toISOString(),
+      relationshipContactCount: result.contacts,
+      relationshipGraphStatus: 'idle'
+    });
+    console.log(`[RelationshipGraph] Updated ${result.contacts} contacts${options.backfill ? ' (backfill)' : ''}`);
+    return result;
+  } catch (error) {
+    store.set('memoryGraphHealth', {
+      ...(store.get('memoryGraphHealth') || {}),
+      relationshipGraphStatus: 'error',
+      lastRelationshipGraphError: error?.message || String(error),
+      lastRelationshipGraphErrorAt: new Date().toISOString()
+    });
+    console.warn('[RelationshipGraph] Update failed:', error?.message || error);
+    return { contacts: 0, error: error?.message || String(error) };
+  }
 }
 
 
@@ -1974,8 +1903,12 @@ async function runSuggestionEngineJob() {
     return;
   }
   const check = await hasNewEventsSince('suggestion');
-  if (!check.hasNew) {
-    console.log('[SuggestionEngine] No new events since last run, skipping');
+  const existingActiveSuggestions = mergeSuggestionQueues(store.get('suggestions') || [], [], MAX_PRACTICAL_SUGGESTIONS);
+  if (!check.hasNew && existingActiveSuggestions.length >= MAX_PRACTICAL_SUGGESTIONS) {
+    if ((store.get('suggestions') || []).length !== existingActiveSuggestions.length) {
+      store.set('suggestions', existingActiveSuggestions);
+    }
+    console.log('[SuggestionEngine] No new events and active suggestion pool is full, skipping');
     return;
   }
   if (!canRunHeavyJob(lastSuggestionHeavyRunAt)) {
@@ -2019,7 +1952,7 @@ async function runSuggestionEngineJob() {
       suggestionStatus: 'running'
     });
     const newSuggestions = await generateTopTodosFromMemoryQuery(llmConfig, {
-      query: 'Look through my memory and generate top 5 todos or actions I need to do right now.',
+      query: 'Look through my memory and generate top 7 todos or actions I need to do right now.',
       standing_notes: proactiveMemory.core || '',
       study_context: getStudySessionState()
     });
@@ -2036,6 +1969,7 @@ async function runSuggestionEngineJob() {
     // Keep only AI-generated suggestions; no non-AI fallbacks allowed.
     const latestSuggestions = (Array.isArray(newSuggestions) ? newSuggestions : [])
       .filter((item) => item && item.ai_generated !== false)
+      .filter(isActionableSuggestion)
       .sort((a, b) => Number(b.score || b.confidence || 0) - Number(a.score || a.confidence || 0))
       .slice(0, MAX_PRACTICAL_SUGGESTIONS);
     const existingSuggestions = store.get('suggestions') || [];
@@ -2283,6 +2217,14 @@ function startMemoryGraphProcessing() {
   // Suggestion engine every 30 minutes
   if (suggestionEngineTimer) clearInterval(suggestionEngineTimer);
   suggestionEngineTimer = setInterval(runSuggestionEngineJob, SUGGESTION_REFRESH_INTERVAL_MINUTES * 60 * 1000);
+
+  if (relationshipGraphTimer) clearInterval(relationshipGraphTimer);
+  relationshipGraphTimer = setInterval(() => {
+    runRelationshipGraphUpdate({ backfill: false }).catch((e) => console.warn('[RelationshipGraph] Scheduled update failed:', e?.message || e));
+  }, 12 * 60 * 60 * 1000);
+  setTimeout(() => {
+    runRelationshipGraphUpdate({ backfill: true }).catch((e) => console.warn('[RelationshipGraph] Initial backfill failed:', e?.message || e));
+  }, 45000);
 
   // Schedule weekly insights for Sunday 11:59 PM
   scheduleWeeklyInsights();
@@ -7447,13 +7389,13 @@ ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
 });
 
 // Generate proactive todos — strictly AI generated from memory retrieval.
-ipcMain.handle('generate-proactive-todos', async (event) => {
+ipcMain.handle('generate-proactive-todos', async (event, payload = {}) => {
   console.log('[Main] IPC generate-proactive-todos invoked from', event?.sender?.getURL ? event.sender.getURL() : 'main');
   try {
     const { generateTopTodosFromMemoryQuery } = require('./services/agent/suggestion-engine');
-    const hasConcreteAction = (label = '') => /\b(open|draft|reply|send|prepare|review|confirm|research|finish|complete|schedule|summarize|update|submit|resolve|fix|call|book|share|wish|check\s*in|reconnect)\b/i.test(String(label || ''));
     const looksValidAISuggestion = (item) => Boolean(
       item &&
+      isActionableSuggestion(item) &&
       ['study', 'relationship', 'work', 'personal', 'creative', 'followup'].includes(String(item.type || '').toLowerCase()) &&
       item.title &&
       item.reason &&
@@ -7470,21 +7412,36 @@ ipcMain.handle('generate-proactive-todos', async (event) => {
       item.suggested_actions.length >= 1 &&
       item.primary_action &&
       item.ai_generated !== false &&
-      hasConcreteAction(item.primary_action?.label || '') &&
+      hasConcreteSuggestionAction(item.primary_action?.label || '') &&
       !/\b(take the next step|keep momentum|be proactive|work on this|handle this)\b/i.test(String(item.title || ''))
     );
     const proactiveMemory = store.get('proactiveMemory') || { core: '' };
+    const existingSuggestions = store.get('suggestions') || [];
+    const activeCountFromPayload = Number(payload?.activeSuggestionCount);
+    const activeCount = Number.isFinite(activeCountFromPayload)
+      ? Math.max(0, activeCountFromPayload)
+      : (Array.isArray(existingSuggestions) ? existingSuggestions.filter((item) => !item?.completed).length : 0);
+    const maxNewSuggestionsFromPayload = Number(payload?.maxNewSuggestions);
+    const maxNewSuggestions = Number.isFinite(maxNewSuggestionsFromPayload)
+      ? Math.max(0, Math.min(MAX_PRACTICAL_SUGGESTIONS, maxNewSuggestionsFromPayload))
+      : Math.max(0, MAX_PRACTICAL_SUGGESTIONS - activeCount);
+
+    if (maxNewSuggestions <= 0) {
+      return Array.isArray(existingSuggestions) ? existingSuggestions : [];
+    }
+
     const llmConfig = getSuggestionLLMConfig();
     if (!llmConfig) {
-      return store.get('suggestions') || [];
+      return Array.isArray(existingSuggestions) ? existingSuggestions : [];
     }
     const suggestions = await generateTopTodosFromMemoryQuery(llmConfig, {
-      query: 'Look through my memory and generate top 5 todos or actions I need to do right now.',
+      query: 'Look through my memory and generate top 7 todos or actions I need to do right now.',
       standing_notes: proactiveMemory.core || '',
       study_context: getStudySessionState()
     });
-    const validatedSuggestions = (Array.isArray(suggestions) ? suggestions : []).filter(looksValidAISuggestion);
-    const existingSuggestions = store.get('suggestions') || [];
+    const validatedSuggestions = (Array.isArray(suggestions) ? suggestions : [])
+      .filter(looksValidAISuggestion)
+      .slice(0, maxNewSuggestions);
     const mergedSuggestions = mergeSuggestionQueues(existingSuggestions, validatedSuggestions, MAX_PRACTICAL_SUGGESTIONS);
     store.set('suggestions', mergedSuggestions);
     return mergedSuggestions.map((item) => ({
@@ -7655,12 +7612,7 @@ ipcMain.handle('submit-voice-audio', async (event, payload = {}) => {
 // Update a running automation plan mid-flight (best-effort).
 ipcMain.handle('update-ai-task-plan', async (event, payload) => {
   try {
-    if (!isExtensionConnected()) return { status: 'offline' };
-    const taskId = payload && payload.taskId;
-    if (!taskId) return { status: 'error', error: 'Missing taskId' };
-    const plan = payload && payload.plan ? payload.plan : {};
-    extensionSocket.send(JSON.stringify({ type: 'update-task-plan', taskId, plan }));
-    return { status: 'sent' };
+    return { status: 'offline', error: 'Browser extension support has been removed' };
   } catch (e) {
     return { status: 'error', error: e && e.message ? e.message : String(e) };
   }
@@ -7692,9 +7644,7 @@ ipcMain.handle('complete-task', async (event, taskId) => {
 
 // Check extension connection status
 ipcMain.handle('get-extension-status', async () => {
-  const lastSeen = extensionLastSeen;
-  const recentlySeen = lastSeen ? (Date.now() - lastSeen) < 15000 : false;
-  return { connected: isExtensionConnected(), lastSeen, recentlySeen, transport: extensionTransport || 'native-messaging' };
+  return { connected: false, lastSeen: null, recentlySeen: false, transport: 'disabled' };
 });
 
 ipcMain.handle('get-accessibility-status', async () => {
@@ -8991,59 +8941,8 @@ async function runAgentLoop(task) {
   };
 }
 
-/**
- * Utility to register the Native Messaging Host on macOS
- */
-function registerNativeHost() {
-  const fs = require('fs');
-  const os = require('os');
-  const hostName = NATIVE_HOST_NAME;
-  const sourcePath = path.join(__dirname, `${hostName}.json`);
-  const targetDir = path.join(os.homedir(), 'Library', 'Application Support', 'Google', 'Chrome', 'NativeMessagingHosts');
-  const targetPath = path.join(targetDir, `${hostName}.json`);
-
-  try {
-    if (!fs.existsSync(targetDir)) {
-      fs.mkdirSync(targetDir, { recursive: true });
-    }
-
-    // Update the path in the JSON to the absolute path of the wrapper script
-    const manifest = JSON.parse(fs.readFileSync(sourcePath, 'utf8'));
-    manifest.path = path.join(__dirname, 'native-host.sh');
-    const configuredIds = String(process.env.PROACTIVE_EXTENSION_IDS || process.env.PROACTIVE_EXTENSION_ID || '')
-      .split(',')
-      .map(id => id.trim())
-      .filter(id => /^[a-p]{32}$/.test(id));
-    const existingOrigins = Array.isArray(manifest.allowed_origins) ? manifest.allowed_origins : [];
-    const configuredOrigins = configuredIds.map(id => `chrome-extension://${id}/`);
-    manifest.allowed_origins = Array.from(new Set([...existingOrigins, ...configuredOrigins]));
-
-    fs.writeFileSync(targetPath, JSON.stringify(manifest, null, 2));
-    console.log(`Native Messaging Host registered at: ${targetPath}`);
-
-    // Ensure the shell script is executable
-    const shellScriptPath = path.join(__dirname, 'native-host.sh');
-    fs.chmodSync(shellScriptPath, '755');
-  } catch (e) {
-    console.error("Failed to register native host:", e.message);
-  }
-}
-
-// Call registration on startup
-registerNativeHost();
-
-
 function flushPendingAITasks() {
-  if (!extensionSocket || pendingAITasks.length === 0) return;
-  const queue = [...pendingAITasks];
   pendingAITasks = [];
-  queue.forEach(async (item) => {
-    try {
-      await sendTaskToExtension(item.task, item.script);
-    } catch (e) {
-      console.error('Queued AI task failed:', e);
-    }
-  });
 }
 
 // Helper function to parse text response (fallback)
@@ -10345,37 +10244,7 @@ ipcMain.handle('get-daily-summaries', (event, query) => {
 
 // Run diagnostic via extension bridge
 ipcMain.handle('extension-run-diagnostic', async (event, opts) => {
-  if (!isExtensionConnected()) {
-    const connected = await waitForExtensionConnection(15000, 300);
-    if (!connected) return { status: 'error', error: 'extension-not-connected' };
-  }
-  const requestId = 'diag_' + Math.random().toString(36).slice(2,9);
-  const payload = { type: 'run-diagnostic', requestId, opts: opts || {} };
-  return new Promise((resolve) => {
-    let listener = null;
-    const timeout = setTimeout(() => {
-      if (listener) extensionSocket?.off('message', listener);
-      resolve({ status: 'error', error: 'timeout' });
-    }, 7000);
-    listener = (data) => {
-      try {
-        const msg = JSON.parse(data.toString());
-        if (msg && msg.type === 'run-diagnostic-result' && msg.requestId === requestId) {
-          clearTimeout(timeout);
-          extensionSocket?.off('message', listener);
-          resolve(msg.result || { status: 'ok' });
-        }
-      } catch (e) {}
-    };
-    // attach temporary listener on the socket
-    try {
-      extensionSocket.send(JSON.stringify(payload));
-      extensionSocket.on('message', listener);
-    } catch (e) {
-      clearTimeout(timeout);
-      resolve({ status: 'error', error: String(e) });
-    }
-  });
+  return { status: 'error', error: 'Browser extension support has been removed' };
 });
 
 function extractPriorityFromText(text) {
@@ -10590,115 +10459,39 @@ function categorizeURL(url) {
 }
 
 ipcMain.handle('get-extension-data', async () => {
-  return await getExtensionData();
+  return {};
 });
 
 ipcMain.handle('clear-extension-data', async () => {
-  try {
-    // Clear extension data from memory and storage
-    global.extensionData = null;
-    store.delete('extensionData');
-    store.delete('lastExtensionSync');
-    return { success: true };
-  } catch (error) {
-    console.error('Error clearing extension data:', error);
-    return { success: false, error: error.message };
-  }
+  global.extensionData = null;
+  store.delete('extensionData');
+  return { success: true };
 });
 
-ipcMain.handle('get-sensor-status', async () => {
-  return getSensorStatus();
-});
-
-ipcMain.handle('start-study-session', async (_event, payload = {}) => {
-  const goal = String(payload?.goal || '').trim();
-  const subject = String(payload?.subject || '').trim();
-  const next = setStudySessionState({
-    status: 'active',
-    session_id: `study_${Date.now()}`,
-    goal,
-    subject,
-    started_at: new Date().toISOString(),
-    ended_at: null
+ipcMain.handle('get-relationship-contacts', async (_event, payload = {}) => {
+  const { getRelationshipContacts } = require('./services/relationship-graph');
+  return getRelationshipContacts({
+    limit: payload?.limit || 50,
+    status: payload?.status || null
   });
-  return next;
 });
 
-ipcMain.handle('stop-study-session', async () => {
-  const current = getStudySessionState();
-  const next = setStudySessionState({
-    status: 'idle',
-    session_id: null,
-    goal: '',
-    subject: '',
-    started_at: current?.started_at || null,
-    ended_at: new Date().toISOString()
-  });
-  return next;
+ipcMain.handle('get-relationship-contact-detail', async (_event, contactId) => {
+  const { getRelationshipContactDetail } = require('./services/relationship-graph');
+  return getRelationshipContactDetail(contactId);
 });
 
-ipcMain.handle('get-study-session-status', async () => {
-  return getStudySessionState();
-});
-
-ipcMain.handle('get-sensor-events', async () => {
-  return getSensorEvents();
-});
-
-ipcMain.handle('save-sensor-settings', async (event, settings) => {
-  const next = {
-    ...getSensorSettings(),
-    ...(settings || {})
-  };
-  // Keep interval fixed to every 15 minutes regardless of incoming payload.
-  next.intervalMinutes = 15;
-  store.set('sensorSettings', next);
-  startSensorCaptureLoop();
-  return getSensorStatus();
-});
-
-ipcMain.handle('capture-sensor-snapshot', async () => {
-  // Trigger a manual capture in background and return current status immediately
-  captureDesktopSensorSnapshot('manual').catch(err => console.warn('Manual sensor capture failed:', err));
+ipcMain.handle('generate-relationship-draft', async (_event, payload = {}) => {
+  const {
+    buildRelationshipDraftContext,
+    buildDeterministicDraft
+  } = require('./services/relationship-graph');
+  const contactId = payload?.contactId || payload?.contact_id;
+  const context = await buildRelationshipDraftContext(contactId, { suggestionId: payload?.suggestionId || payload?.suggestion_id });
+  if (!context) return { draft: '', context: null, error: 'contact_not_found' };
   return {
-    event: null,
-    status: getSensorStatus()
-  };
-});
-
-ipcMain.handle('get-google-tokens', () => {
-  return store.get('googleTokens') || null;
-});
-
-ipcMain.handle('get-suggestion-llm-settings', async () => {
-  const settings = getSuggestionLLMSettings();
-  return {
-    provider: settings.provider,
-    model: settings.model,
-    baseUrl: settings.baseUrl,
-    hasApiKey: Boolean(settings.apiKey)
-  };
-});
-
-ipcMain.handle('save-suggestion-llm-settings', async (_event, payload = {}) => {
-  const previous = store.get('suggestionLLMSettings') || {};
-  const provider = sanitizeSuggestionProvider(payload.provider || 'deepseek');
-  const model = String(payload.model || (provider === 'ollama' ? 'llama3.1:8b' : 'deepseek-chat')).trim();
-  const baseUrl = String(payload.baseUrl || payload.base_url || 'http://127.0.0.1:11434').trim();
-  const apiKeyInput = String(payload.apiKey || '').trim();
-  const apiKey = apiKeyInput || String(previous.apiKey || '').trim();
-  const next = {
-    provider,
-    model,
-    baseUrl,
-    apiKey
-  };
-  store.set('suggestionLLMSettings', next);
-  return {
-    provider: next.provider,
-    model: next.model,
-    baseUrl: next.baseUrl,
-    hasApiKey: Boolean(next.apiKey)
+    draft: buildDeterministicDraft(context),
+    context
   };
 });
 
@@ -10733,11 +10526,75 @@ ipcMain.handle('get-user-data', () => {
   return store.get('userData') || {};
 });
 
+ipcMain.handle('get-google-tokens', () => {
+  return store.get('googleTokens') || null;
+});
+
+ipcMain.handle('get-suggestion-llm-settings', async () => {
+  const settings = getSuggestionLLMSettings();
+  return {
+    provider: settings.provider,
+    model: settings.model,
+    baseUrl: settings.baseUrl,
+    hasApiKey: Boolean(settings.apiKey)
+  };
+});
+
+ipcMain.handle('save-suggestion-llm-settings', async (_event, payload = {}) => {
+  const previous = store.get('suggestionLLMSettings') || {};
+  const provider = sanitizeSuggestionProvider(payload.provider || 'deepseek');
+  const model = String(payload.model || 'deepseek-chat').trim();
+  const baseUrl = String(payload.baseUrl || payload.base_url || 'http://127.0.0.1:11434').trim();
+  const apiKeyInput = String(payload.apiKey || '').trim();
+  const apiKey = apiKeyInput || String(previous.apiKey || '').trim();
+  const next = {
+    provider,
+    model,
+    baseUrl,
+    apiKey
+  };
+  store.set('suggestionLLMSettings', next);
+  return {
+    provider: next.provider,
+    model: next.model,
+    baseUrl: next.baseUrl,
+    hasApiKey: Boolean(next.apiKey)
+  };
+});
+
+ipcMain.handle('get-sensor-status', async () => {
+  return getSensorStatus();
+});
+
+ipcMain.handle('get-sensor-events', async () => {
+  return getSensorEvents();
+});
+
+ipcMain.handle('save-sensor-settings', async (_event, settings) => {
+  const next = {
+    ...getSensorSettings(),
+    ...(settings || {})
+  };
+  next.intervalMinutes = 15;
+  store.set('sensorSettings', next);
+  startSensorCaptureLoop();
+  return getSensorStatus();
+});
+
+ipcMain.handle('capture-sensor-snapshot', async () => {
+  captureDesktopSensorSnapshot('manual').catch((err) => console.warn('Manual sensor capture failed:', err));
+  return {
+    event: null,
+    status: getSensorStatus()
+  };
+});
+
 ipcMain.handle('delete-all-settings', async () => {
   // Factory reset: wipe in-memory state, SQLite data, browser/session storage, and userData files.
   try { if (sensorCaptureTimer) clearInterval(sensorCaptureTimer); } catch (_) {}
   try { if (episodeGenerationTimer) clearInterval(episodeGenerationTimer); } catch (_) {}
   try { if (suggestionEngineTimer) clearInterval(suggestionEngineTimer); } catch (_) {}
+  try { if (relationshipGraphTimer) clearInterval(relationshipGraphTimer); } catch (_) {}
   try { if (minutelySyncInterval) clearInterval(minutelySyncInterval); } catch (_) {}
   try { if (weeklyInsightTimer) clearTimeout(weeklyInsightTimer); } catch (_) {}
   try { if (dailySummaryTimer) clearTimeout(dailySummaryTimer); } catch (_) {}
@@ -10812,22 +10669,29 @@ app.whenReady().then(async () => {
       updatePerformanceState({ thermalState: String(details.state || 'unknown') });
     });
     powerMonitor.on('idle', () => updatePerformanceState());
-    powerMonitor.on('active', () => updatePerformanceState());
+    powerMonitor.on('active', () => {
+      updatePerformanceState();
+      if (screenshotsPausedForDisplayOff && !/lock/i.test(periodicScreenshotPauseReason)) {
+        resumePeriodicScreenshotCapture('system active');
+      }
+    });
     powerMonitor.on('suspend', () => {
-      screenshotsPausedForDisplayOff = true;
-      console.log('[Screenshot] Paused: system/display suspended');
+      pausePeriodicScreenshotCapture('system suspended');
     });
     powerMonitor.on('resume', () => {
-      screenshotsPausedForDisplayOff = false;
-      console.log('[Screenshot] Resumed: system/display awake');
+      resumePeriodicScreenshotCapture('system resumed');
     });
     powerMonitor.on('display-sleep', () => {
-      screenshotsPausedForDisplayOff = true;
-      console.log('[Screenshot] Paused: display asleep');
+      pausePeriodicScreenshotCapture('display asleep');
     });
     powerMonitor.on('display-wake', () => {
-      screenshotsPausedForDisplayOff = false;
-      console.log('[Screenshot] Resumed: display awake');
+      resumePeriodicScreenshotCapture('display awake');
+    });
+    powerMonitor.on('lock-screen', () => {
+      pausePeriodicScreenshotCapture('screen locked');
+    });
+    powerMonitor.on('unlock-screen', () => {
+      resumePeriodicScreenshotCapture('screen unlocked');
     });
   } catch (error) {
     console.warn('[Performance] powerMonitor hooks unavailable:', error?.message || error);
@@ -10861,7 +10725,7 @@ app.whenReady().then(async () => {
   }, STARTUP_HEAVY_JOB_DELAY_MS);
   startSensorCaptureLoop();
   setTimeout(() => startSourceWarmup(), STARTUP_HEAVY_JOB_DELAY_MS);
-  setTimeout(() => startPeriodicScreenshotCapture(), 15000);
+  setTimeout(() => startPeriodicScreenshotCapture(), Math.max(15000, getPeriodicScreenshotWakeDelayMs()));
 
   // Initialize memory graph processing
   setTimeout(() => startMemoryGraphProcessing(), STARTUP_HEAVY_JOB_DELAY_MS);
@@ -10940,6 +10804,8 @@ app.on('window-all-closed', () => {
   if (dailySummaryTimer) clearTimeout(dailySummaryTimer);
   if (patternUpdateTimer) clearTimeout(patternUpdateTimer);
   if (screenshotCleanupTimer) clearInterval(screenshotCleanupTimer);
+  if (relationshipGraphTimer) clearInterval(relationshipGraphTimer);
+  stopPeriodicScreenshotCapture();
 
   if (process.platform !== 'darwin') {
     app.quit();
@@ -10952,18 +10818,7 @@ app.on('before-quit', () => {
   if (dailySummaryTimer) clearTimeout(dailySummaryTimer);
   if (patternUpdateTimer) clearTimeout(patternUpdateTimer);
   if (screenshotCleanupTimer) clearInterval(screenshotCleanupTimer);
+  if (relationshipGraphTimer) clearInterval(relationshipGraphTimer);
+  stopPeriodicScreenshotCapture();
   globalShortcut.unregisterAll();
-});
-
-// Handle Chrome extension messages
-ipcMain.handle('extension-message', (event, message) => {
-  // Process messages from Chrome extension
-  console.log('Extension message:', message);
-
-  // Store data from extension
-  const currentData = store.get('extensionData') || {};
-  currentData[Date.now()] = message;
-  store.set('extensionData', currentData);
-
-  return { received: true };
 });

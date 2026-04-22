@@ -1,18 +1,16 @@
 {
   "name": "weave-todo-app",
   "version": "1.0.0",
-  "description": "Electron app with Google OAuth and Chrome extension for AI-powered Weave to-do lists",
+  "description": "Electron app with Google OAuth for AI-powered Weave to-do lists",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
     "build": "electron-builder",
-    "build-extension": "webpack --config extension.webpack.config.js",
     "postinstall": "node ./scripts/fix-sqlite3-bindings.js || true"
   },
   "keywords": [
     "electron",
-    "chrome-extension",
     "ai",
     "todo",
     "google-oauth"

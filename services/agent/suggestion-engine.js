@@ -14,6 +14,7 @@ const { buildHybridGraphRetrieval } = require('./hybrid-graph-retrieval');
 const { normalizeSuggestion } = require('./intent-first-suggestions');
 
 const store = new Store();
+const ACTIVE_SUGGESTION_LIMIT = 7;
 
 async function clearSuggestionArtifacts() {
   await db.runQuery(`DELETE FROM suggestion_artifacts`).catch(() => {});
@@ -34,7 +35,7 @@ function parseMeta(value) {
   }
 }
 
-async function fetchActiveSuggestionArtifacts(limit = 20) {
+async function fetchActiveSuggestionArtifacts(limit = ACTIVE_SUGGESTION_LIMIT) {
   const rows = await db.allQuery(
     `SELECT id, type, title, body, trigger_summary, source_node_ids, source_edge_paths, confidence, status, metadata, created_at
      FROM suggestion_artifacts
@@ -65,6 +66,80 @@ async function fetchActiveSuggestionArtifacts(limit = 20) {
       ...meta
     };
   });
+}
+
+function hasConcreteSuggestionAction(text = '') {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  if (!/\b(open|draft|reply|send|prepare|confirm|research|finish|complete|schedule|summarize|update|submit|resolve|fix|call|book|share|drill|resume|close|start|run|review)\b/i.test(value)) return false;
+  return !/\b(review|open)\s+(this|it|item|context|memory|something|task)$/i.test(value);
+}
+
+function isActionableSuggestion(item = {}) {
+  if (!item || item.completed) return false;
+  const title = String(item.title || '').trim();
+  const reason = String(item.reason || item.description || item.body || '').trim();
+  const primaryLabel = String(item.primary_action?.label || item.recommended_action || '').trim();
+  const actions = Array.isArray(item.suggested_actions) ? item.suggested_actions : [];
+  const plan = Array.isArray(item.plan) ? item.plan : [];
+  const stepPlan = Array.isArray(item.step_plan) ? item.step_plan : [];
+  if (!title || !reason) return false;
+  if (/\b(take the next step|keep momentum|be proactive|work on this|handle this|make progress|stay on top)\b/i.test(title)) return false;
+  if (!hasConcreteSuggestionAction(title) && !hasConcreteSuggestionAction(primaryLabel) && !actions.some((action) => hasConcreteSuggestionAction(action?.label || action?.payload?.action || ''))) return false;
+  if (!primaryLabel && !actions.length && !plan.length && !stepPlan.length) return false;
+  return true;
+}
+
+function suggestionQueueKey(item = {}) {
+  const compact = (value) => String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return [
+    compact(item.title),
+    compact(item.primary_action?.label || item.recommended_action),
+    compact(item.type || item.category)
+  ].join('|');
+}
+
+function rankActiveSuggestions(items = [], limit = ACTIVE_SUGGESTION_LIMIT) {
+  const seen = new Set();
+  const ranked = [];
+  for (const item of Array.isArray(items) ? items : []) {
+    if (!isActionableSuggestion(item)) continue;
+    const key = suggestionQueueKey(item);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    ranked.push(item);
+  }
+  const priorityValue = (item) => ({ high: 3, medium: 2, low: 1 }[String(item.priority || 'medium').toLowerCase()] || 2);
+  const createdMs = (item) => {
+    const value = item?.created_at || item?.createdAt || 0;
+    if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+    const parsed = Date.parse(String(value || ''));
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+  ranked.sort((a, b) => {
+    const priorityDelta = priorityValue(b) - priorityValue(a);
+    if (priorityDelta) return priorityDelta;
+    const scoreDelta = Number(b.score || b.confidence || 0) - Number(a.score || a.confidence || 0);
+    if (scoreDelta) return scoreDelta;
+    return createdMs(b) - createdMs(a);
+  });
+  return ranked.slice(0, Math.max(1, Math.min(ACTIVE_SUGGESTION_LIMIT, Number(limit || ACTIVE_SUGGESTION_LIMIT))));
+}
+
+async function pruneActiveSuggestionArtifacts(activeIds = []) {
+  const keep = new Set((activeIds || []).filter(Boolean).map(String));
+  const rows = await db.allQuery(
+    `SELECT id FROM suggestion_artifacts WHERE status = 'active' ORDER BY datetime(created_at) DESC`
+  ).catch(() => []);
+  for (const row of rows || []) {
+    if (!keep.has(String(row.id))) {
+      await db.runQuery(`UPDATE suggestion_artifacts SET status = 'inactive' WHERE id = ?`, [row.id]).catch(() => {});
+    }
+  }
 }
 
 async function persistSuggestionArtifact(suggestion) {
@@ -102,6 +177,10 @@ async function persistSuggestionArtifact(suggestion) {
         value_hook: suggestion.value_hook || null,
         outreach_options: Array.isArray(suggestion.outreach_options) ? suggestion.outreach_options : [],
         social_strategy: suggestion.social_strategy || null,
+        relationship_contact_id: suggestion.relationship_contact_id || null,
+        relationship_status: suggestion.relationship_status || null,
+        relationship_score_inputs: suggestion.relationship_score_inputs || null,
+        draft_context_refs: Array.isArray(suggestion.draft_context_refs) ? suggestion.draft_context_refs : [],
         primary_action: suggestion.primary_action || null,
         ai_generated: Boolean(suggestion.ai_generated),
         ai_doable: Boolean(suggestion.ai_doable),
@@ -152,6 +231,10 @@ async function persistSuggestionArtifact(suggestion) {
       social_temperature: Number(suggestion.social_temperature || 0),
       value_hook: suggestion.value_hook || null,
       outreach_options: Array.isArray(suggestion.outreach_options) ? suggestion.outreach_options : [],
+      relationship_contact_id: suggestion.relationship_contact_id || null,
+      relationship_status: suggestion.relationship_status || null,
+      relationship_score_inputs: suggestion.relationship_score_inputs || null,
+      draft_context_refs: Array.isArray(suggestion.draft_context_refs) ? suggestion.draft_context_refs : [],
       ai_doable: Boolean(suggestion.ai_doable),
       action_type: suggestion.action_type || null,
       execution_mode: suggestion.execution_mode || (suggestion.ai_doable ? 'draft_or_execute' : 'manual'),
@@ -163,6 +246,7 @@ async function persistSuggestionArtifact(suggestion) {
 
 async function runSuggestionEngine(apiKey, options = {}) {
   const now = Date.now();
+  const existingActive = rankActiveSuggestions(await fetchActiveSuggestionArtifacts(ACTIVE_SUGGESTION_LIMIT * 2), ACTIVE_SUGGESTION_LIMIT);
   let suggestions = await generateFeedSuggestions(apiKey, now, {
     ...options,
     retry_round: 0
@@ -174,17 +258,22 @@ async function runSuggestionEngine(apiKey, options = {}) {
     });
   }
   if (!Array.isArray(suggestions) || !suggestions.length) {
-    return fetchActiveSuggestionArtifacts(10);
+    await pruneActiveSuggestionArtifacts(existingActive.map((item) => item.id));
+    return existingActive;
   }
-  await clearSuggestionArtifacts();
-  for (const suggestion of suggestions) {
+  const incoming = rankActiveSuggestions(suggestions, ACTIVE_SUGGESTION_LIMIT);
+  for (const suggestion of incoming) {
     await persistSuggestionArtifact(suggestion);
   }
-  return suggestions;
+  const active = rankActiveSuggestions([...incoming, ...existingActive], ACTIVE_SUGGESTION_LIMIT);
+  await pruneActiveSuggestionArtifacts(active.map((item) => item.id));
+  return active;
 }
 
 module.exports = {
-  runSuggestionEngine
+  runSuggestionEngine,
+  isActionableSuggestion,
+  rankActiveSuggestions
 };
 
 function firstEvidenceLine(evidence = []) {
@@ -354,7 +443,7 @@ async function buildSuggestionEvidenceBundle(anchorEvidence = null, query = '') 
 
   return {
     evidence_ids: Array.from(baseIds).slice(0, 8),
-    evidence_lines: lines.slice(0, 5)
+    evidence_lines: lines.slice(0, 7)
   };
 }
 
@@ -557,7 +646,7 @@ async function generateTopTodosFromMemoryQuery(llmConfig, options = {}) {
   const now = Date.now();
   const query = String(
     options?.query ||
-    'Look through my memory and generate the top 5 todos or actions I need to do right now.'
+    'Look through my memory and generate the top 7 todos or actions I need to do right now.'
   ).trim();
   const layerCounts = await ensureMemoryLayersReady((llmConfig && llmConfig.provider === 'deepseek') ? llmConfig.apiKey : null).catch(() => ({}));
   
@@ -626,11 +715,11 @@ async function generateTopTodosFromMemoryQuery(llmConfig, options = {}) {
   const phase1Prompt = `
   You are an Action-Oriented Planner.
   Your goal is to identify highly actionable, concrete to-dos from the user's memory.
-  First ask memory this question: "What are the top five specific things to do now?"
-  Then return exactly 5 highly specific to-do items as a strict JSON array of plain strings.
+  First ask memory this question: "What are the top seven specific things to do now?"
+  Then return exactly 7 highly specific to-do items as a strict JSON array of plain strings.
 
   Return strict JSON array of strings only:
-  ["Action 1", "Action 2", "Action 3", "Action 4", "Action 5"]
+  ["Action 1", "Action 2", "Action 3", "Action 4", "Action 5", "Action 6", "Action 7"]
 
   RULES:
   - Use only STANDING NOTES + MEMORY EVIDENCE + GRAPH EDGES.
@@ -657,7 +746,7 @@ async function generateTopTodosFromMemoryQuery(llmConfig, options = {}) {
   if (!topFiveItems.length) return [];
 
   const phase2Prompt = `
-  I asked memory for top 5 concrete todos:
+  I asked memory for top 7 concrete todos:
   ${JSON.stringify(topFiveItems)}
 
   Generate proactive suggestions. Up to 8 candidates.
@@ -776,7 +865,7 @@ async function generateTopTodosFromMemoryQuery(llmConfig, options = {}) {
       return /[A-Z][a-z]{2,}/.test(item.title) || /[\d]{1,2}:\d{2}/.test(item.title) || /\.[a-z]{2,4}\b/i.test(item.title);
     })
     .filter((item) => Array.isArray(item.evidence) && item.evidence.length > 0)
-    .slice(0, 5);
+    .slice(0, 7);
 
   return filteredBuilt;
 }
@@ -839,7 +928,7 @@ ${memoryContext || '- No memory context available; return []'} `;
 
   // Normalize into persistent todo shape
   const persistentTodos = store.get('persistentTodos') || [];
-  const candidates = rows.slice(0, 5)
+  const candidates = rows.slice(0, 7)
     .filter((r) => {
       const title = String(r.title || r.task || r.action || '').trim();
       return title && !isWeakTitle(title) && startsWithImperativeVerb(title);

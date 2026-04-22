@@ -1,4 +1,6 @@
 const db = require('../db');
+const { expandAppScopeValues, inferExplicitAppsFromText } = require('../app-scope-catalog');
+const { buildRawEvidenceText } = require('../raw-evidence-text');
 const { generateEmbedding, cosineSimilarity } = require('../embedding-engine');
 const {
   buildRetrievalThought,
@@ -152,28 +154,6 @@ function buildCalendarDayRange(dayOffset = 0) {
 function inferHardFiltersFromQuery(query = '', existingFilters = {}) {
   const q = String(query || '').toLowerCase();
   const current = existingFilters && typeof existingFilters === 'object' ? existingFilters : {};
-  const appAliases = [
-    ['gmail', 'gmail'],
-    ['mail', 'gmail'],
-    ['calendar', 'calendar'],
-    ['chrome', 'chrome'],
-    ['youtube', 'chrome'],
-    ['trailer', 'chrome'],
-    ['video', 'chrome'],
-    ['watching', 'chrome'],
-    ['watched', 'chrome'],
-    ['safari', 'safari'],
-    ['cursor', 'cursor'],
-    ['vscode', 'vscode'],
-    ['vs code', 'vscode'],
-    ['visual studio code', 'vscode'],
-    ['slack', 'slack'],
-    ['discord', 'discord'],
-    ['teams', 'teams'],
-    ['notion', 'notion'],
-    ['figma', 'figma'],
-    ['terminal', 'terminal']
-  ];
   const sourceAliases = [
     ['email', 'message'],
     ['message', 'message'],
@@ -192,7 +172,7 @@ function inferHardFiltersFromQuery(query = '', existingFilters = {}) {
     ['capture', 'screen']
   ];
 
-  const inferredApps = appAliases.filter(([alias]) => q.includes(alias)).map(([, app]) => app);
+  const inferredApps = inferExplicitAppsFromText(q, 8);
   const inferredSources = sourceAliases.filter(([alias]) => q.includes(alias)).map(([, source]) => source);
 
   let inferredDateRange = null;
@@ -258,37 +238,11 @@ function normalizeFilterList(value) {
 }
 
 function expandAppIdFilterValues(values = []) {
-  const expanded = new Set();
-  for (const value of normalizeFilterList(values)) {
-    expanded.add(value);
-    if (value.includes('com.google.chrome') || value === 'chrome' || value.includes('google chrome')) {
-      ['com.google.chrome', 'com.google.Chrome', 'google chrome', 'chrome', 'youtube'].forEach((item) => expanded.add(String(item).toLowerCase()));
-    }
-    if (value.includes('com.microsoft.vscode') || value === 'vscode' || value.includes('visual studio code') || value.includes('vs code')) {
-      ['com.microsoft.vscode', 'vscode', 'vs code', 'visual studio code', 'code'].forEach((item) => expanded.add(String(item).toLowerCase()));
-    }
-    if (value.includes('com.todesktop.230313mzl4w4u92') || value.includes('cursor')) {
-      ['com.todesktop.230313mzl4w4u92', 'cursor'].forEach((item) => expanded.add(String(item).toLowerCase()));
-    }
-  }
-  return Array.from(expanded);
+  return expandAppScopeValues(values);
 }
 
 function expandAppNameFilterValues(values = []) {
-  const expanded = new Set();
-  for (const value of normalizeFilterList(values)) {
-    expanded.add(value);
-    if (value.includes('chrome') || value.includes('youtube')) {
-      ['google chrome', 'chrome', 'youtube', 'com.google.chrome'].forEach((item) => expanded.add(item));
-    }
-    if (value === 'vscode' || value.includes('vs code') || value.includes('visual studio code')) {
-      ['vscode', 'vs code', 'visual studio code', 'code', 'com.microsoft.vscode'].forEach((item) => expanded.add(item));
-    }
-    if (value.includes('cursor')) {
-      ['cursor', 'com.todesktop.230313mzl4w4u92'].forEach((item) => expanded.add(item));
-    }
-  }
-  return Array.from(expanded);
+  return expandAppScopeValues(values);
 }
 
 function expandSourceTypeFilters(values = []) {
@@ -442,6 +396,22 @@ function classifyFilterDropReason(row = {}, filters = {}) {
 function rowMatchesFilters(row, filters = {}) {
   if (row.id === 'global_core' || row.layer === 'core' || row.layer === 'insight') return true;
   const metadata = asObj(row.metadata);
+  const chatHay = [
+    row.source_type,
+    row.subtype,
+    row.source_type_group,
+    row.app,
+    row.data_source,
+    metadata.event_type,
+    metadata.source,
+    metadata.source_app,
+    metadata.app,
+    metadata.app_id,
+    metadata.data_source
+  ].filter(Boolean).join(' ').toLowerCase();
+  if (!filters.include_chat_messages && /\b(chatmessage|chat_message|app\.chat|app\.chat\.ui|source:\s*chat)\b/.test(chatHay)) {
+    return false;
+  }
 
   if (filters.prioritize_screen_capture) {
     if (isTrueBrowserHistoryEvidence(row, metadata)) return false;
@@ -1385,7 +1355,7 @@ async function lexicalSearchRawEvents(filters = {}, lexicalTerms = [], limit = 2
         sentiment_score: metadata.sentiment_score,
         session_id: metadata.session_id,
         status: metadata.status,
-        text: String(metadata.cleaned_capture_text || row.redacted_text || row.raw_text || '').slice(0, 8000),
+        text: buildRawEvidenceText(row, metadata, { maxChars: 12000 }),
         source_refs: [row.id],
         base_score: Number((0.86 - (index * 0.015)).toFixed(6)),
         match_reason: 'lexical:event'
@@ -1521,7 +1491,7 @@ async function querylessRecentEvents(filters = {}, limit = 24) {
         session_id: metadata.session_id,
         status: metadata.status,
         title: row.title || metadata.context_title || row.source_type || row.id,
-        text: String(metadata.cleaned_capture_text || row.redacted_text || row.raw_text || row.text || '').slice(0, 8000),
+        text: buildRawEvidenceText(row, metadata, { maxChars: 12000 }),
         source_refs: [row.id],
         base_score: Number((0.9 - (index * 0.012)).toFixed(6)),
         match_reason: 'recency:event'
@@ -1545,7 +1515,7 @@ async function loadEventEvidenceRows(refs = [], limit = 100) {
 
   return rows.map((row, index) => {
     const metadata = asObj(row.metadata);
-    const text = metadata.cleaned_capture_text || row.redacted_text || row.raw_text || '';
+    const text = buildRawEvidenceText(row, metadata, { maxChars: 12000 });
     return {
       key: `event:${row.id}`,
       source_type: 'event',
@@ -1559,7 +1529,7 @@ async function loadEventEvidenceRows(refs = [], limit = 100) {
       app: row.app || null,
       source_account: row.source_account || null,
       title: row.title || row.source_type || row.id,
-      text: String(text).slice(0, 8000),
+      text: String(text).slice(0, 12000),
       source_refs: [row.id],
       base_score: Number((0.82 - (index * 0.015)).toFixed(6)),
       match_reason: 'episode_source_ref'

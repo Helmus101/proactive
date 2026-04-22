@@ -132,12 +132,73 @@ async function testSuggestionEngineRetryKeepsOld() {
   }
 }
 
+async function testSuggestionEngineCapsActionablePoolAtSeven() {
+  const originalGenerate = feedGeneration.generateFeedSuggestions;
+  const originalAllQuery = db.allQuery;
+  const originalRunQuery = db.runQuery;
+  const writes = [];
+  const updates = [];
+
+  const makeSuggestion = (index) => ({
+    id: `sug_new_${index}`,
+    type: 'work',
+    title: `Draft Project ${index} update`,
+    body: `Prepare the concrete Project ${index} update from memory evidence.`,
+    description: `Prepare the concrete Project ${index} update from memory evidence.`,
+    reason: `Because Project ${index} appeared in recent memory evidence today.`,
+    confidence: 0.95 - index * 0.01,
+    status: 'active',
+    category: 'work',
+    priority: index < 3 ? 'high' : 'medium',
+    ai_generated: true,
+    suggested_actions: [{ label: `Draft Project ${index} update`, type: 'manual', payload: { action: 'open_memory_timeline' } }],
+    primary_action: { label: `Draft Project ${index} update`, type: 'manual', payload: { action: 'open_memory_timeline' } },
+    plan: [`Open Project ${index} evidence`, 'Draft the update'],
+    epistemic_trace: [
+      { node_id: `node_${index}`, source: 'Memory', text: `Project ${index} signal`, timestamp: new Date().toISOString() },
+      { node_id: `node_${index}_2`, source: 'Memory', text: `Project ${index} follow-up`, timestamp: new Date().toISOString() }
+    ],
+    created_at: new Date(Date.now() - index * 1000).toISOString()
+  });
+
+  feedGeneration.generateFeedSuggestions = async () => Array.from({ length: 10 }, (_, i) => makeSuggestion(i + 1));
+  db.allQuery = async (sql) => {
+    if (/SELECT id FROM suggestion_artifacts/i.test(sql)) {
+      return Array.from({ length: 10 }, (_, i) => ({ id: `sug_new_${i + 1}` }));
+    }
+    if (/FROM suggestion_artifacts/i.test(sql)) return [];
+    if (/SELECT doc_id FROM retrieval_docs/i.test(sql)) return [];
+    return [];
+  };
+  db.runQuery = async (sql, params = []) => {
+    if (/INSERT OR REPLACE INTO suggestion_artifacts/i.test(sql)) writes.push({ sql, params });
+    if (/UPDATE suggestion_artifacts SET status = 'inactive'/i.test(sql)) updates.push(params[0]);
+    return true;
+  };
+
+  try {
+    delete require.cache[require.resolve('../services/agent/suggestion-engine')];
+    const { runSuggestionEngine } = require('../services/agent/suggestion-engine');
+    const result = await runSuggestionEngine('fake-key', {});
+    assert.strictEqual(result.length, 7, 'expected exactly seven active suggestions returned');
+    assert.strictEqual(writes.length, 7, 'expected only seven suggestions persisted');
+    assert.ok(updates.length >= 3, 'expected extra active artifacts to be pruned inactive');
+    assert.ok(result.every((item) => item.primary_action || (item.suggested_actions || []).length), 'all returned suggestions must be actionable');
+  } finally {
+    feedGeneration.generateFeedSuggestions = originalGenerate;
+    db.allQuery = originalAllQuery;
+    db.runQuery = originalRunQuery;
+    delete require.cache[require.resolve('../services/agent/suggestion-engine')];
+  }
+}
+
 async function main() {
   testRejectsTemplateTone();
   testAcceptsReceiptGroundedActionableText();
   testRejectsMismatchedTitleSummary();
   testRejectsGenericCtaLabel();
   await testSuggestionEngineRetryKeepsOld();
+  await testSuggestionEngineCapsActionablePoolAtSeven();
   console.log('ai-suggestion-quality.test.js passed');
 }
 

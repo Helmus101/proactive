@@ -1,5 +1,7 @@
 const db = require('../db');
 const { ingestRawEvent } = require('../ingestion');
+const { expandAppScopeValues } = require('../app-scope-catalog');
+const { buildRawEvidenceText } = require('../raw-evidence-text');
 const { callLLM } = require('./intelligence-engine');
 const { buildHybridGraphRetrieval, formatContext, estimateTokensHeuristic } = require('./hybrid-graph-retrieval');
 const { buildRetrievalThought, widenTemporalWindow, inferSurfaceFamilies } = require('./retrieval-thought-system');
@@ -805,7 +807,7 @@ async function fetchActiveSuggestions() {
      FROM suggestion_artifacts
      WHERE status = 'active'
      ORDER BY created_at DESC
-     LIMIT 5`
+     LIMIT 7`
   ).catch(() => []);
 
   return rows.map((row) => ({
@@ -816,6 +818,92 @@ async function fetchActiveSuggestions() {
     metadata: safeJsonParse(row.metadata, {}),
     created_at: row.created_at
   }));
+}
+
+async function fetchRecentChatHistory(sessionId = null, limit = 8) {
+  const params = [];
+  const where = [];
+  if (sessionId) {
+    where.push('session_id = ?');
+    params.push(sessionId);
+  }
+  params.push(Math.max(2, Math.min(12, Number(limit || 8))));
+  const rows = await db.allQuery(
+    `SELECT role, content, ts, created_at
+     FROM chat_messages
+     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+     ORDER BY COALESCE(ts, strftime('%s', created_at) * 1000) DESC
+     LIMIT ?`,
+    params
+  ).catch(() => []);
+  return (rows || [])
+    .reverse()
+    .map((row) => ({
+      role: row.role === 'assistant' ? 'assistant' : 'user',
+      content: String(row.content || '').trim().slice(0, 900),
+      ts: row.ts || row.created_at || null
+    }))
+    .filter((item) => item.content);
+}
+
+function isTaskCreationQuery(query = '') {
+  const lower = String(query || '').toLowerCase();
+  return /\b(my|me|today|now|current|top|priority|priorities)\b/.test(lower)
+    && /\b(to-?dos?|todos?|tasks?|next actions?|what'?s next|priorities)\b/.test(lower);
+}
+
+function suggestionToEvidence(item = {}, index = 0) {
+  const meta = item.metadata && typeof item.metadata === 'object' ? item.metadata : {};
+  const reason = item.reason || meta.reason || item.body || item.description || '';
+  const action = item.primary_action?.label || meta.primary_action?.label || item.recommended_action || '';
+  const plan = Array.isArray(item.plan) ? item.plan : (Array.isArray(meta.plan) ? meta.plan : []);
+  const trace = Array.isArray(item.epistemic_trace) ? item.epistemic_trace : (Array.isArray(meta.epistemic_trace) ? meta.epistemic_trace : []);
+  const text = [
+    `${index + 1}. ${item.title || meta.title || 'Untitled action'}`,
+    reason ? `Why: ${reason}` : '',
+    action ? `Action: ${action}` : '',
+    plan.length ? `Plan: ${plan.slice(0, 3).join(' -> ')}` : '',
+    trace.length ? `Evidence: ${trace.slice(0, 2).map((t) => t.text || t.source || t.node_id).filter(Boolean).join(' | ')}` : ''
+  ].filter(Boolean).join('\n');
+  return {
+    id: item.id || `suggestion_${index}`,
+    layer: 'suggestion',
+    type: item.type || meta.type || 'next_action',
+    title: item.title || meta.title || '',
+    text,
+    score: Number(item.score || item.confidence || 0.7),
+    useful_score: Number(item.score || item.confidence || 0.7) + 0.25,
+    reason: 'actionable_top_todo',
+    timestamp: item.created_at || item.createdAt || null
+  };
+}
+
+async function buildActionableTodoEvidence({ query = '', apiKey = null, options = {} } = {}) {
+  if (!isTaskCreationQuery(query)) return [];
+  let suggestions = [];
+  if (apiKey) {
+    try {
+      const { generateTopTodosFromMemoryQuery } = require('./suggestion-engine');
+      suggestions = await generateTopTodosFromMemoryQuery({
+        provider: 'deepseek',
+        apiKey,
+        model: 'deepseek-chat'
+      }, {
+        query: 'Look through my memory and generate top 7 todos or actions I need to do right now.',
+        standing_notes: options?.standing_notes || options?.core_memory || '',
+        study_context: options?.study_context || null
+      });
+    } catch (error) {
+      console.warn('[ChatTasks] Failed to generate top todos:', error?.message || error);
+    }
+  }
+  if (!Array.isArray(suggestions) || !suggestions.length) {
+    suggestions = await fetchActiveSuggestions();
+  }
+  return (Array.isArray(suggestions) ? suggestions : [])
+    .slice(0, 7)
+    .map(suggestionToEvidence)
+    .filter((item) => item.text);
 }
 
 async function fetchRecentEpisodes() {
@@ -882,7 +970,7 @@ async function fetchDrilldownEvidence(refs = []) {
   ).catch(() => []);
   return rows.map((row) => {
     const metadata = safeJsonParse(row.metadata, {});
-    const text = metadata.cleaned_capture_text || row.redacted_text || row.raw_text || row.text || '';
+    const text = buildRawEvidenceText(row, metadata, { maxChars: 16000 });
     return {
       id: row.id,
       source_type: row.source_type,
@@ -890,7 +978,7 @@ async function fetchDrilldownEvidence(refs = []) {
       title: row.title,
       app: row.app,
       source_account: row.source_account,
-      text: String(text).slice(0, 8000)
+      text: String(text).slice(0, 16000)
     };
   });
 }
@@ -999,6 +1087,15 @@ async function lookupDirectMemoryFacts(query = '', limit = 8) {
   })).filter((item) => item.text);
 }
 
+async function lookupRelationshipEvidence(query = '', limit = 8) {
+  try {
+    const { searchRelationshipContext } = require('../relationship-graph');
+    return await searchRelationshipContext(query, limit);
+  } catch (_) {
+    return [];
+  }
+}
+
 function normalizeList(value) {
   return (Array.isArray(value) ? value : (value ? [value] : []))
     .map((item) => String(item || '').trim())
@@ -1015,6 +1112,10 @@ async function lookupDirectRawEvents(query = '', thought = {}, limit = 8) {
   const metadataFilters = thought?.metadata_filters || {};
   const clauses = [];
   const params = [];
+  clauses.push(`COALESCE(source, '') != 'Chat'`);
+  clauses.push(`COALESCE(type, source_type, '') != 'ChatMessage'`);
+  clauses.push(`LOWER(COALESCE(app, '')) NOT IN ('chat', 'chat_ui')`);
+  clauses.push(`LOWER(COALESCE(metadata, '')) NOT LIKE '%app.chat%'`);
 
   const dateRange = thought?.applied_date_range || filters.date_range || thought?.date_range || null;
   if (dateRange?.start && dateRange?.end) {
@@ -1022,7 +1123,7 @@ async function lookupDirectRawEvents(query = '', thought = {}, limit = 8) {
     params.push(dateRange.start, dateRange.end);
   }
 
-  const apps = normalizeList(filters.app || thought?.app_scope || metadataFilters.app);
+  const apps = expandAppScopeValues(normalizeList(filters.app || thought?.app_scope || metadataFilters.app));
   if (apps.length) {
     clauses.push(`(${apps.map(() => `(LOWER(COALESCE(app, '')) LIKE ? OR (COALESCE(app, '') = '' AND LOWER(COALESCE(metadata, '')) LIKE ?))`).join(' OR ')})`);
     for (const app of apps) {
@@ -1071,7 +1172,7 @@ async function lookupDirectRawEvents(query = '', thought = {}, limit = 8) {
 
   return (rows || []).map((row, index) => {
     const metadata = safeJsonParse(row.metadata, {});
-    const text = String(metadata.cleaned_capture_text || row.redacted_text || row.raw_text || row.text || '').trim();
+    const text = buildRawEvidenceText(row, metadata, { maxChars: 16000 }).trim();
     const rankHay = `${row.title || ''} ${text}`.toLowerCase();
     const exactVideoBonus = (rankHay.includes('official trailer') ? 0.18 : 0)
       + (rankHay.includes('youtube') ? 0.08 : 0)
@@ -1084,7 +1185,7 @@ async function lookupDirectRawEvents(query = '', thought = {}, limit = 8) {
       type: 'event',
       subtype: row.source_type || metadata.event_type || null,
       title: row.title || metadata.context_title || row.source_type || row.id,
-      text: text.slice(0, 8000),
+      text: text.slice(0, 16000),
       app: row.app || metadata.source_app || metadata.app || null,
       timestamp: row.occurred_at || row.timestamp || metadata.occurred_at || null,
       score: Number((0.98 + exactVideoBonus - (index * 0.02)).toFixed(6)),
@@ -1262,11 +1363,32 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     }
   };
 
+  let thinkingState = {
+    stage: 'query_analysis',
+    progress: 15,
+    label: 'Analyzing your question'
+  };
+
   const emitStage = (step, status, overrides = {}, surface = true) => {
-    const event = buildStageEvent(step, status, overrides);
+    const event = {
+      ...buildStageEvent(step, status, overrides),
+      type: 'thinking_stage',
+      stage: thinkingState.stage,
+      progress: thinkingState.progress,
+      label: overrides.label || thinkingState.label || undefined
+    };
     stageTrace.push(event);
     if (surface) emit(event);
     return event;
+  };
+
+  const emitThinkingStage = (stage, progress, label, detail = '') => {
+    thinkingState = {
+      stage,
+      progress,
+      label,
+      detail
+    };
   };
 
   // Persist user chat turn as a raw event
@@ -1283,7 +1405,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
 
   // 1. Router Stage
   emitStage('routing', 'started', { label: 'Hypothesis', detail: 'Deciding whether this query should use memory, web, or hybrid retrieval.' }, false);
-  const { baseThought, retrievalQuery, chatHistory } = await runRouterStage({ query, options });
+  const { baseThought, retrievalQuery, activeQuery, chatHistory } = await runRouterStage({ query, options });
   const summaryHits = searchSummaryRollups(query, options?.historical_summaries || {}, options?.search_index || {}, 6);
   const summaryContext = formatSummaryContext(summaryHits);
   emitStage('routing', 'completed', {
@@ -1304,6 +1426,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       summaryHits.length ? `summary hits: ${summaryHits.length}` : null
     ].filter(Boolean)
   });
+  emitThinkingStage('query_analysis', 15, 'Analyzing your question');
 
   emitStage('query_generation', 'completed', {
     label: 'Search planning',
@@ -1325,7 +1448,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
 
   // 2. Planner Stage
   emitStage('planning', 'started', { label: 'Planner', detail: 'Generating a concise execution plan and refining key query terms.' }, false);
-  let plan = await runPlannerStage({ query: retrievalQuery, routerOutput: baseThought, apiKey });
+  let plan = await runPlannerStage({ query: activeQuery, routerOutput: baseThought, apiKey });
   emitStage('planning', 'completed', {
     label: 'Planner',
     detail: plan ? 'Created a formal execution plan with refined queries.' : 'Using default routing plan.',
@@ -1374,6 +1497,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
 
   while (!judgment.sufficient && iteration < maxIterations) {
     iteration++;
+    emitThinkingStage('hybrid_retrieval', 60, 'Searching your memory');
     emitStage('memory_search', 'started', { label: iteration > 1 ? `Phase 1: Initial memory search (Attempt ${iteration})` : 'Phase 1: Initial memory search', detail: 'Applying time-first filters, searching all memory layers, and collecting top candidates.' });
 
     // Use refined queries if available and it's not the first pass or if they exist
@@ -1381,7 +1505,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       ? { ...baseThought, semantic_queries: judgment.suggested_queries }
       : mergePlannerQueries(baseThought, plan);
 
-    retrieval = await executeParallelRetrieval(retrievalQuery, currentThought, {
+    retrieval = await executeParallelRetrieval(activeQuery, currentThought, {
       mode: 'chat',
       app: options?.app,
       date_range: currentThought.applied_date_range || options?.date_range,
@@ -1392,7 +1516,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     }, emit);
 
     if (iteration === 1 && retrievalLooksSparse(retrieval)) {
-      retrieval = await executeParallelRetrieval(retrievalQuery, currentThought, {
+      retrieval = await executeParallelRetrieval(activeQuery, currentThought, {
         mode: 'chat',
         app: options?.app,
         date_range: currentThought.applied_date_range || options?.date_range,
@@ -1409,7 +1533,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       const widenedRange = currentThought.initial_date_range ? widenTemporalWindow(currentThought.initial_date_range) : null;
       let widenedApps = null;
       if (currentThought.filters?.app) {
-        const families = inferSurfaceFamilies(retrievalQuery, '', currentThought.filters.app);
+        const families = inferSurfaceFamilies(activeQuery, '', currentThought.filters.app);
         const widenedSet = new Set();
         if (families.includes('communication')) ['Gmail', 'Slack', 'Messages', 'WhatsApp', 'Signal'].forEach((item) => widenedSet.add(item));
         if (families.includes('coding')) ['GitHub', 'Cursor', 'Xcode', 'VSCode'].forEach((item) => widenedSet.add(item));
@@ -1426,7 +1550,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
           date_filter_status: 'widened',
           fallback_policy: { ...(currentThought.fallback_policy || { mode: 'widen_once' }), attempted: true, widened: true }
         };
-        retrieval = await executeParallelRetrieval(retrievalQuery, widenedThought, {
+        retrieval = await executeParallelRetrieval(activeQuery, widenedThought, {
           mode: 'chat',
           app: widenedApps || options?.app,
           date_range: widenedRange || currentThought.applied_date_range,
@@ -1437,8 +1561,8 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       }
     }
 
-    if (wantsActiveRawRetrieval(retrievalQuery, currentThought)) {
-      const directRawEvents = await lookupDirectRawEvents(retrievalQuery, currentThought, 8);
+    if (wantsActiveRawRetrieval(activeQuery, currentThought)) {
+      const directRawEvents = await lookupDirectRawEvents(activeQuery, currentThought, 8);
       if (directRawEvents.length) {
         const existingIds = new Set((retrieval.evidence || []).map((item) => item?.event_id || item?.id).filter(Boolean));
         const freshRawEvents = directRawEvents.filter((item) => !existingIds.has(item.event_id || item.id));
@@ -1461,6 +1585,53 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
             preview_items: freshRawEvents.slice(0, 3).map((item) => item.text || item.title || item.id)
           });
         }
+      }
+    }
+
+    if (isTaskCreationQuery(activeQuery)) {
+      const todoEvidence = await buildActionableTodoEvidence({ query: activeQuery, apiKey, options });
+      if (todoEvidence.length) {
+        const existingIds = new Set((retrieval.evidence || []).map((item) => item?.id || item?.event_id).filter(Boolean));
+        const freshTodoEvidence = todoEvidence.filter((item) => !existingIds.has(item.id));
+        if (freshTodoEvidence.length) {
+          retrieval.evidence = [...freshTodoEvidence, ...(retrieval.evidence || [])].slice(0, 18);
+          retrieval.evidence_count = retrieval.evidence.length;
+          retrieval.contextText = `${retrieval.contextText || ''}\n\n[Actionable Top Todos]\n${freshTodoEvidence.map((item) => `- ${item.text.replace(/\n/g, ' | ')}`).join('\n')}`.trim();
+          retrieval.packed_context_stats = {
+            ...(retrieval.packed_context_stats || {}),
+            packed_evidence: retrieval.evidence_count,
+            actionable_todo_hits: freshTodoEvidence.length
+          };
+          retrieval.generated_actionable_todos = freshTodoEvidence;
+          emitStage('actionable_todo_generation', 'completed', {
+            label: 'Actionable todo generation',
+            detail: `Generated ${freshTodoEvidence.length} actionable todo candidates from memory/suggestions.`,
+            counts: { actionable_todos: freshTodoEvidence.length },
+            preview_items: freshTodoEvidence.slice(0, 3).map((item) => item.title || item.text)
+          });
+        }
+      }
+    }
+
+    const relationshipEvidence = await lookupRelationshipEvidence(activeQuery, 8);
+    if (relationshipEvidence.length) {
+      const existingIds = new Set((retrieval.evidence || []).map((item) => item?.id || item?.relationship_contact_id).filter(Boolean));
+      const freshRelationshipEvidence = relationshipEvidence.filter((item) => !existingIds.has(item.id));
+      if (freshRelationshipEvidence.length) {
+        retrieval.evidence = [...freshRelationshipEvidence, ...(retrieval.evidence || [])].slice(0, 18);
+        retrieval.evidence_count = retrieval.evidence.length;
+        retrieval.contextText = `${retrieval.contextText || ''}\n\n[Relationship Graph]\n${freshRelationshipEvidence.map((item) => `- ${item.text}`).join('\n')}`.trim();
+        retrieval.packed_context_stats = {
+          ...(retrieval.packed_context_stats || {}),
+          packed_evidence: retrieval.evidence_count,
+          relationship_contact_hits: freshRelationshipEvidence.length
+        };
+        emitStage('relationship_graph_lookup', 'completed', {
+          label: 'Relationship graph lookup',
+          detail: `Recovered ${freshRelationshipEvidence.length} contact records from relationship memory.`,
+          counts: { relationship_contacts: freshRelationshipEvidence.length },
+          preview_items: freshRelationshipEvidence.slice(0, 3).map((item) => item.title || item.id)
+        });
       }
     }
 
@@ -1491,6 +1662,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       },
       preview_items: (retrieval.evidence || []).slice(0, 3).map((item) => item.text || item.id)
     });
+    emitThinkingStage('reranking', 80, 'Organizing results');
 
     if (shouldUseDailySummarySupplement(retrieval, summaryContext, options)) {
       retrieval.contextText = `${retrieval.contextText || ''}\n\n[Supplemental Daily Summary Snapshots]\n${summaryContext}`.trim();
@@ -1499,8 +1671,8 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       retrieval.summary_context_used = false;
     }
 
-    if (retrievalLooksSparse(retrieval) && !wantsActiveRawRetrieval(retrievalQuery, currentThought)) {
-      const directFacts = await lookupDirectMemoryFacts(retrievalQuery, 8);
+    if (retrievalLooksSparse(retrieval) && !wantsActiveRawRetrieval(activeQuery, currentThought)) {
+      const directFacts = await lookupDirectMemoryFacts(activeQuery, 8);
       if (directFacts.length) {
         const existingIds = new Set((retrieval.evidence || []).map((item) => item?.id).filter(Boolean));
         const mergedFacts = directFacts.filter((item) => !existingIds.has(item.id));
@@ -1549,7 +1721,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     // 4. Judge Stage
     emitStage('judging', 'started', { label: 'Evidence test', detail: 'Checking whether the current memory and web evidence supports the answer.' }, false);
     judgment = await runJudgeStage({
-      query: retrievalQuery,
+      query: activeQuery,
       plan,
       retrieval,
       evidence: [...(retrieval.evidence || []), ...webResults],
@@ -1584,12 +1756,14 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   const maxSynthIterations = 2;
 
   if (!apiKey) {
+    emitThinkingStage('synthesis', 95, 'Generating response');
     emitStage('synthesis', 'started', { label: 'Synthesis' });
     content = buildGroundedFallbackAnswer(query, retrieval, drilldownEvidence);
     reflection.approved = true;
   } else {
     while (!reflection.approved && synthIteration < maxSynthIterations) {
       synthIteration++;
+      emitThinkingStage('synthesis', 95, 'Generating response');
       emitStage('synthesis', 'started', { label: synthIteration > 1 ? `Answer drafting (Attempt ${synthIteration})` : 'Answer drafting', detail: 'Reasoning over the packed context bundle to draft the answer.' });
       content = normalizeAssistantContent(await runSynthesizerStage({
         query,
@@ -1644,6 +1818,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     label: 'Write-back',
     detail: 'Stored this chat turn back into memory as raw chat events.'
   });
+  emitThinkingStage('complete', 100, 'Done');
 
   const uiBlocks = [];
   content = sanitizeAssistantOutput(content);
@@ -1738,11 +1913,14 @@ function heuristicJudge(evidence, query = '', retrieval = null) {
 }
 
 async function runRouterStage({ query, options }) {
-  const chatHistory = normalizeChatHistoryWindow(options?.chat_history, 10);
+  let chatHistory = normalizeChatHistoryWindow(options?.chat_history, 10);
+  if (!chatHistory.length) {
+    chatHistory = await fetchRecentChatHistory(options?.chat_session_id, 8);
+  }
   const retrievalQuery = buildQueryWithChatContext(query, chatHistory);
 
   const baseThought = await buildRetrievalThought({
-    query: retrievalQuery,
+    query,
     mode: 'chat',
     dateRange: options?.date_range,
     app: options?.app,
@@ -1752,6 +1930,7 @@ async function runRouterStage({ query, options }) {
   return {
     baseThought,
     retrievalQuery,
+    activeQuery: String(query || '').trim(),
     chatHistory
   };
 }
@@ -1863,24 +2042,43 @@ function compactEvidenceLine(text = '', maxChars = 420) {
   const cleaned = String(text || '').replace(/\s+/g, ' ').trim();
   if (!cleaned) return '';
   const lower = cleaned.toLowerCase();
+  if (lower.startsWith('- [raw:') || lower.includes('full ocr / raw capture:')) {
+    return cleaned.slice(0, Math.max(1200, maxChars));
+  }
   if (/^(full ocr:|content:|captured text:|window:|app:)/.test(lower) && cleaned.length > 260) {
     return cleaned.slice(0, Math.min(220, maxChars));
   }
   return cleaned.slice(0, Math.max(80, maxChars));
 }
 
+function classifyAnswerMode(query = '') {
+  const lower = String(query || '').toLowerCase();
+  const asksExternalWrite = /\b(save|add|create|make|schedule|send|email|message|text|post|publish|delete|update|move|rename)\b/.test(lower)
+    && /\b(task|todo|reminder|calendar|event|contact|email|message|file|note|database|db|automation|card)\b/.test(lower);
+  const asksGroundedGeneration = /\b(create|make|generate|draft|write|compose|plan|prioriti[sz]e|suggest|recommend|summari[sz]e|turn .* into|build|outline|organize)\b/.test(lower)
+    || /\b(what should i do|what'?s next|next actions?|top to-?dos?|top todos?|tasks? are my top|my priorities|action plan|game plan)\b/.test(lower);
+  const asksExactLookup = /\b(exact|verbatim|quote|which|who|when|where|what did i|what was i|did i|have i|according to memory|recall|remember|watched|talked to)\b/.test(lower);
+
+  if (asksExternalWrite) return 'external_action_request';
+  if (asksGroundedGeneration) return 'grounded_generation';
+  if (asksExactLookup) return 'memory_lookup';
+  return 'balanced_answer';
+}
+
 function buildSynthesisPolicy({ query = '', evidence = [], retrieval = null }) {
   const q = String(query || '').toLowerCase();
   const budget = Number(retrieval?.retrieval_plan?.context_budget_tokens || 2000);
   const highConfidenceCount = (evidence || []).filter((item) => Number(item?.score || 0) >= 0.7).length;
+  const answerMode = classifyAnswerMode(query);
   const likelyFactual = /\b(when|what|who|where|which|did|does|is|are|was|were|list|show|find|recall|remember)\b/.test(q);
   const likelyReasoning = /\b(why|how|compare|difference|pattern|insight|explain|summarize)\b/.test(q);
+  const likelyGenerative = answerMode === 'grounded_generation' || answerMode === 'external_action_request';
 
-  const maxTokens = likelyFactual ? 650 : (likelyReasoning ? 900 : 800);
-  const temperature = likelyFactual ? 0.12 : (likelyReasoning ? 0.2 : 0.16);
+  const maxTokens = likelyGenerative ? 1150 : (likelyFactual ? 800 : (likelyReasoning ? 1000 : 900));
+  const temperature = likelyGenerative ? 0.22 : (likelyFactual ? 0.12 : (likelyReasoning ? 0.2 : 0.16));
   const contextBudget = Math.max(700, Math.min(budget, highConfidenceCount >= 5 ? budget : Math.floor(budget * 0.8)));
-  const evidenceLimit = highConfidenceCount >= 5 ? 8 : 5;
-  const rawLimit = likelyFactual ? 4 : 6;
+  const evidenceLimit = likelyGenerative ? 10 : (highConfidenceCount >= 5 ? 8 : 5);
+  const rawLimit = likelyGenerative ? 7 : (likelyFactual ? 4 : 6);
 
   return {
     maxTokens,
@@ -1888,7 +2086,9 @@ function buildSynthesisPolicy({ query = '', evidence = [], retrieval = null }) {
     contextBudget,
     evidenceLimit,
     rawLimit,
-    lineMaxChars: likelyFactual ? 320 : 440
+    lineMaxChars: likelyGenerative ? 560 : (likelyFactual ? 360 : 460),
+    answerMode,
+    minWords: likelyGenerative || likelyReasoning || !likelyFactual ? 150 : 90
   };
 }
 
@@ -1959,8 +2159,17 @@ async function runSynthesizerStage({ query, retrieval, chatHistory, standingNote
 
   const prompt = `[System]
 Weave assistant. Conversational, grounded, direct, concise. No invented facts.
-You are in READ-ONLY chatbot mode.
-Do not create contacts, automations, actions, memory writes, or UI cards.
+Answer mode: ${policy.answerMode}.
+
+Mode rules:
+- memory_lookup: answer only from grounded memory/web context. Give the direct answer first. You may add related grounded memories or adjacent context after the direct answer, but never use related context as proof for the exact claim.
+- grounded_generation: create the requested output in the chat response (todo list, plan, draft, outline, synthesis, recommendation) using grounded memory/web context as inputs. Memory remains the source of truth; web context may add public/current background only when present in <context_memory>.
+- external_action_request: if the user asks you to create/save/send/schedule/update something outside the chat, draft the artifact or give exact steps unless the runtime has actually performed the external write. Do not imply it was saved or sent.
+
+Do not claim that a missing dedicated task-manager record means no todos exist if <context_memory> contains actionable suggestions, active suggestions, recent work, emails, calendar items, or open-loop evidence.
+When generating things, always use the retrieved memory/web context as constraints and cite uncertainty plainly. Do not freewheel generic advice when memory is sparse.
+When the answer can be developed, write at least ${policy.minWords} words. Start with the answer, then add related grounded context, adjacent memories, useful implications, or next steps. If there is truly no supporting context, stay shorter and ask one concise follow-up question.
+Do not create contacts, automations, external actions, or UI cards unless the user explicitly asks you to create/save them and the runtime actually supports that action.
 Do not output XML tags or tool instructions.
 Answer strictly from the grounded memory/web context in <context_memory>. If evidence is missing, clearly say what is missing and ask one concise follow-up question.
 
@@ -1969,6 +2178,8 @@ ${contextMemoryXml}
 
 [Conversation History]
 ${formatChatHistoryForPrompt(chatHistory)}
+
+Use Conversation History only to resolve follow-ups like "that", "do it", "what about the second one", or corrections to your previous answer. The grounded context remains authoritative for factual claims.
 
 [Standing Notes]
 ${standingNotes || 'None'}

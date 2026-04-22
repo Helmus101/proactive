@@ -77,14 +77,6 @@ npm run dev
 npm start
 ```
 
-### Installing the Chrome Extension
-
-1. Open Chrome and go to `chrome://extensions/`
-2. Enable "Developer mode"
-3. Click "Load unpacked"
-4. Select the `chrome-extension` directory from this project
-5. The extension will start collecting browsing data automatically
-
 ### Using the App
 
 1. **Connect Google Account**: Click "Connect Google Account" to authenticate
@@ -98,7 +90,6 @@ npm start
 
 - **Electron Main Process** (`main.js`): Handles OAuth, data storage, and AI integration
 - **Renderer Process** (`renderer/`): Frontend UI built with HTML/CSS/JavaScript
-- **Chrome Extension** (`chrome-extension/`): Collects browsing data
 - **Preload Script** (`preload.js`): Secure bridge between main and renderer processes
 - **Desktop Agent Layer** (`services/desktop-control.js`, `services/agent/agentPlanner.js`): Adaptive observe→plan→act loop with AX tree + optional screenshot fallback
 
@@ -120,12 +111,11 @@ The app now supports a hybrid VTA flow inspired by "Wispr Flow + Manus":
 
 ### Data Flow
 
-1. Chrome extension collects browsing data
-2. Extension sends data to Electron app via HTTP endpoint
-3. Electron app stores data locally using electron-store
-4. User triggers AI analysis
-5. DeepSeek API processes data and generates tasks
-6. Tasks are displayed and can be executed
+1. Electron app collects local activity data
+2. Electron app stores data locally using electron-store
+3. User triggers AI analysis
+4. AI processes data and generates tasks
+5. Tasks are displayed and can be executed
 
 ### Data Storage
 
@@ -133,14 +123,13 @@ The app uses `electron-store` for local data persistence:
 - Google OAuth tokens
 - User data (emails, calendar, browsing)
 - Generated tasks
-- Extension settings
+- Local sync settings
 
 ## Security Considerations
 
 - OAuth tokens are stored locally and encrypted
 - No sensitive data is sent to external services except AI API
-- Chrome extension respects user privacy settings
-- Data collection can be disabled via extension popup
+- Data collection can be disabled in-app
 
 ## Development
 
@@ -155,13 +144,6 @@ weave/
 │   ├── index.html        # Main UI
 │   ├── styles.css        # Styles
 │   └── app.js           # Frontend logic
-├── chrome-extension/      # Chrome extension
-│   ├── manifest.json     # Extension manifest
-│   ├── background.js     # Background script
-│   ├── content.js        # Content script
-│   ├── popup.html        # Extension popup
-│   ├── popup.js          # Popup logic
-│   └── icons/            # Extension icons
 └── README.md             # This file
 ```
 

@@ -71,7 +71,7 @@ function makeFallbackTitle(seed = {}, graphContext = {}) {
   const preferred = Array.isArray(seed?.candidate_actions) && seed.candidate_actions.length
     ? seed.candidate_actions[0]
     : (seed.category === 'followup' ? `Draft follow-up for ${focus}` : `Finish next step for ${focus}`);
-  return cleanSeedPhrase(preferred, 120);
+  return cleanSeedPhrase(preferred, 62);
 }
 
 function titleLooksBad(title = '') {
@@ -617,7 +617,12 @@ function mapOpportunityToSeed(candidate = {}) {
     sentiment_gradient: candidate.sentiment_gradient || null,
     value_hook: candidate.value_hook || null,
     outreach_options: Array.isArray(candidate.outreach_options) ? candidate.outreach_options : [],
-    social_strategy: candidate.social_strategy || null
+    social_strategy: candidate.social_strategy || null,
+    relationship_contact_id: candidate.relationship_contact_id || null,
+    relationship_status: candidate.relationship_status || null,
+    relationship_score_inputs: candidate.relationship_score_inputs || null,
+    draft_context_refs: Array.isArray(candidate.draft_context_refs) ? candidate.draft_context_refs : [],
+    target_surface: candidate.target_surface || null
   };
 }
 
@@ -847,24 +852,23 @@ function fallbackSuggestion(seed, graphContext, now, options = {}) {
   const title = makeFallbackTitle(seed, graphContext);
   const expectedBenefit = makeExpectedBenefit(seed);
   const body = seed.category === 'followup'
-    ? `This thread is drifting with no owner. Draft and send a concrete follow-up for ${focus} in the next 15 minutes so it moves instead of idling.`
-    : `You are carrying this open loop too long. Execute one concrete step on ${focus} right now to remove the blocker and regain momentum.`;
+    ? trim(`Draft the ${focus} follow-up in 15 minutes.`, 90)
+    : trim(`Finish one concrete step on ${focus} now.`, 90);
   const execution = classifySuggestionExecution(seed, title, body);
   const stepPlan = normalizeMiniPlan(seed.step_plan, [
     seed.category === 'followup'
-      ? `Open the thread or recent context tied to ${seed.title}`
-      : `Open the strongest evidence tied to ${seed.title}`,
+      ? `Open ${trim(seed.title, 32)}`
+      : `Open ${trim(seed.title, 32)}`,
     execution.ai_doable
-      ? 'Let AI prepare the first draft or workflow for the next step'
-      : 'Choose the exact next action the evidence supports',
-    seed.category === 'followup'
-      ? 'Review and send the follow-up'
-      : 'Complete the step before switching context'
-  ]);
+      ? 'Let AI draft it'
+      : 'Do the next step now'
+  ]).slice(0, 2).map((step) => trim(step, 42));
   const actionPlan = buildActionPlan(seed, execution, graphContext);
   const aiDraft = buildSuggestionDraft(seed, execution, seed.trigger_summary, expectedBenefit);
   const epistemicTrace = buildEpistemicTrace(seed, graphContext, now);
-  const suggestedActions = buildSuggestedActions(seed, execution, actionPlan, aiDraft);
+  const suggestedActions = buildSuggestedActions(seed, execution, actionPlan, aiDraft)
+    .slice(0, 1)
+    .map((action) => ({ ...action, label: trim(action.label, 46) }));
   const primaryAction = suggestedActions.find((item) => isConcreteActionLabel(item?.label || '')) || null;
   const patternType = inferPatternType(seed);
   const suggestionType = inferSuggestionType(seed);
@@ -881,12 +885,12 @@ function fallbackSuggestion(seed, graphContext, now, options = {}) {
     type: seed.category === 'followup' ? 'followup' : 'next_action',
     title,
     body,
-    description: seed.trigger_summary,
-    intent: seed.category === 'followup' ? 'Force closure on an open communication loop' : 'Convert an open loop into visible progress now',
-    reason: ensureBecauseReason(`found in recent context: ${seed.trigger_summary} and this pattern repeats when follow-through is delayed, so this step is meant to break that cycle now.`),
-    trigger_summary: seed.trigger_summary,
-    expected_benefit: expectedBenefit,
-    expected_impact: expectedBenefit,
+    description: trim(seed.trigger_summary || body, 90),
+    intent: seed.category === 'followup' ? 'Close follow-up' : 'Make progress',
+    reason: trim(ensureBecauseReason(`found in recent context: ${seed.trigger_summary}`), 90),
+    trigger_summary: trim(seed.trigger_summary, 90),
+    expected_benefit: trim(expectedBenefit, 90),
+    expected_impact: trim(expectedBenefit, 90),
     plan: stepPlan,
     step_plan: stepPlan,
     category: seed.category,
@@ -901,11 +905,11 @@ function fallbackSuggestion(seed, graphContext, now, options = {}) {
     candidate_score: Number(seed.candidate_score || seed.score || 0),
     pattern_type: patternType,
     suggestion_type: suggestionType,
-    explanation: `Suggested due to a ${patternType} pattern with value ${valueScore}/25, confidence ${Math.round(Math.max(0.55, Number(seed.score || 0.6)) * 100)}%, and risk ${riskScore}/10.`,
+    explanation: trim(`Suggested from ${patternType} memory evidence.`, 90),
     display: {
-      headline: `Action: ${trim(title, 100)}`,
-      summary: trim(seed.trigger_summary || body, 140),
-      insight: trim(`Pattern: ${patternType}. ${graphContext.trace_summary || seed.trigger_summary || ''}`, 180)
+      headline: `Action: ${trim(title, 62)}`,
+      summary: trim(seed.trigger_summary || body, 90),
+      insight: trim(`Pattern: ${patternType}.`, 80)
     },
     epistemic_trace: epistemicTrace,
     suggested_actions: suggestedActions,
@@ -923,6 +927,10 @@ function fallbackSuggestion(seed, graphContext, now, options = {}) {
     source_edge_paths: graphContext.edge_paths,
     evidence_path: graphContext.edge_paths,
     evidence: graphContext.evidence || [],
+    relationship_contact_id: seed.relationship_contact_id || null,
+    relationship_status: seed.relationship_status || null,
+    relationship_score_inputs: seed.relationship_score_inputs || null,
+    draft_context_refs: seed.draft_context_refs || [],
     study_subject: studySubject || null,
     risk_level: riskLevel,
     recommended_action: stepPlan[0] || title,
@@ -972,6 +980,7 @@ async function buildSuggestionFromSeed(seed, apiKey, now, options = {}) {
 
   const prompt = `
   You are generating one proactive suggestion from a user's memory graph.
+  The UI is a quick-action feed. Suggestions must be short, fast, and directly actionable.
   There are three kinds of suggestions:
   - STUDY: drill/review/resume a specific concept, session, or assignment. Category = "study".
   - RELATIONSHIP: follow-up, connecting, sharing articles, birthdays, and noticing news about people. Category = "relationship".
@@ -1002,15 +1011,16 @@ async function buildSuggestionFromSeed(seed, apiKey, now, options = {}) {
 
   Rules:
   - One immediate action only.
+  - Keep the whole suggestion scannable in under 5 seconds.
   - Use a direct coach voice: blunt, clear, no fluff, no cheerleading. For RELATIONSHIP category, use a "Relationship Coach" voice: warm but professional, suggesting ways to maintain and grow connections.
   - The action must be specific enough that the user could do it next.
-  - Make it deep and concrete, not generic. For relationship suggestions, mention the specific person's name and the specific article/event found.
-  - The title must sound like a reality check plus a concrete target.
-  - The body must be exactly 2 short sentences:
-    1) call out the specific risk/pattern from evidence
-    2) command the exact next step with a timebox or immediate trigger
+  - Make it concrete, not generic. For relationship suggestions, mention the specific person's name and the specific article/event found.
+  - Title: 4-9 words, imperative verb first, specific target included.
+  - Body: exactly 1 short sentence, max 90 characters.
+  - Reason: exactly 1 short sentence, max 90 characters, grounded in a named receipt.
+  - Plan: max 2 steps, each max 42 characters.
+  - suggested_actions: exactly 1 best action unless a second action is truly necessary.
   - Assume any AI-executable action should remove one extra step for the user.
-  - Break the task into 2-4 small steps.
   - Prefer stakeholder updates, meeting prep, open-loop closure, and exact follow-ups over broad productivity advice.
   - Prioritize suggestions that match these types when evidence supports them:
     deadline intelligence, research optimization, collaboration intelligence, grade/performance risk, time optimization.
@@ -1021,13 +1031,13 @@ async function buildSuggestionFromSeed(seed, apiKey, now, options = {}) {
   - Keep value_score between 0 and 25 (time/effort/stress saved).
   - explanation must explicitly reference the observed pattern.
   - Always output a non-empty epistemic_trace with 2-4 receipts.
-  - Always output 1-3 suggested_actions with concrete labels and payloads.
+  - Always output 1 concrete suggested_action with a short label.
   - Treat this as a context bundle: Trigger -> Evidence -> Insight -> Action.
   - Reason from three-node convergence when possible:
     episodic (time/context), semantic (facts/entities), insight (inferred pattern).
   - Do not output generic productivity phrasing.
   - Output must read like a to-do item from unfinished or pending work, not a motivational reminder.
-  - Include "what", "why now", and "exact action" in plain language.
+  - Include only "what" and "why now"; skip analysis.
   - If evidence does not support a concrete suggestion, return no suggestion (empty object).
 
   GOOD VS BAD EXAMPLES:
@@ -1039,7 +1049,7 @@ async function buildSuggestionFromSeed(seed, apiKey, now, options = {}) {
   SPECIFICITY RULES (mandatory — violating any of these will cause this suggestion to be rejected):
   - Title MUST start with a concrete verb + a specific named entity, filename, person name, or exact time. NEVER start with "Take the next step", "Review and organize", "Send a quick update", "Continue working on", or any phrase that could apply to ANY suggestion.
   - reason MUST reference a specific artifact, timestamp, or person NAME drawn from the epistemic_trace. If the trace contains "09:23 screen capture" or "Alex" or "clawdbot.js", the reason must use that exact reference — not "recent activity" or "recent context".
-  - body/reason combined length: ≤120 chars. Every word must add specific information. Cut filler and padding.
+  - body/reason combined length: ≤160 chars. Every word must add specific information. Cut filler and padding.
   - time_anchor must be a specific clock time (e.g. "09:23 this morning") or a concrete relative reference ("2 hours ago", "in 47 minutes") — NOT just "today" or "this morning" alone.
   - Do NOT generate a suggestion about organizing, tagging, or renaming files unless the epistemic_trace explicitly names specific files.
 
@@ -1116,9 +1126,20 @@ ${recentRecall.map((r) => `- [${r.source}] ${r.text} (${r.timestamp})`).join('\n
       : execution.action_type === 'prepare_brief'
         ? 'Finalize the brief and use it immediately'
         : 'Execute the next concrete action now'
-  ]);
+  ]).slice(0, 2).map((step) => trim(step, 42));
   const actionPlan = buildActionPlan(seed, execution, graphContext);
-  const aiDraft = buildSuggestionDraft(seed, execution, payload.reason || seed.trigger_summary, expectedBenefit);
+  const relationshipDraft = seed.relationship_contact_id
+    ? await (async () => {
+        try {
+          const { buildRelationshipDraftContext, buildDeterministicDraft } = require('../relationship-graph');
+          const context = await buildRelationshipDraftContext(seed.relationship_contact_id, { limit: 6 });
+          return context ? { context, draft: buildDeterministicDraft(context) } : null;
+        } catch (_) {
+          return null;
+        }
+      })()
+    : null;
+  const aiDraft = relationshipDraft?.draft || buildSuggestionDraft(seed, execution, payload.reason || seed.trigger_summary, expectedBenefit);
   const epistemicTrace = Array.isArray(payload.epistemic_trace) && payload.epistemic_trace.length
     ? payload.epistemic_trace.slice(0, 6).map((item) => ({
       node_id: trim(item?.node_id || '', 120),
@@ -1128,8 +1149,8 @@ ${recentRecall.map((r) => `- [${r.source}] ${r.text} (${r.timestamp})`).join('\n
     })).filter((item) => item.node_id && item.text)
     : buildEpistemicTrace(seed, graphContext, now);
   const suggestedActions = Array.isArray(payload.suggested_actions) && payload.suggested_actions.length
-    ? payload.suggested_actions.slice(0, 3).map((action) => ({
-      label: trim(action?.label || 'Action', 60),
+    ? payload.suggested_actions.slice(0, 1).map((action) => ({
+      label: trim(action?.label || 'Action', 46),
       type: trim(action?.type || 'browser_operator', 40),
       payload: {
         action: trim(action?.payload?.action || 'open_context', 60),
@@ -1137,19 +1158,22 @@ ${recentRecall.map((r) => `- [${r.source}] ${r.text} (${r.timestamp})`).join('\n
         template: trim(action?.payload?.template || '', 320) || null
       }
     }))
-    : buildSuggestedActions(seed, execution, actionPlan, aiDraft);
-  const canonicalSummary = trim(seed.trigger_summary || body, 160);
+    : buildSuggestedActions(seed, execution, actionPlan, aiDraft)
+      .slice(0, 1)
+      .map((action) => ({ ...action, label: trim(action.label, 46) }));
+  const quickBody = trim(body, 90);
+  const canonicalSummary = trim(seed.trigger_summary || quickBody, 90);
   const display = {
     headline: trim(payload?.display?.headline || `Action: ${title}`, 120),
     summary: trim(
       hasTemplateTone(payload?.display?.summary || '') || !titleSummaryConsistent(title, payload?.display?.summary || '')
         ? canonicalSummary
         : payload.display.summary,
-      160
+      90
     ),
-    insight: trim(payload?.display?.insight || payload.explanation || graphContext.trace_summary || '', 200)
+    insight: trim(payload?.display?.insight || payload.explanation || graphContext.trace_summary || '', 120)
   };
-  const normalizedReason = ensureBecauseReason(payload.reason || seed.trigger_summary, `found in recent context: ${seed.trigger_summary}`);
+  const normalizedReason = trim(ensureBecauseReason(payload.reason || seed.trigger_summary, `found in recent context: ${seed.trigger_summary}`), 90);
   const quality = qualityGateSuggestion({
     title,
     body,
@@ -1165,9 +1189,9 @@ ${recentRecall.map((r) => `- [${r.source}] ${r.text} (${r.timestamp})`).join('\n
       suggestion_id: `prop_${crypto.randomBytes(4).toString('hex')}`,
       type: seed.category === 'followup' ? 'followup' : 'next_action',
       title,
-      body,
-      description: trim(isVagueSuggestionText(title, body) ? (payload.reason || seed.trigger_summary || body) : body, 200),
-      intent: trim(payload.intent || body, 160),
+      body: quickBody,
+      description: trim(isVagueSuggestionText(title, quickBody) ? (payload.reason || seed.trigger_summary || quickBody) : quickBody, 90),
+      intent: trim(payload.intent || quickBody, 90),
       reason: normalizedReason,
       trigger_summary: seed.trigger_summary,
       expected_benefit: expectedBenefit,
@@ -1179,7 +1203,7 @@ ${recentRecall.map((r) => `- [${r.source}] ${r.text} (${r.timestamp})`).join('\n
       value_score: valueScore,
       risk_score: riskScore,
       final_score: finalScore,
-      explanation: trim(payload.explanation || `Low-quality suggestion: ${trim(seed.trigger_summary || graphContext.trace_summary || '', 130)}`, 220),
+      explanation: trim(payload.explanation || `Low-quality suggestion: ${trim(seed.trigger_summary || graphContext.trace_summary || '', 90)}`, 120),
       display,
       epistemic_trace: epistemicTrace,
       suggested_actions: suggestedActions,
@@ -1196,6 +1220,10 @@ ${recentRecall.map((r) => `- [${r.source}] ${r.text} (${r.timestamp})`).join('\n
       source_edge_paths: graphContext.edge_paths,
       evidence: graphContext.evidence || [],
       provider: apiKey ? 'deepseek' : 'local',
+      relationship_contact_id: seed.relationship_contact_id || null,
+      relationship_status: seed.relationship_status || null,
+      relationship_score_inputs: seed.relationship_score_inputs || null,
+      draft_context_refs: seed.draft_context_refs?.length ? seed.draft_context_refs : (relationshipDraft?.context?.draft_context_refs || []),
       retrieval_trace: {
         retrieval_plan: graphContext.retrieval_plan,
         seed_nodes: graphContext.seed_nodes,
@@ -1213,9 +1241,9 @@ ${recentRecall.map((r) => `- [${r.source}] ${r.text} (${r.timestamp})`).join('\n
     suggestion_id: `prop_${crypto.randomBytes(4).toString('hex')}`,
     type: seed.category === 'followup' ? 'followup' : 'next_action',
     title,
-    body,
-    description: trim(isVagueSuggestionText(title, body) ? (payload.reason || seed.trigger_summary || body) : body, 200),
-    intent: trim(payload.intent || body, 160),
+    body: quickBody,
+    description: trim(isVagueSuggestionText(title, quickBody) ? (payload.reason || seed.trigger_summary || quickBody) : quickBody, 90),
+    intent: trim(payload.intent || quickBody, 90),
     reason: normalizedReason,
     trigger_summary: seed.trigger_summary,
     expected_benefit: expectedBenefit,
@@ -1237,8 +1265,8 @@ ${recentRecall.map((r) => `- [${r.source}] ${r.text} (${r.timestamp})`).join('\n
     suggestion_type: suggestionType,
     explanation: trim(
       payload.explanation ||
-      `Observed ${patternType} pattern from recent receipts: ${trim(seed.trigger_summary || graphContext.trace_summary || '', 130)}.`,
-      220
+      `Observed ${patternType}: ${trim(seed.trigger_summary || graphContext.trace_summary || '', 90)}.`,
+      120
     ),
     display,
     epistemic_trace: epistemicTrace,
@@ -1258,6 +1286,10 @@ ${recentRecall.map((r) => `- [${r.source}] ${r.text} (${r.timestamp})`).join('\n
     evidence_path: graphContext.edge_paths,
     evidence: graphContext.evidence || [],
     provider: apiKey ? 'deepseek' : 'local',
+    relationship_contact_id: seed.relationship_contact_id || null,
+    relationship_status: seed.relationship_status || null,
+    relationship_score_inputs: seed.relationship_score_inputs || null,
+    draft_context_refs: seed.draft_context_refs?.length ? seed.draft_context_refs : (relationshipDraft?.context?.draft_context_refs || []),
     study_subject: studySubject || null,
     risk_level: riskLevel,
     recommended_action: stepPlan[0] || title,
@@ -1317,7 +1349,7 @@ async function generateFeedSuggestions(apiKey, now = Date.now(), options = {}) {
 
     const suggestion = await buildSuggestionFromSeed(seed, apiKey, now, options);
     if (suggestion) suggestions.push(suggestion);
-    if (suggestions.length >= 5) break;
+    if (suggestions.length >= 7) break;
   }
 
   if (!suggestions.length && prioritizedSeeds.length) {
@@ -1351,7 +1383,7 @@ async function generateFeedSuggestions(apiKey, now = Date.now(), options = {}) {
   // This helps surface the pipeline during development or empty DB states.
   const final = deduped
     .sort((a, b) => (Number(b.confidence || 0) + (b.priority === 'high' ? 0.15 : 0)) - (Number(a.confidence || 0) + (a.priority === 'high' ? 0.15 : 0)))
-    .slice(0, 3)
+    .slice(0, 7)
     .filter((item) => item.primary_action && isConcreteActionLabel(item.primary_action.label));
 
   if (!final.length) {

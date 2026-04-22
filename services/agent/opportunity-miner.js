@@ -845,6 +845,60 @@ async function detectContactOpportunities(now = Date.now()) {
   }
 }
 
+async function detectRelationshipGraphOpportunities(now = Date.now()) {
+  try {
+    const { getRelationshipContacts, buildRelationshipDraftContext } = require('../relationship-graph');
+    const contacts = await getRelationshipContacts({ limit: 80 });
+    const candidates = [];
+
+    for (const contact of contacts || []) {
+      const metadata = asObj(contact.metadata);
+      const score = Number(contact.strength_score || 0);
+      const status = String(contact.status || '').toLowerCase();
+      const lastTs = parseTs(contact.last_interaction_at);
+      const days = lastTs ? Math.max(0, (now - lastTs) / (24 * 60 * 60 * 1000)) : 365;
+      const shouldNudge = ['decaying', 'cooling', 'needs_followup'].includes(status) || score < 0.55 || days > 14;
+      if (!shouldNudge) continue;
+
+      const draftContext = await buildRelationshipDraftContext(contact.id, { limit: 4 }).catch(() => null);
+      const receipt = (draftContext?.receipts || []).find((item) => item.text) || null;
+      const hook = receipt ? trim(receipt.text, 140) : trim(metadata?.score_inputs ? `relationship score ${score.toFixed(2)}` : 'recent relationship history', 120);
+      const action = status === 'needs_followup' ? `Reply to ${contact.display_name}` : `Draft check-in to ${contact.display_name}`;
+
+      candidates.push({
+        ...candidateBase({
+          opportunityType: status === 'needs_followup' ? 'relationship_followup' : 'relationship_decay_nudge',
+          seedNodeId: contact.id,
+          title: `${action}`,
+          triggerSummary: `${contact.display_name} is ${status || 'cooling'}; last interaction ${Math.round(days)} days ago. Hook: ${hook}`,
+          confidence: Math.max(0.62, Math.min(0.94, 0.86 - (score * 0.25) + Math.min(0.12, days / 120))),
+          reasonCodes: ['relationship_graph', status || 'low_strength', receipt ? 'grounded_context_hook' : 'score_signal'],
+          timeAnchor: days < 1 ? 'today' : `${Math.round(days)}d since last touch`,
+          candidateActions: [action],
+          sourceRefs: (draftContext?.draft_context_refs || []).filter(Boolean),
+          canonicalTarget: normalizeTarget(contact.display_name),
+          score: Math.max(0.64, Math.min(0.97, 0.9 - (score * 0.22) + Math.min(0.1, days / 140)))
+        }),
+        relationship_contact_id: contact.id,
+        relationship_status: status,
+        relationship_score_inputs: metadata.score_inputs || null,
+        draft_context_refs: draftContext?.draft_context_refs || [],
+        target_surface: receipt && /linkedin/i.test(String(receipt.source || '')) ? 'linkedin' : 'gmail',
+        social_temperature: Number(score || 0),
+        value_hook: receipt ? {
+          source_event_id: receipt.event_id || null,
+          source_event_text: hook
+        } : null
+      });
+    }
+
+    return candidates;
+  } catch (error) {
+    console.warn('[OpportunityMiner] Relationship graph opportunities failed:', error?.message || error);
+    return [];
+  }
+}
+
 async function mineProactiveOpportunities(now = Date.now(), options = {}) {
   const socialStrategy = await loadSocialStrategy(options);
   const forceDeepScan = Boolean(options.deep_scan || options.force_full_scan);
@@ -867,6 +921,7 @@ async function mineProactiveOpportunities(now = Date.now(), options = {}) {
   candidates.push(...await detectUnresolvedFollowups(semanticRows, now));
   candidates.push(...await detectUnfinishedLoops(semanticRows, now));
   candidates.push(...await detectDeadlineRisk([...semanticRows, ...episodeRows], now));
+  candidates.push(...await detectRelationshipGraphOpportunities(now));
   candidates.push(...await detectContactOpportunities(now));
 
   if (deepScan) {
@@ -897,6 +952,7 @@ async function mineProactiveOpportunities(now = Date.now(), options = {}) {
 module.exports = {
   mineProactiveOpportunities,
   detectContactOpportunities,
+  detectRelationshipGraphOpportunities,
   __test__: {
     detectUnresolvedFollowups,
     detectUnfinishedLoops,
@@ -907,6 +963,7 @@ module.exports = {
     dedupeCandidates,
     enrichWithRecentRecall,
     normalizeTarget,
-    detectContactOpportunities
+    detectContactOpportunities,
+    detectRelationshipGraphOpportunities
   }
 };

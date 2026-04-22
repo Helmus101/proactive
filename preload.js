@@ -46,7 +46,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getExtensionData: () => ipcRenderer.invoke('get-extension-data'),
   clearExtensionData: () => ipcRenderer.invoke('clear-extension-data'),
   deleteAllSettings: () => ipcRenderer.invoke('delete-all-settings'),
-  sendExtensionMessage: (message) => ipcRenderer.invoke('extension-message', message),
   extensionRunDiagnostic: (opts) => ipcRenderer.invoke('extension-run-diagnostic', opts || {}),
   getEventDetails: (eventId) => ipcRenderer.invoke('get-event-details', eventId),
   getSensorStatus: () => ipcRenderer.invoke('get-sensor-status'),
@@ -104,6 +103,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   searchRawEvents: (query) => ipcRenderer.invoke('search-raw-events', query),
   getSuggestionLLMSettings: () => ipcRenderer.invoke('get-suggestion-llm-settings'),
   saveSuggestionLLMSettings: (payload) => ipcRenderer.invoke('save-suggestion-llm-settings', payload || {}),
+  getRelationshipContacts: (payload = {}) => ipcRenderer.invoke('get-relationship-contacts', payload),
+  getRelationshipContactDetail: (contactId) => ipcRenderer.invoke('get-relationship-contact-detail', contactId),
+  generateRelationshipDraft: (payload = {}) => ipcRenderer.invoke('generate-relationship-draft', payload),
 
   // Chat sessions: allow renderer to push sessions to main for long-term memory ingestion
   saveChatSessionsToMemory: (sessions) => ipcRenderer.invoke('save-chat-sessions-to-memory', sessions),

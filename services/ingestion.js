@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { canonicalAppIdForName } = require('./app-scope-catalog');
 const db = require('./db');
 const { generateEmbedding } = require('./embedding-engine');
 const { upsertRetrievalDoc } = require('./agent/graph-store');
@@ -379,26 +380,17 @@ function socialHalfLifeDaysForTier(tier) {
 function inferAppId(appName = '', metadata = {}) {
   const explicit = String(metadata.app_id || metadata.bundleId || metadata.bundle_id || metadata.application_id || '').trim();
   if (/^(com|app|org|io|dev|net)\.[a-z0-9_.-]+$/i.test(explicit)) {
-    const normalized = explicit.toLowerCase();
-    if (normalized === 'com.google.chrome') return 'com.google.chrome';
-    if (normalized === 'com.microsoft.vscode') return 'com.microsoft.vscode';
-    return explicit;
+    return canonicalAppIdForName(explicit) || explicit;
   }
 
   // Older screenshot ingestion wrote display names like "Google Chrome" into
   // metadata.app_id. Treat those as app names so retrieval filters can use
   // stable bundle-style IDs.
-  const app = String(appName || explicit || metadata.app || metadata.activeApp || '').toLowerCase();
-  if (/\b(vs code|visual studio code|vscode)\b/.test(app)) return 'com.microsoft.vscode';
-  if (/\bcursor\b/.test(app)) return 'com.todesktop.230313mzl4w4u92';
-  if (/\bchrome\b/.test(app)) return 'com.google.chrome';
-  if (/\bsafari\b/.test(app)) return 'com.apple.Safari';
-  if (/\bgmail\b/.test(app)) return 'com.google.gmail';
-  if (/\bcalendar\b/.test(app)) return 'com.google.calendar';
-  if (/\bslack\b/.test(app)) return 'com.tinyspeck.slackmacgap';
-  if (/\bterminal\b/.test(app)) return 'com.apple.Terminal';
-  if (/\bfigma\b/.test(app)) return 'com.figma.Desktop';
-  return app ? `app.${app.replace(/[^a-z0-9]+/g, '.').replace(/^\.+|\.+$/g, '')}` : null;
+  const app = String(appName || explicit || metadata.app || metadata.activeApp || '').trim();
+  const canonical = canonicalAppIdForName(app);
+  if (canonical) return canonical;
+  const normalized = app.toLowerCase();
+  return normalized ? `app.${normalized.replace(/[^a-z0-9]+/g, '.').replace(/^\.+|\.+$/g, '')}` : null;
 }
 
 function inferOperationalDataSource(type, source, metadata = {}) {
@@ -1325,6 +1317,27 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
         entities,
         eventId: id
       });
+    }
+
+    try {
+      const { linkMentionsForEvent } = require('./relationship-graph');
+      const linkedContacts = await linkMentionsForEvent({
+        eventId: id,
+        type,
+        source,
+        text: safeText || rawInputText,
+        metadata: safeMetadata,
+        envelope
+      });
+      if (linkedContacts?.length) {
+        safeMetadata.relationship_contact_ids = linkedContacts.map((item) => item.id).filter(Boolean).slice(0, 12);
+        await db.runQuery(
+          `UPDATE events SET metadata = ? WHERE id = ?`,
+          [JSON.stringify(safeMetadata), id]
+        ).catch(() => {});
+      }
+    } catch (relErr) {
+      console.warn('[ingestRawEvent] Relationship mention linking failed:', relErr?.message || relErr);
     }
 
     // Dispatch to real-time cognitive router for high-priority micro-updates

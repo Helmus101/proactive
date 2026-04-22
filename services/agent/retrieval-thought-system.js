@@ -1,3 +1,5 @@
+const { inferAppsFromText, canonicalAppIdForName } = require('../app-scope-catalog');
+
 function safeText(value) {
   if (value == null) return '';
   if (typeof value === 'string') return value;
@@ -467,23 +469,7 @@ function stripQuestionFormatting(text) {
 }
 
 function inferApps(text) {
-  const lower = safeText(text).toLowerCase();
-  const apps = [];
-  if (/\bgmail|email|inbox|thread|correspondence|mail\b/.test(lower)) apps.push('Gmail');
-  if (/\bmessages|imessage|sms|text message|pap|whatsapp|signal|telegram\b/.test(lower)) apps.push('Messages');
-  if (/\bslack|channel|dm|direct message\b/.test(lower)) apps.push('Slack');
-  if (/\bchrome|browser|extension|website|url|webpage|visited|youtube|video|trailer|watching|watched|playing\b/.test(lower)) apps.push('Chrome');
-  if (/\bgithub|pull request|pr|repo|repository|commit|issue\b/.test(lower)) apps.push('GitHub');
-  if (/\bdocs|document|doc|slides|deck|spreadsheet|sheets\b/.test(lower)) apps.push('Google Docs');
-  if (/\bcalendar|meeting|agenda|invite|event|sync\b/.test(lower)) apps.push('Calendar');
-  if (/\bnotion|page|workspace|database\b/.test(lower)) apps.push('Notion');
-  if (/\bcursor\b/.test(lower)) apps.push('Cursor');
-  if (/\bvscode|vs code|visual studio code\b/.test(lower)) apps.push('VSCode');
-  if (/\bcode editor|coding|ide|editor\b/.test(lower)) apps.push('Cursor', 'VSCode');
-  if (/\bxcode|ios dev|swift\b/.test(lower)) apps.push('Xcode');
-  if (/\bfigma|design|prototype\b/.test(lower)) apps.push('Figma');
-  if (/\bzoom|teams|video call\b/.test(lower)) apps.push('Video');
-  return apps.slice(0, 4);
+  return inferAppsFromText(text, 8);
 }
 
 function inferSurfaceFamilies(text, candidateType = '', appScope = [], sourceScope = []) {
@@ -819,7 +805,7 @@ function inferEntryMode(text, intent = '', mode = 'chat') {
 function inferPreferredSourceTypes(text, candidateType = '') {
   const lower = `${safeText(text)} ${safeText(candidateType)}`.toLowerCase();
   const preferred = [];
-  if (/\bemail|gmail|thread|reply|message|inbox|correspondence\b/.test(lower)) preferred.push('communication');
+  if (/\bemail|gmail|thread|reply|message|inbox|correspondence|whatsapp|signal|telegram|imessage|sms|talked to|chat history|contacts?\b/.test(lower)) preferred.push('communication');
   if (/\bmeeting|calendar|agenda|attendees|event|sync\b/.test(lower)) preferred.push('calendar');
   if (/\bwhat was i doing|what happened|what am i doing|just watching|watching|watched|trailer|video|youtube|extension|chrome|cursor|vscode|vs code|screen|desktop|activity|visited\b/.test(lower)) preferred.push('desktop', 'communication', 'calendar');
   if (/\bdecision|decided|choice|resolution\b/.test(lower)) preferred.push('decision');
@@ -845,18 +831,15 @@ function inferHardMetadataFilters(text, {
 } = {}) {
   const source = `${stripChatScaffolding(text)} ${safeText(candidateType)}`;
   const lower = source.toLowerCase();
-  const appIds = [];
-  if (/\b(vscode|visual studio code)\b/.test(lower)) appIds.push('com.microsoft.vscode');
-  if (/\bcursor\b/.test(lower)) appIds.push('com.todesktop.230313mzl4w4u92');
-  if (/\bchrome|youtube|video|trailer|watching|watched|playing\b/.test(lower)) appIds.push('com.google.chrome');
-  if (/\bsafari\b/.test(lower)) appIds.push('com.apple.safari');
-  if (/\bgmail|email|mail\b/.test(lower)) appIds.push('com.google.gmail');
-  if (/\bslack\b/.test(lower)) appIds.push('com.tinyspeck.slackmacgap');
+  const scopedApps = safeUnique([...(apps || []), ...inferApps(source)], 12);
+  const appIds = scopedApps
+    .map((app) => canonicalAppIdForName(app))
+    .filter(Boolean);
 
   const contentTypes = [];
   if (/\b(code|bug|websocket|manifest|function|handler|stack trace|error|vscode|cursor)\b/.test(lower)) contentTypes.push('code');
   if (/\b(email|gmail|thread|reply|subject|from:|to:)\b/.test(lower)) contentTypes.push('email');
-  if (/\b(slack|message|dm|chat)\b/.test(lower)) contentTypes.push('chat');
+  if (/\b(slack|message|dm|chat|whatsapp|signal|telegram|imessage|sms|talked to|contacts?)\b/.test(lower)) contentTypes.push('chat');
   if (/\b(calendar|meeting|agenda|invite|attendee)\b/.test(lower)) contentTypes.push('calendar');
   if (/\b(browser|website|url|visited|page|chrome|safari)\b/.test(lower)) contentTypes.push('browser_page');
   if (/\b(youtube|video|trailer|watching|watched|playing)\b/.test(lower)) contentTypes.push('browser_page', 'video');
@@ -879,7 +862,7 @@ function inferHardMetadataFilters(text, {
 
   return {
     app: apps?.length ? apps : null,
-    app_id: appIds.length ? safeUnique(appIds, 6) : null,
+    app_id: appIds.length ? safeUnique(appIds, 12) : null,
     source_types: sourceTypes?.length ? sourceTypes : null,
     data_source: dataSources.length ? safeUnique(dataSources, 4) : null,
     content_type: contentTypes.length ? safeUnique(contentTypes, 6) : null,
@@ -949,6 +932,11 @@ function buildDefaultRecentWindow(now = new Date()) {
 function inferWebGate(query) {
   const lower = safeText(query).toLowerCase();
   if (!lower.trim()) return { strategyMode: 'memory_only', webGateReason: 'No external or current signal detected.' };
+  const looksPersonalMemory = /\b(i|my|me|mine)\b/.test(lower)
+    || /\b(who have i|what did i|what was i|who did i|my contacts|my messages|my chats|my history|according to memory)\b/.test(lower);
+  if (looksPersonalMemory && !/\b(search the web|look up online|internet|public|news|latest)\b/.test(lower)) {
+    return { strategyMode: 'memory_only', webGateReason: 'Personal memory query; current-date wording should be handled by memory date filters, not web fallback.' };
+  }
   if (/\b(web|internet|online|search the web|look up|google|website|site|homepage|news|latest|current|today|public)\b/.test(lower)) {
     return { strategyMode: 'memory_then_web', webGateReason: 'The question explicitly asks for public or current web information if memory is insufficient.' };
   }
@@ -965,7 +953,8 @@ function inferRouterDecision(text, llmSourceMode, webGate) {
   const lower = safeText(text).toLowerCase();
   const looksPersonal = /\b(i|my|me|mine)\b/.test(lower);
   const asksLifeContext = /\b(what did i|did i|my study|my habits|follow up with|unfinished tasks|my notes|my history|my project|my work|my life)\b/.test(lower);
-  const asksCurrentWorld = /\b(latest|current|today|news|public|internet|web|look up|online|how does .* work|what is)\b/.test(lower);
+  const asksCurrentWorld = /\b(latest|current|news|public|internet|web|look up|online|how does .* work|what is)\b/.test(lower)
+    || (/\btoday\b/.test(lower) && !looksPersonal);
   const asksBlend = /\b(using my|based on my|with my notes|my context and|my history and|combine)\b/.test(lower);
   const asksSelfProfileWriting = /\b(write|draft|create|generate|make)\b.*\b(bio|biography|profile|about me|personal summary|intro|introduction)\b|\b(bio|biography|profile|about me|personal summary|intro|introduction)\b.*\b(me|myself|my)\b/.test(lower);
 
@@ -1068,7 +1057,8 @@ async function buildRetrievalThought({
     .concat(inferApps(mergedText))
     .map((item) => String(item || '').trim())
     .filter(Boolean)
-    .slice(0, 3);
+    .filter((item, index, arr) => arr.findIndex((other) => other.toLowerCase() === item.toLowerCase()) === index)
+    .slice(0, 8);
 
   const queryless = shouldUseQuerylessMode(query || mergedText, normalizedDateRange);
   const webGate = inferWebGate(query || mergedText);
@@ -1131,7 +1121,7 @@ async function buildRetrievalThought({
   }
   const metadataFilters = inferHardMetadataFilters(mergedText || query, {
     apps,
-    sourceTypes: hardSourceTypes || preferredSourceTypes || [],
+    sourceTypes: hardSourceTypes || [],
     lexicalTerms,
     candidateType
   });

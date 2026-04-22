@@ -28,14 +28,20 @@ class WeaveApp {
         this.voiceFinalTranscript = '';
         this.lastPlannerStatusAt = 0;
         this.desktopTimelineEntries = [];
+        this.showExtendedToday = localStorage.getItem('showExtendedToday') === 'true';
+        this.showPeopleSection = localStorage.getItem('showPeopleSection') !== 'false';
+        this.chatHistoryCollapsed = localStorage.getItem('chatHistoryCollapsed') !== 'false';
+        this.presenceMode = 'waiting';
         this.init();
     }
 
     async init() {
         this.cacheDom();
+        this.setPresenceMode('waiting');
         this.applyCompactMode();
         this.applyTheme(localStorage.getItem('theme') || 'light');
         this.updateGreeting();
+        this.setupMicroInteractions();
         this.setupNavigation();
         this.setupSuggestions();
         await this.setupChat();
@@ -62,7 +68,10 @@ class WeaveApp {
         window.electronAPI.onVoiceSessionUpdate?.((payload) => this.handleVoiceSessionUpdate(payload));
         window.electronAPI.onAutomationResult?.((payload) => this.handleAutomationResult(payload));
         await this.loadInitialData();
-        setInterval(() => this.updateChatSyncStatus(), 10000);
+        setInterval(() => {
+            if (document.hidden) return;
+            this.updateChatSyncStatus();
+        }, 60000);
     }
 
     cacheDom() {
@@ -73,6 +82,7 @@ class WeaveApp {
         this.refreshButton = document.getElementById('refresh-tasks-btn');
         this.chatMessages = document.getElementById('chat-messages');
         this.chatInput = document.getElementById('chat-input');
+        this.chatCharCounter = document.getElementById('chat-char-counter');
         this.sendChatButton = document.getElementById('send-chat-btn');
         this.chatHistoryList = document.getElementById('chat-history-list');
         this.chatThreadTitle = document.getElementById('chat-thread-title');
@@ -109,6 +119,16 @@ class WeaveApp {
         this.morningBriefList = document.getElementById('morning-brief-list');
         this.morningBriefContent = document.getElementById('morning-brief-content');
         this.manualGenerateSuggestionsButton = document.getElementById('manual-generate-suggestions-btn');
+        this.clearAllSuggestionsButton = document.getElementById('clear-all-suggestions-btn');
+        this.focusModeSelect = document.getElementById('focus-mode-select');
+        this.customizeTodayButton = document.getElementById('customize-today-btn');
+        this.todayWhisperPrompt = document.getElementById('today-whisper-prompt');
+        this.presenceState = document.getElementById('presence-state');
+        this.presenceSummary = document.getElementById('presence-summary');
+        this.presencePrimaryAction = document.getElementById('presence-primary-action');
+        this.toggleChatHistoryButton = document.getElementById('toggle-chat-history-btn');
+        this.chatView = document.getElementById('chat-view');
+        this.chatSyncStatus = document.getElementById('chat-sync-status');
         this.suggestionProviderSelect = document.getElementById('suggestion-llm-provider');
         this.suggestionModelInput = document.getElementById('suggestion-llm-model');
         this.suggestionBaseUrlInput = document.getElementById('suggestion-llm-base-url');
@@ -190,6 +210,8 @@ class WeaveApp {
     }
 
     setupSuggestions() {
+        this.setupTodayWhisperPrompt();
+
         this.filterChips.forEach((chip) => {
             chip.addEventListener('click', () => {
                 this.filterChips.forEach((item) => item.classList.remove('active'));
@@ -204,6 +226,26 @@ class WeaveApp {
         });
         this.manualGenerateSuggestionsButton?.addEventListener('click', async () => {
             await this.generateSuggestions({ replace: true, silent: false });
+        });
+        this.presencePrimaryAction?.addEventListener('click', async () => {
+            await this.generateSuggestions({ replace: true, silent: false });
+        });
+        this.clearAllSuggestionsButton?.addEventListener('click', async () => {
+            await this.clearAllSuggestions();
+        });
+        this.focusModeSelect?.addEventListener('change', async () => {
+            const value = this.focusModeSelect.value || 'all';
+            this.currentFilter = value;
+            this.filterChips.forEach((chip) => chip.classList.toggle('active', chip.dataset.filter === value));
+            this.showExtendedToday = false;
+            localStorage.setItem('showExtendedToday', 'false');
+            this.renderSuggestions();
+        });
+        this.customizeTodayButton?.addEventListener('click', () => {
+            this.showPeopleSection = !this.showPeopleSection;
+            localStorage.setItem('showPeopleSection', String(this.showPeopleSection));
+            this.showToast(this.showPeopleSection ? 'People section shown' : 'People section hidden');
+            this.renderSuggestions();
         });
 
         // Defensive delegation fallback: if cached references are missing or listeners fail,
@@ -222,6 +264,15 @@ class WeaveApp {
         });
 
         this.remindersList?.addEventListener('click', async (event) => {
+            const globalAction = event.target.closest('[data-action]')?.dataset.action;
+            if (globalAction === 'toggle-more') {
+                event.stopPropagation();
+                this.showExtendedToday = !this.showExtendedToday;
+                localStorage.setItem('showExtendedToday', String(this.showExtendedToday));
+                this.renderSuggestions();
+                return;
+            }
+
             const card = event.target.closest('.suggestion-card');
             if (!card) return;
 
@@ -304,7 +355,7 @@ class WeaveApp {
             this.suggestionAutoTimer = window.setInterval(() => {
                 if (document.hidden) return;
                 this.generateSuggestions({ replace: true, silent: true }).catch(() => {});
-            }, 30 * 60 * 1000);
+            }, 60 * 60 * 1000);
         }
 
         document.getElementById('morning-brief-close-btn')?.addEventListener('click', () => this.closeMorningBriefModal());
@@ -315,6 +366,17 @@ class WeaveApp {
 
     async generateSuggestions({ replace = true, silent = false } = {}) {
         if (!this.remindersList) return;
+        this.setPresenceMode('thinking');
+
+        const activeSuggestions = (Array.isArray(this.todos) ? this.todos : []).filter((todo) => !todo?.completed);
+        const remainingCapacity = Math.max(0, 7 - activeSuggestions.length);
+
+        if (remainingCapacity <= 0) {
+            if (!silent) this.showToast('You already have 7 active suggestions');
+            this.renderSuggestions();
+            this.setPresenceMode('waiting');
+            return;
+        }
 
         if (!silent) {
             this.remindersList.innerHTML = this.emptyStateHTML(
@@ -329,7 +391,10 @@ class WeaveApp {
             if (!window.electronAPI || typeof window.electronAPI.generateProactiveTodos !== 'function') {
                 throw new Error('electronAPI.generateProactiveTodos is not available');
             }
-            const generated = await window.electronAPI.generateProactiveTodos();
+            const generated = await window.electronAPI.generateProactiveTodos({
+                maxNewSuggestions: remainingCapacity,
+                activeSuggestionCount: activeSuggestions.length
+            });
             console.debug('[Renderer] generateSuggestions received', Array.isArray(generated) ? `${generated.length} items` : typeof generated);
             const normalized = this.normalizeTodos(generated);
 
@@ -342,40 +407,66 @@ class WeaveApp {
 
             await window.electronAPI.savePersistentTodos(this.todos);
             this.renderSuggestions();
+            this.setPresenceMode('suggesting');
         } catch (error) {
             console.error('Failed to generate suggestions:', error);
             this.showToast('Suggestion generation failed');
             this.renderSuggestions();
+            this.setPresenceMode('waiting');
+        }
+    }
+
+    async clearAllSuggestions() {
+        try {
+            this.todos = [];
+            this.expandedCards.clear();
+            await window.electronAPI.savePersistentTodos([]);
+            await window.electronAPI.clearSuggestions?.();
+            this.renderSuggestions();
+            this.showToast('All suggestions deleted');
+        } catch (error) {
+            console.error('Failed to clear all suggestions:', error);
+            this.showToast('Failed to delete suggestions');
         }
     }
 
     normalizeTodos(items) {
+        const compact = (value, limit = 90) => {
+            const text = String(value || '').replace(/\s+/g, ' ').trim();
+            if (!text) return '';
+            return text.length > limit ? `${text.slice(0, Math.max(0, limit - 1)).trim()}…` : text;
+        };
         const normalized = (Array.isArray(items) ? items : [])
             .map((item, index) => {
                 const category = this.normalizeCategory(item.category);
                 const plan = Array.isArray(item.plan)
-                    ? item.plan.filter(Boolean).slice(0, 3)
+                    ? item.plan.filter(Boolean).map((step) => compact(step, 42)).slice(0, 2)
                     : [];
-                const suggestedActions = Array.isArray(item.suggested_actions) ? item.suggested_actions.slice(0, 3) : [];
+                const suggestedActions = Array.isArray(item.suggested_actions)
+                    ? item.suggested_actions.slice(0, 1).map((action) => ({
+                        ...action,
+                        label: compact(action?.label, 46) || 'Do it'
+                    }))
+                    : [];
                 const mappedActionPlan = suggestedActions.map((action, i) => ({
                     step: action?.label || `Action ${i + 1}`,
                     target: action?.type || 'browser_operator',
                     url: action?.payload?.url || null
                 }));
                 const primaryAction = item.primary_action || suggestedActions.find((action) => this.isConcreteActionLabel(action?.label));
-                const whyNow = (item.display?.summary || item.trigger_summary || item.reason || item.description || item.body || '').trim();
+                const whyNow = compact(item.display?.summary || item.trigger_summary || item.reason || item.description || item.body || '', 88);
                 const evidenceLine = Array.isArray(item.epistemic_trace) && item.epistemic_trace.length
-                    ? `${item.epistemic_trace[0].source || 'Source'}: ${item.epistemic_trace[0].text || ''}`.trim()
+                    ? compact(`${item.epistemic_trace[0].source || 'Source'}: ${item.epistemic_trace[0].text || ''}`, 86)
                     : '';
                 return {
                     id: item.id || `suggestion_${Date.now()}_${index}`,
-                    title: (item.title || 'Untitled suggestion').trim(),
-                    description: (item.description || item.body || whyNow || 'No extra context yet.').trim(),
-                    intent: (item.intent || item.description || '').trim(),
-                    reason: (item.reason || item.description || '').trim(),
+                    title: compact(item.title || 'Untitled suggestion', 62),
+                    description: compact(item.description || item.body || whyNow || 'No extra context yet.', 88),
+                    intent: compact(item.intent || item.description || '', 88),
+                    reason: compact(item.reason || item.description || '', 88),
                     why_now: whyNow,
                     evidence_line: evidenceLine,
-                    trigger_summary: (item.trigger_summary || item.triggerSummary || '').trim(),
+                    trigger_summary: compact(item.trigger_summary || item.triggerSummary || '', 88),
                     plan,
                     confidence: Number(item.confidence || 0),
                     evidence: Array.isArray(item.evidence) ? item.evidence : [],
@@ -398,18 +489,18 @@ class WeaveApp {
                     epistemic_trace: Array.isArray(item.epistemic_trace) ? item.epistemic_trace : [],
                     execution_mode: item.execution_mode || ((item.ai_doable || item.assignee === 'ai') ? 'draft_or_execute' : 'manual'),
                     target_surface: item.target_surface || null,
-                    expected_benefit: (item.expected_benefit || '').trim(),
-                    expected_impact: (item.expected_impact || item.expected_benefit || '').trim(),
+                    expected_benefit: compact(item.expected_benefit || '', 88),
+                    expected_impact: compact(item.expected_impact || item.expected_benefit || '', 88),
                     prerequisites: Array.isArray(item.prerequisites) ? item.prerequisites : [],
-                    step_plan: Array.isArray(item.step_plan) ? item.step_plan.filter(Boolean).slice(0, 4) : plan,
+                    step_plan: Array.isArray(item.step_plan) ? item.step_plan.filter(Boolean).map((step) => compact(step, 42)).slice(0, 2) : plan,
                     snoozedUntil: item.snoozedUntil || 0,
                     study_subject: (item.study_subject || '').trim(),
                     risk_level: (item.risk_level || '').trim().toLowerCase(),
                     evidence_path: Array.isArray(item.evidence_path) ? item.evidence_path : [],
-                    recommended_action: (item.recommended_action || '').trim(),
+                    recommended_action: compact(item.recommended_action || '', 46),
                     suggestion_group: (item.suggestion_group || '').trim().toLowerCase(),
                     opportunity_type: (item.opportunity_type || '').trim().toLowerCase(),
-                    time_anchor: (item.time_anchor || '').trim(),
+                    time_anchor: compact(item.time_anchor || '', 36),
                     reason_codes: Array.isArray(item.reason_codes) ? item.reason_codes : [],
                     candidate_score: Number(item.candidate_score || 0),
                     action_plan: Array.isArray(item.action_plan) && item.action_plan.length
@@ -444,7 +535,7 @@ class WeaveApp {
                 if (priorityDelta !== 0) return priorityDelta;
                 return (b.createdAt || 0) - (a.createdAt || 0);
             })
-            .slice(0, 10);
+            .slice(0, 7);
     }
 
     renderSuggestions() {
@@ -452,129 +543,107 @@ class WeaveApp {
 
         const visibleTodos = this.getVisibleTodos();
         const briefBanner = this.renderMorningBriefBanner();
+        this.remindersList.classList.remove('today-dissolve');
+        void this.remindersList.offsetWidth;
+        this.remindersList.classList.add('today-dissolve');
+        this.updatePresenceSummary(visibleTodos);
 
         if (!visibleTodos.length) {
             this.remindersList.innerHTML = briefBanner + this.emptyStateHTML(
                 'lightbulb',
-                'No suggestions yet',
-                'Tap refresh to generate AI suggestions based on your current context.'
+                "You're all caught up",
+                'Ask Weave what deserves attention, or enjoy the quiet.'
             );
+            this.setPresenceMode('waiting');
             return;
         }
 
-        const grouped = {
-            now: visibleTodos.filter((todo) => (todo.suggestion_group || 'next') === 'now'),
-            next: visibleTodos.filter((todo) => !todo.suggestion_group || todo.suggestion_group === 'next'),
-            risk: visibleTodos.filter((todo) => todo.suggestion_group === 'risk')
-        };
+        const peopleTodos = visibleTodos.filter((todo) => ['followup', 'relationship_intelligence'].includes(todo.category));
+        const taskTodos = visibleTodos.filter((todo) => !['followup', 'relationship_intelligence'].includes(todo.category));
+        const primaryNow = taskTodos.slice(0, 1);
+        const supportingNow = taskTodos.slice(1, 3);
+        const extraTasks = taskTodos.slice(3, 7);
+        const peoplePreview = peopleTodos.slice(0, 2);
+        this.setPresenceMode('suggesting');
 
-        const renderGroup = (title, key) => {
-            const items = grouped[key] || [];
+        const section = (items, offset = 0) => {
             if (!items.length) return '';
             return `
-                <div class="study-suggestion-group">
-                    <div class="study-suggestion-group-title">${this.escapeHtml(title)}</div>
-                    ${items.map((todo, index) => this.renderSuggestionCard(todo, index)).join('')}
+                <div class="study-suggestion-group conversation-stream">
+                    ${items.map((todo, index) => this.renderSuggestionCard(todo, index + offset)).join('')}
                 </div>
             `;
         };
 
-        this.remindersList.innerHTML = briefBanner + [
-            renderGroup('Now', 'now'),
-            renderGroup('Next', 'next'),
-            renderGroup('Risk Alerts', 'risk')
+        const moreContent = [
+            section(supportingNow, 1),
+            section(extraTasks, 3),
+            this.showPeopleSection ? section(peoplePreview, 6) : ''
         ].join('');
+
+        this.remindersList.innerHTML = `
+            ${briefBanner}
+            ${section(primaryNow, 0)}
+            ${moreContent && !this.showExtendedToday ? '<div class="today-more-wrap"><button class="pill-btn" type="button" data-action="toggle-more">Show more</button></div>' : ''}
+            ${this.showExtendedToday ? `<div class="today-more-block">${moreContent}<div class="today-more-wrap"><button class="pill-btn" type="button" data-action="toggle-more">Show less</button></div></div>` : ''}
+        `;
     }
 
     renderSuggestionCard(todo, index = 0) {
         const expanded = this.expandedCards.has(todo.id);
         const suggestionCategory = todo.suggestion_category || todo.category || 'work';
         const isStudy = suggestionCategory === 'study';
-        const icon = isStudy ? 'school' : this.categoryIcon(todo.category);
         // ai_doable + non-manual = something the automation layer can actually execute
         const aiCanAutomate = Boolean(todo.ai_doable && todo.action_type && todo.action_type !== 'manual_next_step');
         const evidencePath = Array.isArray(todo.evidence_path) && todo.evidence_path.length
             ? todo.evidence_path
             : (Array.isArray(todo.source_edge_paths) ? todo.source_edge_paths : []);
-        const evidenceSummary = evidencePath.slice(0, 3).map((edge) => {
+        const compact = (value, limit = 90) => {
+            const text = String(value || '').replace(/\s+/g, ' ').trim();
+            return text.length > limit ? `${text.slice(0, Math.max(0, limit - 1)).trim()}…` : text;
+        };
+        const evidenceSummary = evidencePath.slice(0, 1).map((edge) => {
             const from = edge?.from || '?';
             const to = edge?.to || '?';
             const relation = edge?.relation || 'links';
             return `${from} -> ${to} (${relation})`;
         }).join(' • ');
         const riskLabel = todo.risk_level ? `Risk: ${todo.risk_level}` : '';
-        const bundleHeadline = todo.display?.headline || '';
         const bundleSummary = todo.display?.summary || '';
-        const bundleInsight = todo.display?.insight || '';
         const primaryAction = todo.primary_action || (Array.isArray(todo.suggested_actions) ? todo.suggested_actions.find((a) => this.isConcreteActionLabel(a?.label)) : null);
         // Prefer the most specific one-liner: reason > trigger_summary > display.summary
         const rawSubtitle = todo.reason || todo.trigger_summary || bundleSummary || todo.why_now || todo.description || '';
-        const whyNowCompact = rawSubtitle.length > 100 ? rawSubtitle.slice(0, 97) + '…' : rawSubtitle;
+        const whyNowCompact = compact(rawSubtitle, 88);
         const evidenceCompact = todo.evidence_line || (Array.isArray(todo.epistemic_trace) && todo.epistemic_trace.length
-            ? `${todo.epistemic_trace[0].source || 'Source'}: ${todo.epistemic_trace[0].text || ''}`
+            ? compact(`${todo.epistemic_trace[0].source || 'Source'}: ${todo.epistemic_trace[0].text || ''}`, 86)
             : '');
         const receiptSummary = Array.isArray(todo.epistemic_trace) && todo.epistemic_trace.length
-            ? todo.epistemic_trace.slice(0, 3).map((r) => `${r.source || 'Source'}: ${r.text || ''}`).join(' • ')
+            ? todo.epistemic_trace.slice(0, 1).map((r) => compact(`${r.source || 'Source'}: ${r.text || ''}`, 86)).join(' • ')
             : '';
-        const suggestedActionLabels = Array.isArray(todo.suggested_actions) && todo.suggested_actions.length
-            ? todo.suggested_actions
-                .slice(0, 3)
-                .map((a) => a.label)
-                .filter((label) => this.isConcreteActionLabel(label))
-            : [];
-        const providerLabel = String(todo.provider || '').toLowerCase();
-        const showDeepSeek = providerLabel === 'deepseek';
-        const showAI = Boolean(todo.ai_generated || todo.ai_doable || todo.ai_draft || showDeepSeek);
-
         return `
-                <article class="suggestion-card liquid-card${isStudy ? ' suggestion-study' : ''}" data-id="${this.escapeHtml(todo.id)}" tabindex="0" style="animation-delay:${index * 40}ms;">
+                <article class="suggestion-card conversation-entry${isStudy ? ' suggestion-study' : ''}" data-id="${this.escapeHtml(todo.id)}" tabindex="0" style="animation-delay:${index * 40}ms;">
                     <div class="suggestion-header">
-                        <div class="suggestion-icon ${isStudy ? 'study' : this.escapeHtml(todo.category)}">
-                            <span class="material-symbols-outlined">${icon}</span>
-                        </div>
                         <div class="suggestion-content">
-                            <div class="suggestion-title-row">
-                                <span class="suggestion-type-label">${isStudy ? 'study' : this.escapeHtml(todo.category || 'work')}</span>
-                                ${showAI ? '<span class="ai-source-badge ai">AI</span>' : ''}
-                                ${showDeepSeek ? '<span class="ai-source-badge deepseek">DeepSeek</span>' : ''}
-                                ${aiCanAutomate ? '<span class="suggestion-auto-badge">AI can automate</span>' : ''}
-                            </div>
                             <div class="suggestion-title">${this.escapeHtml(todo.title)}</div>
                             <div class="suggestion-description">${this.escapeHtml(whyNowCompact)}</div>
                             ${evidenceCompact ? `<div class="suggestion-context">${this.escapeHtml(evidenceCompact)}</div>` : ''}
-                            ${primaryAction ? `<div class="suggestion-context"><strong>→</strong> ${this.escapeHtml(primaryAction.label)}</div>` : ''}
+                            ${primaryAction ? `<div class="suggestion-context">${this.escapeHtml(primaryAction.label)}</div>` : ''}
+                            ${aiCanAutomate ? '<div class="suggestion-context suggestion-subtle-note">Can be automated when you want.</div>' : ''}
+                            ${!expanded ? '<div class="suggestion-primary-wrap"><button class="presence-primary-action" type="button" data-action="info">Start here</button></div>' : ''}
                         </div>
                     </div>
                     ${expanded ? `
-                        <div class="suggestion-details" style="display:block;">
-                            ${todo.trigger_summary ? `<div class="suggestion-why"><span>Trigger</span>${this.escapeHtml(todo.trigger_summary)}</div>` : ''}
-                            ${todo.intent ? `<div class="suggestion-goal"><span>Intent</span>${this.escapeHtml(todo.intent)}</div>` : ''}
-                            ${bundleHeadline ? `<div class="suggestion-goal"><span>Bundle</span>${this.escapeHtml(bundleHeadline)}</div>` : ''}
-                            ${bundleSummary ? `<div class="suggestion-why"><span>Context</span>${this.escapeHtml(bundleSummary)}</div>` : ''}
-                            ${bundleInsight ? `<div class="suggestion-goal"><span>Insight</span>${this.escapeHtml(bundleInsight)}</div>` : ''}
-                            ${todo.reason ? `<div class="suggestion-why"><span>Reason</span>${this.escapeHtml(todo.reason)}</div>` : ''}
-                            ${receiptSummary ? `<div class="suggestion-why"><span>Receipts</span>${this.escapeHtml(receiptSummary)}</div>` : ''}
-                            ${primaryAction ? `<div class="suggestion-goal"><span>Primary CTA</span>${this.escapeHtml(primaryAction.label)}</div>` : ''}
-                            ${suggestedActionLabels.length > 1 ? `<div class="suggestion-goal"><span>Other actions</span>${this.escapeHtml(suggestedActionLabels.slice(1).join(' • '))}</div>` : ''}
-                            ${todo.recommended_action ? `<div class="suggestion-goal"><span>Recommended action</span>${this.escapeHtml(todo.recommended_action)}</div>` : ''}
-                            ${todo.opportunity_type ? `<div class="suggestion-goal"><span>Opportunity</span>${this.escapeHtml(todo.opportunity_type.replace(/_/g, ' '))}</div>` : ''}
-                            ${todo.time_anchor ? `<div class="suggestion-why"><span>Time anchor</span>${this.escapeHtml(todo.time_anchor)}</div>` : ''}
+                        <div class="suggestion-details suggestion-details-quick" style="display:block;">
+                            ${primaryAction ? `<div class="suggestion-goal"><span>Do</span>${this.escapeHtml(primaryAction.label)}</div>` : ''}
+                            ${todo.reason ? `<div class="suggestion-why"><span>Why</span>${this.escapeHtml(todo.reason)}</div>` : ''}
+                            ${todo.time_anchor ? `<div class="suggestion-why"><span>When</span>${this.escapeHtml(todo.time_anchor)}</div>` : ''}
                             ${todo.step_plan.length ? `<div class="suggestion-steps">${todo.step_plan.map((step, stepIndex) => `<div class="suggestion-step">${stepIndex + 1}. ${this.escapeHtml(step)}</div>`).join('')}</div>` : ''}
-                            ${todo.expected_benefit ? `<div class="suggestion-goal"><span>Expected benefit</span>${this.escapeHtml(todo.expected_benefit)}</div>` : ''}
-                            ${todo.expected_impact ? `<div class="suggestion-goal"><span>Expected impact</span>${this.escapeHtml(todo.expected_impact)}</div>` : ''}
-                            ${todo.prerequisites?.length ? `<div class="suggestion-why"><span>Prerequisites</span>${this.escapeHtml(todo.prerequisites.join(' • '))}</div>` : ''}
-                            ${evidenceSummary ? `<div class="suggestion-why"><span>Why this suggestion?</span>${this.escapeHtml(evidenceSummary)}</div>` : ''}
-                            ${todo.ai_draft ? `<div class="reminder-description">${this.escapeHtml(todo.ai_draft)}</div>` : ''}
-                            ${todo.source_node_ids?.length ? `<div class="suggestion-goal"><span>Sources</span>${this.escapeHtml(todo.source_node_ids.slice(0, 4).join(', '))}</div>` : ''}
-                            ${todo.source_edge_paths?.length ? `<div class="suggestion-why"><span>Trace</span>${this.escapeHtml(todo.source_edge_paths.slice(0, 3).map((edge) => `${edge.from} -> ${edge.to} (${edge.relation})`).join(' • '))}</div>` : ''}
+                            ${receiptSummary ? `<div class="suggestion-why"><span>Receipt</span>${this.escapeHtml(receiptSummary)}</div>` : ''}
                             <div class="suggestion-meta" style="margin-top:12px;">
                                 <span>${this.escapeHtml(this.prettyCategory(todo.category))}</span>
                                 <span>${this.escapeHtml(this.prettyPriority(todo.priority))} priority</span>
-                                ${todo.confidence ? `<span>${this.escapeHtml(this.formatConfidence(todo.confidence))}</span>` : ''}
-                                ${todo.study_subject ? `<span>${this.escapeHtml(todo.study_subject)}</span>` : ''}
                                 ${riskLabel ? `<span>${this.escapeHtml(riskLabel)}</span>` : ''}
                                 <span>${this.escapeHtml(todo.ai_doable ? 'AI can do' : 'Manual')}</span>
-                                ${todo.action_type ? `<span>${this.escapeHtml(String(todo.action_type).replace(/_/g, ' '))}</span>` : ''}
                             </div>
                             <div class="reminder-actions" style="opacity:1; margin-top:16px;">
                                 ${todo.source === 'morning-brief'
@@ -593,22 +662,10 @@ class WeaveApp {
         if (!latest) return '';
         const subtitle = (latest.priorities || []).slice(0, 3).map((p) => p.title).filter(Boolean).join(' • ');
         return `
-            <article class="suggestion-card liquid-card" data-id="brief_banner" tabindex="0" style="margin-bottom:12px;">
-                <div class="suggestion-header">
-                    <div class="suggestion-icon work">
-                        <span class="material-symbols-outlined">wb_sunny</span>
-                    </div>
-                    <div class="suggestion-content">
-                        <div class="suggestion-title-row" style="margin-bottom: 6px;">
-                            <span class="suggestion-type-label">brief</span>
-                            <span class="ai-source-badge ai">AI</span>
-                            <span class="ai-source-badge deepseek">DeepSeek</span>
-                        </div>
-                        <div class="suggestion-title">Morning Brief • ${this.escapeHtml(latest.dateLabel || '')}</div>
-                        <div class="suggestion-description">${this.escapeHtml(subtitle || 'Your daily 5-minute kickoff is ready.')}</div>
-                    </div>
-                    <button class="ghost-button" type="button" data-action="brief-open">Open</button>
-                </div>
+            <article class="morning-brief-flow" data-id="brief_banner" tabindex="0">
+                <div class="morning-brief-date">${this.escapeHtml(latest.dateLabel || '')}</div>
+                <p class="morning-brief-text">${this.escapeHtml(subtitle || 'Since yesterday: one short snapshot of what matters first.')}</p>
+                <button class="ghost-button" type="button" data-action="brief-open">Since yesterday</button>
             </article>
         `;
     }
@@ -623,6 +680,11 @@ class WeaveApp {
     }
 
     async completeSuggestion(taskId) {
+        const card = this.remindersList?.querySelector(`.suggestion-card[data-id="${taskId}"]`);
+        if (card) {
+            card.classList.add('completion-flash');
+            await new Promise((resolve) => setTimeout(resolve, 220));
+        }
         try {
             await window.electronAPI.completeTask(taskId);
         } catch (_) {}
@@ -641,7 +703,7 @@ class WeaveApp {
             await this.generateSuggestions({ replace: true, silent: true });
         }
 
-        this.showToast('Task completed');
+        this.showToast('Added to your network memory');
     }
 
     async removeSuggestion(taskId) {
@@ -795,6 +857,8 @@ const filtered = this.todos.filter((todo) => {
         if (todo.completed) return false;
         if (todo.snoozedUntil && Number(todo.snoozedUntil) > now) return false;
         if (this.currentFilter === 'all') return true;
+        if (this.currentFilter === 'focus') return ['work', 'creative', 'study'].includes(todo.category);
+        if (this.currentFilter === 'people') return ['followup', 'relationship_intelligence'].includes(todo.category);
         if (this.currentFilter === 'followups') return todo.category === 'followup';
         return todo.category === this.currentFilter;
     });
@@ -991,9 +1055,11 @@ const filtered = this.todos.filter((todo) => {
             if (isSyncing) {
                 statusEl.classList.add('syncing');
                 if (textEl) textEl.textContent = 'Syncing memory...';
+                this.setPresenceMode('remembering');
             } else {
                 statusEl.classList.remove('syncing');
-                if (textEl) textEl.textContent = 'Memory synced';
+                if (textEl) textEl.textContent = 'Memory updated';
+                this.setPresenceMode('waiting');
             }
         } catch (e) {
             console.warn('Failed to update sync status:', e);
@@ -1004,9 +1070,49 @@ const filtered = this.todos.filter((todo) => {
         this.chatSessions = await this.loadChatSessions();
         const sorted = [...this.chatSessions].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
         this.activeChatId = sorted[0]?.id || null;
+        this.chatView?.classList.toggle('chat-history-collapsed', this.chatHistoryCollapsed);
+        if (this.toggleChatHistoryButton) {
+            this.toggleChatHistoryButton.textContent = this.chatHistoryCollapsed ? 'Show threads' : 'Hide threads';
+        }
         this.newChatButton?.addEventListener('click', () => this.startNewChatDraft());
+        this.toggleChatHistoryButton?.addEventListener('click', () => {
+            this.chatHistoryCollapsed = !this.chatHistoryCollapsed;
+            localStorage.setItem('chatHistoryCollapsed', String(this.chatHistoryCollapsed));
+            this.chatView?.classList.toggle('chat-history-collapsed', this.chatHistoryCollapsed);
+            if (this.toggleChatHistoryButton) this.toggleChatHistoryButton.textContent = this.chatHistoryCollapsed ? 'Show threads' : 'Hide threads';
+        });
+        this.chatSyncStatus?.addEventListener('click', () => {
+            this.switchView('library-view');
+            this.showToast('Opening what Weave learned');
+        });
 
         this.sendChatButton?.addEventListener('click', () => this.sendChatMessage());
+
+        this.chatMessages?.addEventListener('click', async (event) => {
+            const toggle = event.target.closest('[data-thinking-trace-toggle]');
+            if (toggle) {
+                const panel = toggle.closest('.thinking-panel');
+                if (!panel) return;
+                const expanded = panel.dataset.expanded !== 'true';
+                panel.dataset.expanded = String(expanded);
+                toggle.setAttribute('aria-expanded', String(expanded));
+                const chevron = panel.querySelector('.thinking-chevron');
+                if (chevron) chevron.textContent = expanded ? '▾' : '▸';
+                return;
+            }
+
+            const copy = event.target.closest('[data-thinking-trace-copy]');
+            if (copy) {
+                try {
+                    await navigator.clipboard?.writeText(copy.dataset.thinkingTraceCopy || '');
+                    copy.textContent = 'Copied';
+                    setTimeout(() => { copy.textContent = 'Copy thinking trace'; }, 1500);
+                } catch (_) {
+                    copy.textContent = 'Copy failed';
+                    setTimeout(() => { copy.textContent = 'Copy thinking trace'; }, 1500);
+                }
+            }
+        });
 
         this.chatInput?.addEventListener('keydown', (event) => {
             if (event.key === 'Enter' && !event.shiftKey) {
@@ -1018,7 +1124,10 @@ const filtered = this.todos.filter((todo) => {
         this.chatInput?.addEventListener('input', () => {
             this.chatInput.style.height = 'auto';
             this.chatInput.style.height = `${Math.min(this.chatInput.scrollHeight, 120)}px`;
+            this.updateChatCharacterCounter();
         });
+
+        this.startChatPromptRotation();
 
         this.renderChatHistory();
         this.renderActiveChat();
@@ -1028,6 +1137,7 @@ const filtered = this.todos.filter((todo) => {
     async sendChatMessage() {
         const message = this.chatInput?.value.trim();
         if (!message) return;
+        this.setPresenceMode('thinking');
 
         let chat = this.getActiveChat();
         if (!chat) {
@@ -1047,6 +1157,7 @@ const filtered = this.todos.filter((todo) => {
         this.updateChatSyncStatus();
         this.chatInput.value = '';
         this.chatInput.style.height = '44px';
+        this.updateChatCharacterCounter();
 
         const thinkingPanel = this.appendThinkingPanel();
         this.triggerSearchAnimation(true);
@@ -1067,6 +1178,7 @@ const filtered = this.todos.filter((todo) => {
             this.triggerSearchAnimation(false);
             this.finalizeThinkingPanel(thinkingPanel, response);
             await this.typeAssistantResponse(response, { includeThinkingTrace: false });
+            this.setPresenceMode('waiting');
         } catch (error) {
             console.error('Chat failed:', error);
             this.triggerSearchAnimation(false);
@@ -1081,6 +1193,7 @@ const filtered = this.todos.filter((todo) => {
                 }
             });
             await this.typeAssistantResponse('I ran into a problem while preparing that answer.', { includeThinkingTrace: false });
+            this.setPresenceMode('waiting');
         }
     }
 
@@ -1182,27 +1295,482 @@ Would you like me to continue with more detail?` : content;
 
     appendThinkingPanel() {
         const wrapper = document.createElement("div");
-        const bootstrapStages = [
-            {
-                step: 'routing',
-                status: 'started',
-                label: 'Routing',
-                detail: 'Preparing the retrieval pipeline.'
-            }
-        ];
         wrapper.innerHTML = `
-            <div class="thinking-panel expanded">
-                <div class="thinking-live-label">Live retrieval pipeline</div>
-                <div class="thinking-step-label">Preparing retrieval...</div>
-                <div class="thinking-timeline">${this.renderThinkingTimeline(bootstrapStages)}</div>
-                <div class="thinking-final-card"></div>
+            <div class="thinking-panel live" data-expanded="false">
+                <button class="thinking-live-header" type="button" aria-expanded="false">
+                    <span class="thinking-chevron">▸</span>
+                    <span class="thinking-live-title">Thinking</span>
+                    <span class="thinking-live-stage">Analyzing your question</span>
+                    <span class="thinking-live-elapsed">0.0s</span>
+                </button>
+                <div class="thinking-progress" aria-label="Thinking progress">
+                    <div class="thinking-bar" style="width: 0%"></div>
+                    <span class="thinking-progress-label">0%</span>
+                </div>
+                <div class="thinking-live-content">
+                    <div class="thinking-stage-list"></div>
+                    <div class="thinking-live-actions">
+                        <button class="thinking-copy-trace" type="button">Copy thinking trace</button>
+                    </div>
+                </div>
             </div>
         `;
         const panel = wrapper.firstElementChild;
-        panel.__thinkingStages = bootstrapStages;
+        const startedAt = Date.now();
+        const initialStages = [
+            {
+                id: 'query_analysis',
+                step: 'query_analysis',
+                title: 'Query Analysis',
+                label: 'Analyzing your question',
+                status: 'in_progress',
+                detail: 'Intent, time scope, source mode, and retrieval plan are being prepared.',
+                counts: {},
+                preview_items: [],
+                progress: 8,
+                startedAt,
+                updatedAt: startedAt,
+                endedAt: null,
+                durationMs: 0,
+                order: 1
+            },
+            {
+                id: 'hybrid_retrieval',
+                step: 'hybrid_retrieval',
+                title: 'Hybrid Retrieval',
+                label: 'Hybrid Retrieval',
+                status: 'pending',
+                detail: 'Awaiting query analysis. Will apply metadata filters, vector search, lexical search, and graph expansion.',
+                counts: {},
+                preview_items: [],
+                progress: 0,
+                startedAt: null,
+                updatedAt: startedAt,
+                endedAt: null,
+                durationMs: 0,
+                order: 2
+            },
+            {
+                id: 'reranking',
+                step: 'reranking',
+                title: 'Reranking & Assembly',
+                label: 'Reranking & Assembly',
+                status: 'pending',
+                detail: 'Awaiting retrieval payload. Will assemble the most useful memory evidence.',
+                counts: {},
+                preview_items: [],
+                progress: 0,
+                startedAt: null,
+                updatedAt: startedAt,
+                endedAt: null,
+                durationMs: 0,
+                order: 3
+            },
+            {
+                id: 'synthesis',
+                step: 'synthesis',
+                title: 'Synthesis',
+                label: 'Synthesis',
+                status: 'pending',
+                detail: 'Awaiting evidence. Will generate the final answer from grounded context.',
+                counts: {},
+                preview_items: [],
+                progress: 0,
+                startedAt: null,
+                updatedAt: startedAt,
+                endedAt: null,
+                durationMs: 0,
+                order: 4
+            }
+        ];
+        panel.__thinkingState = {
+            stage: 'query_analysis',
+            progress: 0,
+            label: 'Analyzing your question',
+            startedAt,
+            completedAt: null,
+            expanded: false,
+            stages: initialStages,
+            stageMap: new Map(initialStages.map((stage) => [stage.id, stage])),
+            trace: []
+        };
+        panel.dataset.expanded = 'false';
+        const toggleExpanded = () => {
+            const state = panel.__thinkingState;
+            state.expanded = !state.expanded;
+            panel.__thinkingState = state;
+            panel.dataset.expanded = String(state.expanded);
+            const header = panel.querySelector('.thinking-live-header');
+            if (header) header.setAttribute('aria-expanded', String(state.expanded));
+            this.renderLiveThinkingPanel(panel);
+        };
+        panel.querySelector('.thinking-live-header')?.addEventListener('click', toggleExpanded);
+        panel.querySelector('.thinking-copy-trace')?.addEventListener('click', async (event) => {
+            const button = event.currentTarget;
+            const state = panel.__thinkingState || {};
+            const payload = JSON.stringify({
+                total_ms: Math.max(0, (state.completedAt || Date.now()) - (state.startedAt || Date.now())),
+                stages: state.stages || [],
+                trace: state.trace || []
+            }, null, 2);
+            try {
+                await navigator.clipboard?.writeText(payload);
+                button.textContent = 'Copied';
+                setTimeout(() => { button.textContent = 'Copy thinking trace'; }, 1500);
+            } catch (_) {
+                button.textContent = 'Copy failed';
+                setTimeout(() => { button.textContent = 'Copy thinking trace'; }, 1500);
+            }
+        });
+        panel.__thinkingTimer = setInterval(() => {
+            if (document.hidden) return;
+            this.renderLiveThinkingPanel(panel);
+        }, 250);
         this.chatMessages.appendChild(panel);
+        this.renderLiveThinkingPanel(panel);
         this.scrollChatToBottom();
         return panel;
+    }
+
+    getThinkingStageConfig(stage = '') {
+        const key = String(stage || 'query_analysis').toLowerCase();
+        const configs = {
+            query_analysis: { title: 'Query Analysis', progress: 15, order: 1 },
+            hybrid_retrieval: { title: 'Hybrid Retrieval', progress: 65, order: 2 },
+            reranking: { title: 'Reranking & Assembly', progress: 80, order: 3 },
+            synthesis: { title: 'Synthesis', progress: 95, order: 4 },
+            complete: { title: 'Complete', progress: 100, order: 5 }
+        };
+        return configs[key] || { title: key.replace(/_/g, ' '), progress: 50, order: 9 };
+    }
+
+    canonicalThinkingStage(raw = {}, fallbackState = {}) {
+        if (!raw || typeof raw !== 'object') return fallbackState.stage || 'query_analysis';
+        if (raw.type === 'thinking_stage') {
+            return String(raw.stage || fallbackState.stage || 'query_analysis');
+        }
+        const step = String(raw.step || '').toLowerCase();
+        if (['routing', 'query_generation', 'planning'].includes(step)) return 'query_analysis';
+        if (['memory_search', 'search_stage', 'vector_search_started', 'candidates_loaded', 'metadata_prefilter'].includes(step)) return 'hybrid_retrieval';
+        if (['seed_selection', 'edge_expansion', 'ranking', 'direct_memory_fallback', 'direct_raw_event_lookup', 'actionable_todo_generation'].includes(step)) return 'reranking';
+        if (['judging', 'web_search', 'synthesis', 'reflecting'].includes(step)) return 'synthesis';
+        if (step === 'memory_writeback') return 'complete';
+        return fallbackState.stage || 'query_analysis';
+    }
+
+    mapThinkingStage(raw = {}, fallbackState = {}) {
+        if (!raw || typeof raw !== 'object') return null;
+
+        if (raw.type === 'thinking_stage') {
+            const progress = Number.isFinite(Number(raw.progress))
+                ? Math.max(5, Math.min(100, Number(raw.progress)))
+                : (Number(fallbackState.progress) || 15);
+            return {
+                stage: String(raw.stage || fallbackState.stage || 'query_analysis'),
+                progress,
+                label: String(raw.label || fallbackState.label || 'Thinking...').trim() || 'Thinking...'
+            };
+        }
+
+        const step = String(raw.step || '').toLowerCase();
+        if (!step) return null;
+
+        if (['routing', 'query_generation', 'planning'].includes(step)) {
+            return { stage: 'query_analysis', progress: 20, label: 'Analyzing your question' };
+        }
+        if (['memory_search', 'search_stage', 'vector_search_started', 'candidates_loaded', 'metadata_prefilter'].includes(step)) {
+            return { stage: 'hybrid_retrieval', progress: 60, label: 'Searching your memory' };
+        }
+        if (['seed_selection', 'edge_expansion', 'ranking', 'direct_memory_fallback', 'direct_raw_event_lookup', 'actionable_todo_generation'].includes(step)) {
+            return { stage: 'reranking', progress: 80, label: 'Organizing results' };
+        }
+        if (['judging', 'web_search', 'synthesis', 'reflecting'].includes(step)) {
+            return { stage: 'synthesis', progress: 95, label: 'Generating response' };
+        }
+        if (step === 'memory_writeback') {
+            return { stage: 'complete', progress: 100, label: 'Done' };
+        }
+        return null;
+    }
+
+    formatThinkingDuration(ms = 0) {
+        const value = Math.max(0, Number(ms || 0));
+        if (value < 1000) return `${Math.round(value)}ms`;
+        return `${(value / 1000).toFixed(value < 10000 ? 1 : 0)}s`;
+    }
+
+    statusRank(status = '') {
+        const key = String(status || '').toLowerCase();
+        if (['completed', 'complete', 'done'].includes(key)) return 3;
+        if (['retry', 'in_progress', 'started', 'running'].includes(key)) return 2;
+        if (['pending', 'queued'].includes(key)) return 1;
+        return 2;
+    }
+
+    normalizeLiveThinkingEvent(raw = {}, state = {}) {
+        const now = Date.now();
+        const canonical = this.canonicalThinkingStage(raw, state);
+        const config = this.getThinkingStageConfig(canonical);
+        const status = raw.status || (raw.type === 'thinking_stage' ? 'in_progress' : 'in_progress');
+        const startedAt = state.startedAt || now;
+        const existing = state.stageMap?.get(canonical) || null;
+        const counts = raw.counts && typeof raw.counts === 'object' ? raw.counts : {};
+        const previewItems = Array.isArray(raw.preview_items) ? raw.preview_items.filter(Boolean).slice(0, 6) : [];
+        const detail = raw.detail || '';
+        const label = raw.label || config.title;
+        const next = {
+            id: canonical,
+            step: raw.step || canonical,
+            label,
+            title: config.title,
+            status,
+            detail,
+            counts,
+            preview_items: previewItems,
+            progress: Number.isFinite(Number(raw.progress)) ? Number(raw.progress) : config.progress,
+            startedAt: existing?.startedAt || now,
+            updatedAt: now,
+            endedAt: ['completed', 'complete', 'done'].includes(String(status).toLowerCase()) ? now : existing?.endedAt || null,
+            order: config.order
+        };
+        if (!existing && canonical !== 'query_analysis') {
+            const previous = (state.stages || [])
+                .filter((item) => item.order < next.order && !item.endedAt)
+                .sort((a, b) => b.order - a.order)[0];
+            if (previous) previous.endedAt = now;
+        }
+        if (canonical === 'complete') {
+            next.startedAt = existing?.startedAt || now;
+            next.endedAt = now;
+        }
+        next.durationMs = Math.max(0, (next.endedAt || now) - (next.startedAt || startedAt));
+        return next;
+    }
+
+    mergeThinkingStage(state, stage) {
+        if (!state.stageMap) state.stageMap = new Map();
+        for (const item of state.stageMap.values()) {
+            const itemStatus = String(item.status || '').toLowerCase();
+            if (item.order < stage.order && !item.endedAt && !['pending', 'queued'].includes(itemStatus)) {
+                item.endedAt = stage.startedAt || Date.now();
+                item.status = 'completed';
+                item.durationMs = Math.max(0, item.endedAt - (item.startedAt || item.endedAt));
+            }
+        }
+        const existing = state.stageMap.get(stage.id);
+        if (existing) {
+            const merged = {
+                ...existing,
+                ...stage,
+                counts: { ...(existing.counts || {}), ...(stage.counts || {}) },
+                preview_items: stage.preview_items?.length ? stage.preview_items : (existing.preview_items || []),
+                detail: stage.detail || existing.detail || '',
+                startedAt: existing.startedAt || stage.startedAt,
+                endedAt: stage.endedAt || existing.endedAt || null,
+                status: this.statusRank(stage.status) >= this.statusRank(existing.status) ? stage.status : existing.status
+            };
+            merged.durationMs = Math.max(0, (merged.endedAt || Date.now()) - (merged.startedAt || Date.now()));
+            state.stageMap.set(stage.id, merged);
+        } else {
+            state.stageMap.set(stage.id, stage);
+        }
+        state.stages = Array.from(state.stageMap.values()).sort((a, b) => a.order - b.order);
+        return state;
+    }
+
+    renderStageMetrics(stage) {
+        const rows = [];
+        const counts = stage?.counts && typeof stage.counts === 'object' ? stage.counts : {};
+        Object.entries(counts)
+            .filter(([, value]) => value !== null && value !== undefined && value !== 0)
+            .slice(0, 8)
+            .forEach(([key, value]) => {
+                rows.push(`<div class="thinking-metric-row"><span>${this.escapeHtml(String(key).replace(/_/g, ' '))}</span><strong>${this.escapeHtml(String(value))}</strong></div>`);
+            });
+        if (stage?.detail) rows.unshift(`<div class="thinking-stage-detail">${this.escapeHtml(stage.detail)}</div>`);
+        const previews = Array.isArray(stage?.preview_items) ? stage.preview_items.slice(0, 5) : [];
+        if (previews.length) {
+            rows.push(`<div class="thinking-query-preview">${previews.map((item) => `<span title="${this.escapeHtml(String(item))}">${this.escapeHtml(String(item))}</span>`).join('')}</div>`);
+        }
+        return rows.length ? `<div class="thinking-stage-metrics">${rows.join('')}</div>` : '';
+    }
+
+    renderLiveThinkingPanel(panel) {
+        if (!panel?.isConnected) {
+            if (panel?.__thinkingTimer) clearInterval(panel.__thinkingTimer);
+            return;
+        }
+        const state = panel.__thinkingState || {};
+        const now = Date.now();
+        const elapsedMs = Math.max(0, (state.completedAt || now) - (state.startedAt || now));
+        const liveProgress = state.completedAt
+            ? 100
+            : Math.min(98, Math.max(Number(state.progress || 0), Number(state.progress || 0) + Math.min(4, elapsedMs / 8000)));
+        const currentStage = state.stages?.find((item) => !item.endedAt && !['pending', 'queued'].includes(String(item.status || '').toLowerCase()) && item.id !== 'complete')
+            || state.stages?.filter((item) => item.endedAt).slice(-1)[0]
+            || state.stages?.find((item) => !item.endedAt)
+            || { title: state.label || 'Thinking', status: 'in_progress', durationMs: elapsedMs };
+
+        const header = panel.querySelector('.thinking-live-header');
+        const chevron = panel.querySelector('.thinking-chevron');
+        const stageLabel = panel.querySelector('.thinking-live-stage');
+        const elapsed = panel.querySelector('.thinking-live-elapsed');
+        const bar = panel.querySelector('.thinking-bar');
+        const progressLabel = panel.querySelector('.thinking-progress-label');
+        const list = panel.querySelector('.thinking-stage-list');
+
+        if (header) header.setAttribute('aria-expanded', String(Boolean(state.expanded)));
+        if (chevron) chevron.textContent = state.expanded ? '▾' : '▸';
+        if (stageLabel) stageLabel.textContent = currentStage?.title || state.label || 'Thinking';
+        if (elapsed) elapsed.textContent = state.completedAt ? `${this.formatThinkingDuration(elapsedMs)} total` : this.formatThinkingDuration(elapsedMs);
+        if (bar) bar.style.width = `${Math.round(liveProgress)}%`;
+        if (progressLabel) progressLabel.textContent = `${Math.round(liveProgress)}%`;
+        if (list) {
+            const stages = state.stages?.length ? state.stages : [{
+                id: 'query_analysis',
+                title: 'Query Analysis',
+                label: 'Analyzing your question',
+                status: 'in_progress',
+                durationMs: elapsedMs,
+                order: 1
+            }];
+            list.innerHTML = stages.map((stage, index) => {
+                const rawStatus = String(stage.status || '').toLowerCase();
+                const statusKey = ['completed', 'complete', 'done'].includes(rawStatus)
+                    ? 'complete'
+                    : (['pending', 'queued'].includes(rawStatus) ? 'pending' : (stage.endedAt ? 'complete' : 'in-progress'));
+                const icon = statusKey === 'complete' ? '✓' : (statusKey === 'pending' ? '○' : '⏳');
+                const duration = statusKey === 'pending'
+                    ? 'pending'
+                    : this.formatThinkingDuration(stage.durationMs || ((stage.endedAt || now) - (stage.startedAt || now)));
+                const progress = Math.max(4, Math.min(100, Number(stage.progress || this.getThinkingStageConfig(stage.id).progress || 20)));
+                return `
+                    <div class="thinking-stage-item status-${statusKey}" style="--stage-index:${index};">
+                        <div class="thinking-stage-head">
+                            <span class="thinking-stage-icon">${icon}</span>
+                            <span class="thinking-stage-title">${this.escapeHtml(stage.title || stage.label || stage.id)}</span>
+                            <span class="thinking-stage-time">${this.escapeHtml(duration)}${statusKey === 'in-progress' ? ' ongoing' : ''}</span>
+                        </div>
+                        ${this.renderStageMetrics(stage)}
+                        ${statusKey === 'in-progress' ? `<div class="thinking-sub-progress"><span style="width:${progress}%"></span></div>` : ''}
+                    </div>
+                `;
+            }).join('');
+        }
+        panel.dataset.expanded = String(Boolean(state.expanded));
+        panel.classList.toggle('complete', Boolean(state.completedAt));
+    }
+
+    renderAnimatedThinkingTrace(thinkingTrace, retrieval = null) {
+        const trace = thinkingTrace || retrieval?.thinking_trace || {};
+        const stageTrace = Array.isArray(trace?.stage_trace)
+            ? trace.stage_trace
+            : (Array.isArray(retrieval?.stage_trace) ? retrieval.stage_trace : []);
+        if (!stageTrace.length && !trace?.thinking_summary) return '';
+
+        const stages = stageTrace.map((raw, index) => {
+            const canonical = this.canonicalThinkingStage(raw, { stage: 'query_analysis' });
+            const config = this.getThinkingStageConfig(canonical);
+            const counts = raw?.counts && typeof raw.counts === 'object' ? raw.counts : {};
+            const previews = Array.isArray(raw?.preview_items) ? raw.preview_items.filter(Boolean).slice(0, 5) : [];
+            return {
+                id: canonical,
+                title: raw?.label || config.title,
+                status: raw?.status || 'completed',
+                detail: raw?.detail || '',
+                counts,
+                preview_items: previews,
+                progress: raw?.progress || config.progress,
+                durationMs: raw?.duration_ms || raw?.durationMs || Math.max(120, 220 + (index * 160)),
+                order: config.order || index
+            };
+        });
+        const searchQueries = trace?.search_queries || {};
+        const filters = Array.isArray(trace?.filters) ? trace.filters : [];
+        const resultSummary = trace?.results_summary || {};
+        const uniqueStages = [];
+        const seen = new Set();
+        for (const stage of stages) {
+            const key = `${stage.id}:${stage.title}:${stage.detail}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            if (stage.id === 'query_analysis') {
+                const semantic = Array.isArray(searchQueries.context) ? searchQueries.context : [];
+                const lexical = Array.isArray(searchQueries.lexical) ? searchQueries.lexical : [];
+                const web = Array.isArray(searchQueries.web) ? searchQueries.web : [];
+                stage.counts = {
+                    semantic_queries: semantic.length,
+                    lexical_terms: lexical.length,
+                    web_queries: web.length,
+                    filters_applied: filters.length,
+                    ...(stage.counts || {})
+                };
+                stage.preview_items = [
+                    ...semantic.slice(0, 3),
+                    ...lexical.slice(0, 2).map((term) => `lexical: ${term}`),
+                    ...web.slice(0, 2).map((term) => `web: ${term}`),
+                    ...filters.slice(0, 3).map((filter) => `filter: ${filter.label || 'Filter'}=${filter.value || ''}`)
+                ].filter(Boolean);
+            }
+            if (stage.id === 'hybrid_retrieval' || stage.id === 'reranking') {
+                stage.counts = {
+                    seeds: resultSummary.seed_count,
+                    evidence: resultSummary.evidence_count,
+                    primary_nodes: Array.isArray(trace?.primary_nodes) ? trace.primary_nodes.length : undefined,
+                    support_nodes: Array.isArray(trace?.support_nodes) ? trace.support_nodes.length : undefined,
+                    ...(stage.counts || {})
+                };
+                if (!stage.preview_items?.length && Array.isArray(resultSummary.details)) {
+                    stage.preview_items = resultSummary.details.slice(0, 4);
+                }
+            }
+            uniqueStages.push(stage);
+        }
+        const totalMs = uniqueStages.reduce((sum, stage) => sum + Number(stage.durationMs || 0), 0);
+        const summary = trace?.thinking_summary || retrieval?.retrieval_plan?.router_reason || 'Thinking trace captured.';
+        const traceJson = this.escapeHtml(JSON.stringify({
+            summary,
+            stages: uniqueStages,
+            filters: trace?.filters || [],
+            search_queries: trace?.search_queries || {},
+            results_summary: trace?.results_summary || {}
+        }, null, 2));
+        const stageHtml = uniqueStages.length
+            ? uniqueStages.map((stage, index) => {
+                const duration = this.formatThinkingDuration(stage.durationMs || 0);
+                return `
+                    <div class="thinking-stage-item status-complete" style="--stage-index:${index};">
+                        <div class="thinking-stage-head">
+                            <span class="thinking-stage-icon">✓</span>
+                            <span class="thinking-stage-title">${this.escapeHtml(stage.title || stage.id)}</span>
+                            <span class="thinking-stage-time">${this.escapeHtml(duration)}</span>
+                        </div>
+                        ${this.renderStageMetrics(stage)}
+                    </div>
+                `;
+            }).join('')
+            : `<div class="thinking-stage-detail">${this.escapeHtml(summary)}</div>`;
+
+        return `
+            <div class="thinking-panel thinking-trace-live complete" data-expanded="false">
+                <button class="thinking-live-header" type="button" aria-expanded="false" data-thinking-trace-toggle>
+                    <span class="thinking-chevron">▸</span>
+                    <span class="thinking-live-title">Thinking</span>
+                    <span class="thinking-live-stage">${this.escapeHtml(summary)}</span>
+                    <span class="thinking-live-elapsed">${this.escapeHtml(this.formatThinkingDuration(totalMs))} total</span>
+                </button>
+                <div class="thinking-progress" aria-label="Thinking progress">
+                    <div class="thinking-bar" style="width:100%"></div>
+                    <span class="thinking-progress-label">100%</span>
+                </div>
+                <div class="thinking-live-content">
+                    <div class="thinking-stage-list">${stageHtml}</div>
+                    <div class="thinking-live-actions">
+                        <button class="thinking-copy-trace" type="button" data-thinking-trace-copy="${traceJson}">Copy thinking trace</button>
+                    </div>
+                </div>
+            </div>
+        `;
     }
 
     normalizeThinkingStage(raw) {
@@ -1257,37 +1825,50 @@ Would you like me to continue with more detail?` : content;
 
     updateThinkingPanel(panel, payload) {
         if (!panel) return;
-        const label = panel.querySelector('.thinking-step-label');
-        const timeline = panel.querySelector('.thinking-timeline');
-        const nextStage = this.normalizeThinkingStage(payload);
-        if (!nextStage || !timeline) return;
+        const currentState = panel.__thinkingState || { stage: 'query_analysis', progress: 15, label: 'Analyzing your question' };
+        const mapped = this.mapThinkingStage(payload, currentState);
+        const eventStage = this.normalizeLiveThinkingEvent(payload, currentState);
+        let nextState = this.mergeThinkingStage(currentState, eventStage);
 
-        const stages = Array.isArray(panel.__thinkingStages) ? panel.__thinkingStages.slice() : [];
-        const existingIndex = stages.findIndex((item) => item.step === nextStage.step);
-        if (existingIndex >= 0) stages[existingIndex] = { ...stages[existingIndex], ...nextStage };
-        else stages.push(nextStage);
-        panel.__thinkingStages = stages;
-
-        if (label) {
-            label.textContent = nextStage.detail || `${nextStage.label} (${nextStage.status})`;
-        }
-        timeline.innerHTML = this.renderThinkingTimeline(stages);
+        // Ensure progress never regresses visually.
+        const progress = Math.max(Number(currentState.progress || 0), Number(mapped?.progress || eventStage.progress || 0));
+        nextState = {
+            ...nextState,
+            ...(mapped || {}),
+            progress,
+            stage: eventStage.id,
+            label: mapped?.label || eventStage.label || currentState.label,
+            trace: [...(currentState.trace || []), payload].slice(-80)
+        };
+        panel.__thinkingState = nextState;
+        this.renderLiveThinkingPanel(panel);
     }
 
     finalizeThinkingPanel(panel, payload) {
         if (!panel) return;
-        const retrieval = payload?.retrieval || null;
-        const thinkingTrace = payload?.thinking_trace || retrieval?.thinking_trace || null;
-        const finalCard = panel.querySelector('.thinking-final-card');
-        const stages = Array.isArray(retrieval?.stage_trace) && retrieval.stage_trace.length
-            ? retrieval.stage_trace
-            : (Array.isArray(panel.__thinkingStages) ? panel.__thinkingStages : []);
-        panel.classList.add('ready');
-        const label = panel.querySelector('.thinking-step-label');
-        const timeline = panel.querySelector('.thinking-timeline');
-        if (label) label.textContent = 'Retrieval complete.';
-        if (timeline) timeline.innerHTML = this.renderThinkingTimeline(stages);
-        if (finalCard) finalCard.innerHTML = this.renderThinkingTraceCard(thinkingTrace, { ...(retrieval || {}), stage_trace: stages });
+        const state = panel.__thinkingState || {};
+        if (panel.__thinkingTimer) clearInterval(panel.__thinkingTimer);
+        const now = Date.now();
+        const trace = payload?.thinking_trace || payload?.retrieval?.thinking_trace || null;
+        const finalStageTrace = Array.isArray(trace?.stage_trace)
+            ? trace.stage_trace
+            : (Array.isArray(payload?.retrieval?.stage_trace) ? payload.retrieval.stage_trace : []);
+        for (const rawStage of finalStageTrace) {
+            const stage = this.normalizeLiveThinkingEvent({ ...rawStage, status: rawStage.status || 'completed' }, state);
+            stage.endedAt = stage.endedAt || now;
+            stage.durationMs = Math.max(0, stage.endedAt - (stage.startedAt || now));
+            this.mergeThinkingStage(state, stage);
+        }
+        state.completedAt = now;
+        state.progress = 100;
+        state.stage = 'complete';
+        state.label = 'Complete';
+        state.expanded = true;
+        state.finalPayload = payload || null;
+        panel.__thinkingState = state;
+        panel.classList.add('ready', 'complete');
+        panel.classList.remove('live');
+        this.renderLiveThinkingPanel(panel);
         this.scrollChatToBottom();
     }
 
@@ -1328,6 +1909,29 @@ Would you like me to continue with more detail?` : content;
                 continue;
             }
 
+            if (/^```/.test(line)) {
+                const info = line.replace(/^```/, '').trim() || 'text';
+                i += 1;
+                const codeLines = [];
+                while (i < lines.length && !/^```/.test(lines[i].trim())) {
+                    codeLines.push(lines[i]);
+                    i += 1;
+                }
+                if (i < lines.length && /^```/.test(lines[i].trim())) i += 1;
+                const code = codeLines.join('\n');
+                const artifactTitle = info.toLowerCase().includes('artifact') ? 'Artifact' : `${info.toUpperCase()} block`;
+                blocks.push(`
+                    <div class="chat-artifact">
+                        <div class="chat-artifact-header">
+                            <span>${this.escapeHtml(artifactTitle)}</span>
+                            <span>${this.escapeHtml(info)}</span>
+                        </div>
+                        <pre><code>${this.escapeHtml(code)}</code></pre>
+                    </div>
+                `);
+                continue;
+            }
+
             if (/^\s*[-*]\s+/.test(line)) {
                 const items = [];
                 while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
@@ -1359,7 +1963,7 @@ Would you like me to continue with more detail?` : content;
                 }
                 const headHtml = `<tr>${header.map((h) => `<th>${this.formatInlineMarkdown(h)}</th>`).join('')}</tr>`;
                 const rowHtml = rows.map((r) => `<tr>${r.map((c) => `<td>${this.formatInlineMarkdown(c)}</td>`).join('')}</tr>`).join('');
-                blocks.push(`<table class="msg-table"><thead>${headHtml}</thead><tbody>${rowHtml}</tbody></table>`);
+                blocks.push(`<div class="msg-table-wrap"><table class="msg-table"><thead>${headHtml}</thead><tbody>${rowHtml}</tbody></table></div>`);
                 continue;
             }
 
@@ -1367,15 +1971,14 @@ Would you like me to continue with more detail?` : content;
             i += 1;
         }
 
-        const traceHtml = this.renderThinkingTraceCard(thinkingTrace || retrieval?.thinking_trace || null, retrieval);
+        const traceHtml = this.renderAnimatedThinkingTrace(thinkingTrace || retrieval?.thinking_trace || null, retrieval);
         return `${traceHtml}<div class="msg-rich">${blocks.join('')}</div>`;
     }
 
     renderThinkingTraceCard(thinkingTrace, retrieval = null) {
         if (!thinkingTrace && !retrieval) return '';
         const trace = thinkingTrace || {};
-        const provider = String(trace?.provider || retrieval?.provider || '').toLowerCase();
-        const sourceBadges = `${provider === 'deepseek' ? '<span class="ai-source-badge deepseek">DeepSeek</span>' : ''}${trace || retrieval ? '<span class="ai-source-badge ai">AI</span>' : ''}`;
+        const sourceBadges = '';
         const filters = Array.isArray(trace.filters) ? trace.filters : [];
         const contextQueries = Array.isArray(trace?.search_queries?.context) ? trace.search_queries.context : [];
         const messageQueries = Array.isArray(trace?.search_queries?.messages) ? trace.search_queries.messages : [];
@@ -1643,16 +2246,19 @@ Would you like me to continue with more detail?` : content;
         const sorted = [...(this.chatSessions || [])].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
         if (!sorted.length) {
             this.chatHistoryList.innerHTML = `
-                <div class="chat-history-empty">No chats yet</div>
+                <div class="chat-history-empty">No threads yet</div>
             `;
             return;
         }
         this.chatHistoryList.innerHTML = sorted.map((session) => {
             const last = session.messages?.[session.messages.length - 1];
+            const updatedAt = session.updatedAt || last?.ts || session.createdAt;
             return `
                 <button class="chat-history-item ${session.id === this.activeChatId ? 'active' : ''}" data-chat-id="${this.escapeHtml(session.id)}">
-                    <div class="chat-history-title">${this.escapeHtml(session.title || 'New chat')}</div>
+                    <span class="chat-history-dot" aria-hidden="true"></span>
+                    <div class="chat-history-title" title="${this.escapeHtml(session.title || 'New thread')}">${this.escapeHtml(session.title || 'New thread')}</div>
                     <div class="chat-history-preview">${this.escapeHtml((last?.content || 'No messages yet').slice(0, 60))}</div>
+                    <div class="chat-history-time">${this.escapeHtml(this.relativeTime(updatedAt))}</div>
                 </button>
             `;
         }).join('');
@@ -1666,19 +2272,19 @@ Would you like me to continue with more detail?` : content;
         if (!this.chatMessages) return;
         const chat = this.getActiveChat();
         if (!chat) {
-            if (this.chatThreadTitle) this.chatThreadTitle.textContent = 'New Chat';
+            if (this.chatThreadTitle) this.chatThreadTitle.textContent = 'New thread';
             this.chatMessages.innerHTML = `
                 <div class="empty-state" style="text-align: center; padding: 60px 20px;">
                     <div class="empty-icon" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;">
                         <span class="material-symbols-outlined">forum</span>
                     </div>
-                    <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">Type a message to start a new chat</div>
-                    <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">A new session is created only when your first message is sent</div>
+                    <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">Start a thought</div>
+                    <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">A thread appears when you send the first message.</div>
                 </div>
             `;
             return;
         }
-        if (this.chatThreadTitle) this.chatThreadTitle.textContent = chat.title || 'Current Chat';
+        if (this.chatThreadTitle) this.chatThreadTitle.textContent = chat.title || 'Current thread';
 
         this.chatMessages.innerHTML = '';
         if (!chat.messages?.length) {
@@ -1688,8 +2294,8 @@ Would you like me to continue with more detail?` : content;
                     <div class="empty-icon" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;">
                         <span class="material-symbols-outlined">forum</span>
                     </div>
-                    <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">Start a conversation</div>
-                    <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">Ask about your work, context, or next steps</div>
+                    <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">Start a thought</div>
+                    <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">Ask about your work, memory, relationships, or next move.</div>
                     <div style="margin-top:16px; display:flex; flex-wrap:wrap; gap:8px; justify-content:center;">
                         ${prompts.map((p, idx) => `<button class="pill-btn" data-starter-prompt="${idx}" type="button">${this.escapeHtml(p)}</button>`).join('')}
                     </div>
@@ -1801,7 +2407,7 @@ Would you like me to continue with more detail?` : content;
             this.suggestionProviderStatus.textContent = `Provider: Ollama • Model: ${model || 'llama3.1:8b'} • URL: ${baseUrl || 'http://127.0.0.1:11434'}${hasApiKey ? ' • key set' : ''}`;
             return;
         }
-        this.suggestionProviderStatus.textContent = `Provider: DeepSeek • Model: ${model || 'deepseek-chat'}${hasApiKey ? ' • key set' : ' • missing key'}`;
+        this.suggestionProviderStatus.textContent = `Provider: ${provider || 'default'} • Model: ${model || 'deepseek-chat'}${hasApiKey ? ' • key set' : ' • missing key'}`;
     }
 
     async loadSuggestionProviderSettings() {
@@ -2799,20 +3405,146 @@ Would you like me to continue with more detail?` : content;
         document.body.classList.toggle('compact-mode', this.compactMode);
     }
 
+    setupMicroInteractions() {
+        document.addEventListener('pointerdown', (event) => {
+            const target = event.target.closest('button, .suggestion-card, .chat-history-item');
+            if (!target || target.disabled || target.classList.contains('no-ripple')) return;
+            if (!target.classList.contains('ripple-ready')) target.classList.add('ripple-ready');
+
+            const rect = target.getBoundingClientRect();
+            const size = Math.max(rect.width, rect.height) * 1.35;
+            const ripple = document.createElement('span');
+            ripple.className = 'ui-ripple';
+            ripple.style.width = `${size}px`;
+            ripple.style.height = `${size}px`;
+            ripple.style.left = `${event.clientX - rect.left - size / 2}px`;
+            ripple.style.top = `${event.clientY - rect.top - size / 2}px`;
+            target.appendChild(ripple);
+            setTimeout(() => ripple.remove(), 480);
+        }, { passive: true });
+    }
+
+    updateChatCharacterCounter() {
+        if (!this.chatCharCounter || !this.chatInput) return;
+        const count = this.chatInput.value.length;
+        this.chatCharCounter.textContent = count > 120 ? `${count}/250` : '';
+        this.chatCharCounter.classList.toggle('visible', count > 120);
+    }
+
+    relativeTime(timestamp) {
+        const time = Number(timestamp || 0);
+        if (!time) return 'Just now';
+        const delta = Math.max(0, Date.now() - time);
+        const minute = 60 * 1000;
+        const hour = 60 * minute;
+        const day = 24 * hour;
+        if (delta < minute) return 'Just now';
+        if (delta < hour) return `${Math.floor(delta / minute)}m ago`;
+        if (delta < day) return `${Math.floor(delta / hour)}h ago`;
+        if (delta < 2 * day) return 'Yesterday';
+        return `${Math.floor(delta / day)}d ago`;
+    }
+
     updateGreeting() {
         const element = document.getElementById('today-greeting');
         if (!element) return;
 
         const hour = new Date().getHours();
         const name = this.userName || 'Willem';
-        const room = this.roomName || 'Focus Room';
-        if (hour < 12) {
-            element.textContent = `Good morning, ${name} · ${room}`;
-        } else if (hour < 18) {
-            element.textContent = `Good afternoon, ${name} · ${room}`;
-        } else {
-            element.textContent = `Good evening, ${name} · ${room}`;
+        const visibleCount = this.getVisibleTodos ? this.getVisibleTodos().length : (this.todos || []).length;
+        const period = hour < 12 ? 'morning' : (hour < 18 ? 'afternoon' : 'evening');
+        const focusLine = visibleCount === 0
+            ? 'a clear slate.'
+            : (visibleCount === 1 ? 'one thing worth your attention.' : `${visibleCount} things worth your attention.`);
+        element.textContent = `${period}, ${name} — ${focusLine}`;
+        this.applyAmbientTone(hour);
+        this.updatePresenceSummary(this.getVisibleTodos ? this.getVisibleTodos() : (this.todos || []));
+    }
+
+    updatePresenceSummary(visibleTodos = []) {
+        if (!this.presenceSummary || !this.presencePrimaryAction) return;
+        const count = Array.isArray(visibleTodos) ? visibleTodos.length : 0;
+        if (count === 0) {
+            this.presenceSummary.textContent = 'You are clear right now. I can surface a fresh next step when you want.';
+            this.presencePrimaryAction.textContent = 'Start here today';
+            return;
         }
+
+        const top = visibleTodos[0];
+        const title = this.truncate(top?.title || 'Start here', 72);
+        this.presenceSummary.textContent = count === 1
+            ? `One thing stands out right now: ${title}`
+            : `${count} things are open. Start with: ${title}`;
+        this.presencePrimaryAction.textContent = 'Start here today';
+    }
+
+    setPresenceMode(mode = 'waiting') {
+        this.presenceMode = mode;
+        if (!this.presenceState) return;
+        const labels = {
+            idle: 'Idle',
+            thinking: 'Thinking',
+            remembering: 'Remembering',
+            suggesting: 'Suggesting',
+            waiting: 'Waiting'
+        };
+        const label = labels[mode] || labels.waiting;
+        this.presenceState.textContent = label;
+        this.presenceState.setAttribute('data-mode', mode);
+    }
+
+    applyAmbientTone(hour = new Date().getHours()) {
+        const tone = hour >= 19 || hour < 5 ? 'evening' : (hour < 11 ? 'morning' : 'day');
+        document.body.setAttribute('data-ambient', tone);
+    }
+
+    setupTodayWhisperPrompt() {
+        const el = this.todayWhisperPrompt;
+        if (!el) return;
+        const prompts = [
+            'What feels most important right now?',
+            'What is pulling at your attention?',
+            'Want a gentle next step?',
+            'What would make today feel lighter?'
+        ];
+        const initial = Math.floor(Math.random() * prompts.length);
+        el.textContent = prompts[initial];
+        el.addEventListener('click', async () => {
+            await this.generateSuggestions({ replace: true, silent: false });
+        });
+        let index = initial;
+        if (this.todayWhisperTimer) clearInterval(this.todayWhisperTimer);
+        this.todayWhisperTimer = window.setInterval(() => {
+            index = (index + 1) % prompts.length;
+            el.classList.add('is-fading');
+            window.setTimeout(() => {
+                el.textContent = prompts[index];
+                el.classList.remove('is-fading');
+            }, 170);
+        }, 8500);
+    }
+
+    startChatPromptRotation() {
+        if (!this.chatInput) return;
+        const prompts = [
+            "What's on your mind?",
+            'What feels unresolved today?',
+            'Want to think this through together?',
+            'What needs clarity right now?'
+        ];
+        let index = Math.floor(Math.random() * prompts.length);
+        this.chatInput.placeholder = prompts[index];
+        if (this.chatPromptTimer) clearInterval(this.chatPromptTimer);
+        this.chatPromptTimer = window.setInterval(() => {
+            if (!this.chatInput || this.chatInput.value.trim()) return;
+            index = (index + 1) % prompts.length;
+            this.chatInput.classList.add('placeholder-fade');
+            window.setTimeout(() => {
+                if (!this.chatInput) return;
+                this.chatInput.placeholder = prompts[index];
+                this.chatInput.classList.remove('placeholder-fade');
+            }, 160);
+        }, 10000);
     }
 
     normalizeCategory(category) {
@@ -2825,7 +3557,7 @@ Would you like me to continue with more detail?` : content;
 
     prettyCategory(category) {
         if (category === 'followup') return 'Follow-up';
-        if (category === 'relationship_intelligence') return 'Relationship Intelligence';
+        if (category === 'relationship_intelligence') return 'People';
         return category.charAt(0).toUpperCase() + category.slice(1);
     }
 
@@ -3040,7 +3772,7 @@ Would you like me to continue with more detail?` : content;
             
             clearTimeout(this._syncResetTimer);
             this._syncResetTimer = setTimeout(() => {
-                if (textEl) textEl.textContent = "Memory synced";
+                if (textEl) textEl.textContent = "Memory updated";
                 syncStatusEl.classList.remove("syncing");
             }, 3000);
         }

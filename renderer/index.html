@@ -6,7 +6,7 @@
     <title>Weave</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=SF+Pro+Display:wght@300;400;500;600&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300..700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
     <link rel="stylesheet" href="styles.css">
 </head>
@@ -25,7 +25,6 @@
     <!-- Top Bar -->
     <header class="top-bar">
         <div class="top-bar-content">
-            <div class="app-icon">A</div>
             <h1 class="greeting" id="today-greeting">Good morning</h1>
             <div class="top-bar-actions">
                 <div style="position: relative;">
@@ -34,7 +33,6 @@
                     </button>
                     <div class="notification-dot"></div>
                 </div>
-                <div class="avatar">U</div>
             </div>
         </div>
     </header>
@@ -64,22 +62,33 @@
             <!-- ───── TODAY VIEW ───── -->
             <section id="today-view" class="view active">
 
-                <!-- Context Chips -->
-                <div class="context-chips">
-                    <button class="context-chip active" data-filter="all">Today</button>
-                    <button class="context-chip" data-filter="work">Work</button>
-                    <button class="context-chip" data-filter="followups">Follow-ups</button>
-                    <button class="context-chip" data-filter="relationship_intelligence">Relationship Intelligence</button>
-                    <button class="context-chip" data-filter="creative">Creative</button>
-                    <button class="context-chip" data-filter="personal">Personal</button>
+                <div class="presence-layer" aria-live="polite">
+                    <div id="presence-state" class="presence-state">Waiting</div>
+                    <p id="presence-summary" class="presence-summary">Start here today.</p>
+                    <button id="presence-primary-action" class="presence-primary-action" type="button">Start here today</button>
                 </div>
 
-                <div style="padding: 8px 24px 0; display: flex; justify-content: space-between; align-items: center; gap: 12px;">
-                    <div class="ai-section-legend">
-                        <span class="ai-source-badge ai">AI</span>
-                        <span class="ai-source-badge deepseek">DeepSeek</span>
+                <!-- Context Chips -->
+                <div class="context-chips">
+                    <button class="context-chip active" data-filter="all">What matters now</button>
+                    <button class="context-chip" data-filter="focus">Focus work</button>
+                    <button class="context-chip" data-filter="people">People</button>
+                </div>
+
+                <div class="today-controls">
+                    <button id="today-whisper-prompt" class="today-whisper-prompt" type="button" aria-label="Conversation starter">
+                        What feels most important right now?
+                    </button>
+                    <div class="today-controls-subtle">
+                        <button id="manual-generate-suggestions-btn" class="ghost-button" type="button">Refresh thought stream</button>
+                        <button id="customize-today-btn" class="ghost-button" type="button">Customize today</button>
+                        <button id="clear-all-suggestions-btn" class="ghost-button" type="button">Clear stream</button>
+                        <select id="focus-mode-select" class="ghost-select" aria-label="Choose conversation focus">
+                            <option value="all">All</option>
+                            <option value="focus">Focus work</option>
+                            <option value="people">People</option>
+                        </select>
                     </div>
-                    <button id="manual-generate-suggestions-btn" class="pill-btn" type="button">Generate Suggestions</button>
                 </div>
 
                 <!-- Suggestion Cards (Reminders List) -->
@@ -88,8 +97,8 @@
                         <div class="empty-icon" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;">
                             <span class="material-symbols-outlined">lightbulb</span>
                         </div>
-                        <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">No suggestions yet</div>
-                        <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">Refresh to generate AI-powered suggestions based on your context</div>
+                        <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">You're all caught up</div>
+                        <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">Ask Weave what deserves attention, or enjoy the quiet.</div>
                     </div>
                 </div>
 
@@ -315,19 +324,16 @@
                 <div class="chat-panel">
                     <aside class="chat-history-panel">
                         <div class="chat-history-header">
-                            <div class="settings-label">Chat History</div>
-                            <button class="ghost-button" id="new-chat-btn">New</button>
+                            <div class="settings-label">Your conversations</div>
+                            <button class="ghost-button" id="new-chat-btn">New thread</button>
                         </div>
                         <div class="chat-history-list" id="chat-history-list"></div>
                     </aside>
                     <div class="chat-main">
                         <div class="chat-main-header">
                             <div class="chat-title-wrap">
-                                <div class="settings-label" id="chat-thread-title">Current Chat</div>
-                                <div class="ai-section-legend">
-                                    <span class="ai-source-badge ai">AI</span>
-                                    <span class="ai-source-badge deepseek">DeepSeek</span>
-                                </div>
+                                <div class="settings-label" id="chat-thread-title">Current thread</div>
+                                <button class="ghost-button" id="toggle-chat-history-btn" type="button">Show threads</button>
                             </div>
                             <div style="display: flex; align-items: center; gap: 16px;">
                                 <div id="scanning-indicator" class="scanning-indicator">
@@ -336,9 +342,9 @@
                                     </div>
                                     <span>Scanning Graph...</span>
                                 </div>
-                                <div id="chat-sync-status" class="sync-status-mini">
+                                <div id="chat-sync-status" class="sync-status-mini chat-sync-quiet" aria-label="Memory status">
                                     <span class="sync-dot"></span>
-                                    <span class="sync-text">Memory synced</span>
+                                    <span class="sync-text">Memory updated</span>
                                 </div>
                             </div>
                         </div>
@@ -348,8 +354,8 @@
                                     <div class="empty-icon" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;">
                                         <span class="material-symbols-outlined">forum</span>
                                     </div>
-                                    <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">Start a conversation</div>
-                                    <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">Ask about your work, context, or next steps</div>
+                                    <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">Start a thought</div>
+                                    <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">Ask about your work, memory, relationships, or next move.</div>
                                 </div>
                             </div>
                             <div class="chat-input-container">
@@ -357,9 +363,10 @@
                                     <textarea 
                                         id="chat-input" 
                                         class="chat-input" 
-                                        placeholder="Type here..."
+                                        placeholder="What's on your mind?"
                                         rows="1"
                                     ></textarea>
+                                    <span id="chat-char-counter" class="chat-char-counter" aria-live="polite"></span>
                                     <button id="send-chat-btn" class="send-button">
                                         <span class="material-symbols-outlined">arrow_upward</span>
                                     </button>

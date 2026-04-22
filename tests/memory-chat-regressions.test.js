@@ -7,6 +7,7 @@ const { normalizeEventEnvelope, buildCanonicalEventMetadata, inferAppId } = requ
 const { clusterEnvelopes } = require('../services/agent/graph-derivation');
 const { buildRetrievalThought } = require('../services/agent/retrieval-thought-system');
 const { buildHybridGraphRetrieval } = require('../services/agent/hybrid-graph-retrieval');
+const { buildRawEvidenceText } = require('../services/raw-evidence-text');
 const { upsertRetrievalDoc } = require('../services/agent/graph-store');
 const { planNextAction, normalizeDesktopGoal } = require('../services/agent/agentPlanner');
 const { generateEmbedding } = require('../services/embedding-engine');
@@ -352,6 +353,54 @@ async function testRetrievalThoughtBuildsCodingAndCommunicationAngles() {
   });
   const entityTags = contextualTrailerThought.metadata_filters?.entity_tags || [];
   assert.ok(!entityTags.some((item) => /conversation|context/i.test(item)), 'chat scaffolding must not become a hard entity metadata filter');
+}
+
+async function testRetrievalThoughtUsesSharedMacAppCatalog() {
+  const xcodeThought = await buildRetrievalThought({
+    query: 'what was I doing in Xcode today?'
+  });
+  assert.ok(xcodeThought.filters?.app?.includes('Xcode'));
+  assert.ok(xcodeThought.metadata_filters?.app_id?.includes('com.apple.dt.Xcode'));
+  assert.strictEqual(xcodeThought.summary_vs_raw, 'raw');
+
+  const zoomThought = await buildRetrievalThought({
+    query: 'what did I discuss on Zoom yesterday?'
+  });
+  assert.ok(zoomThought.filters?.app?.includes('Zoom'));
+  assert.ok(zoomThought.metadata_filters?.app_id?.includes('us.zoom.xos'));
+
+  const notionThought = await buildRetrievalThought({
+    query: 'what was I editing in Notion today?'
+  });
+  assert.ok(notionThought.filters?.app?.includes('Notion'));
+  assert.ok(notionThought.metadata_filters?.app_id?.includes('notion.id'));
+
+  const whatsappThought = await buildRetrievalThought({
+    query: 'who have I talked to on WhatsApp'
+  });
+  assert.deepStrictEqual(whatsappThought.filters?.app, ['WhatsApp']);
+  assert.ok(whatsappThought.metadata_filters?.app_id?.includes('net.whatsapp.WhatsApp'));
+  assert.strictEqual(whatsappThought.filters?.source_types, null);
+  assert.ok(!JSON.stringify(whatsappThought).includes('com.microsoft.vscode'), 'current WhatsApp query must not inherit code app filters');
+  assert.ok(!JSON.stringify(whatsappThought).includes('com.google.chrome'), 'current WhatsApp query must not inherit browser app filters');
+}
+
+function testRawEvidenceBuilderIncludesFullOCR() {
+  const text = buildRawEvidenceText({
+    id: 'evt_ocr_1',
+    app: 'Google Chrome',
+    title: 'Project Hail Mary - Official Trailer - YouTube',
+    occurred_at: '2026-04-21T13:38:28.000Z',
+    redacted_text: 'Short visible text'
+  }, {
+    data_source: 'screenshot_ocr',
+    raw_ocr_text: 'Project Hail Mary - Official Trailer - YouTube\\nAudio playing\\nChrome address bar and page controls'
+  });
+
+  assert.ok(text.includes('App: Google Chrome'));
+  assert.ok(text.includes('Full OCR / raw capture'));
+  assert.ok(text.includes('Project Hail Mary - Official Trailer - YouTube'));
+  assert.ok(text.includes('Audio playing'));
 }
 
 async function testHybridRetrievalPrefersDownwardExpansion() {
@@ -1035,6 +1084,123 @@ async function testAnswerChatQueryUsesDrilldownEvidenceBeforeClarifying() {
   }
 }
 
+async function testAnswerChatQueryUsesActionableSuggestionsForTodoQuestions() {
+  const originalAllQuery = db.allQuery;
+  const originalRunQuery = db.runQuery;
+  const ingestion = require('../services/ingestion');
+  const retrievalThoughtSystem = require('../services/agent/retrieval-thought-system');
+  const hybrid = require('../services/agent/hybrid-graph-retrieval');
+  const intelligence = require('../services/agent/intelligence-engine');
+  const suggestionEngine = require('../services/agent/suggestion-engine');
+  const originalIngest = ingestion.ingestRawEvent;
+  const originalThought = retrievalThoughtSystem.buildRetrievalThought;
+  const originalHybrid = hybrid.buildHybridGraphRetrieval;
+  const originalCallLLM = intelligence.callLLM;
+  const originalTopTodos = suggestionEngine.generateTopTodosFromMemoryQuery;
+  let synthesisPrompt = '';
+
+  ingestion.ingestRawEvent = async () => true;
+  suggestionEngine.generateTopTodosFromMemoryQuery = async () => [];
+  intelligence.callLLM = async (prompt, apiKey, temperature, options = {}) => {
+    if (options.task === 'synthesis') {
+      synthesisPrompt = prompt;
+      return [
+        'Your top todo today is Draft Alexandra follow-up, because the grounded memory shows that the Albert School thread is waiting on your next step.',
+        'Start by opening the thread, confirming what Alexandra asked for, and writing a concise next-step reply. Related context matters here: this is not just a generic task recommendation, it is derived from an active suggestion tied to email evidence and should stay ahead of lower-signal activity. After drafting it, review whether there is a calendar or admissions-related dependency that should be handled in the same work block, then mark the follow-up as handled only after the reply is actually sent.'
+      ].join(' ');
+    }
+    return { approved: true, sufficient: true, confidence_score: 0.9, reason: 'test stub' };
+  };
+  retrievalThoughtSystem.buildRetrievalThought = async () => ({
+    mode: 'semantic',
+    source_mode: 'memory_only',
+    strategy_mode: 'memory_only',
+    router_reason: 'Personal task planning request.',
+    summary_vs_raw: 'summary',
+    time_scope: { label: 'today' },
+    query_sets: { memory_queries: ['top todos today'], message_queries: [], web_queries: [] },
+    semantic_queries: ['top todos today'],
+    message_queries: [],
+    web_queries: [],
+    lexical_terms: ['tasks'],
+    filters: {},
+    metadata_filters: {}
+  });
+  hybrid.buildHybridGraphRetrieval = async () => ({
+    retrieval_plan: {
+      mode: 'semantic',
+      source_mode: 'memory_only',
+      strategy_mode: 'memory_only',
+      summary_vs_raw: 'summary',
+      time_scope: { label: 'today' }
+    },
+    router: { source_mode: 'memory_only', summary_vs_raw: 'summary' },
+    query_sets: { memory_queries: ['top todos today'], message_queries: [], web_queries: [] },
+    generated_queries: { semantic: ['top todos today'], messages: [], web: [], lexical_terms: ['tasks'] },
+    seed_results: [],
+    seed_nodes: [],
+    primary_nodes: [],
+    support_nodes: [],
+    evidence_nodes: [],
+    expanded_nodes: [],
+    graph_expansion_results: [],
+    edge_paths: [],
+    packed_context_stats: { primary_nodes: 0, support_nodes: 0, evidence_nodes: 0, packed_evidence: 0 },
+    evidence_count: 0,
+    evidence: [],
+    contextText: '',
+    drilldown_refs: [],
+    lazy_source_refs: [],
+    temporal_reasoning: []
+  });
+  db.allQuery = async (sql) => {
+    if (/FROM suggestion_artifacts/i.test(sql)) {
+      return [{
+        id: 'sug_todo_1',
+        title: 'Draft Alexandra follow-up',
+        body: 'Send the next step on the Albert School thread.',
+        trigger_summary: 'Alexandra asked for the next step.',
+        metadata: JSON.stringify({
+          reason: 'Because the Albert School email thread is waiting on you today.',
+          primary_action: { label: 'Draft Alexandra follow-up' },
+          suggested_actions: [{ label: 'Draft Alexandra follow-up' }],
+          plan: ['Open the thread', 'Draft the reply'],
+          epistemic_trace: [
+            { node_id: 'node_1', source: 'Gmail', text: 'Alexandra asked for the next step.' }
+          ]
+        }),
+        created_at: new Date().toISOString()
+      }];
+    }
+    return [];
+  };
+  db.runQuery = async () => true;
+
+  try {
+    delete require.cache[require.resolve('../services/agent/chat-engine')];
+    const { answerChatQuery } = require('../services/agent/chat-engine');
+    const result = await answerChatQuery({
+      apiKey: 'test-key',
+      query: 'what tasks are my top to dos today'
+    });
+    assert.ok(/Draft Alexandra follow-up/i.test(result.content), 'expected actionable todo suggestion in answer');
+    assert.ok(result.retrieval?.packed_context_stats?.actionable_todo_hits >= 1, 'expected actionable todo evidence to be packed');
+    assert.ok(!/there is no information about your tasks/i.test(result.content), 'todo questions should synthesize actionable tasks when suggestions exist');
+    assert.ok(/Answer mode: grounded_generation/i.test(synthesisPrompt), 'todo questions should use grounded generation mode');
+    assert.ok(/When generating things, always use the retrieved memory/i.test(synthesisPrompt), 'generated answers should remain memory-grounded');
+    assert.ok(/at least 150 words/i.test(synthesisPrompt), 'synthesis prompt should request developed answers when possible');
+  } finally {
+    ingestion.ingestRawEvent = originalIngest;
+    retrievalThoughtSystem.buildRetrievalThought = originalThought;
+    hybrid.buildHybridGraphRetrieval = originalHybrid;
+    intelligence.callLLM = originalCallLLM;
+    suggestionEngine.generateTopTodosFromMemoryQuery = originalTopTodos;
+    delete require.cache[require.resolve('../services/agent/chat-engine')];
+    db.allQuery = originalAllQuery;
+    db.runQuery = originalRunQuery;
+  }
+}
+
 function testDesktopPlannerReadsUiAfterOpen() {
   const action = planNextAction(
     'Find the second New York Times article on Bank of America',
@@ -1332,12 +1498,15 @@ async function main() {
   await testRetrievalThoughtDefaultsToSevenDaySummaryWindow();
   await testRetrievalThoughtRoutesMemoryWebAndHybrid();
   await testRetrievalThoughtBuildsCodingAndCommunicationAngles();
+  await testRetrievalThoughtUsesSharedMacAppCatalog();
+  testRawEvidenceBuilderIncludesFullOCR();
   await testHybridRetrievalPrefersDownwardExpansion();
   await testHybridRetrievalUsesTextChunkVectorsWithMetadata();
   await testHybridRetrievalMatchesLegacyDisplayNameAppIds();
   await testAnswerChatQueryEmitsStructuredPipelineStages();
   await testAnswerChatQueryUsesWebFallbackForSparseWorldKnowledge();
   await testAnswerChatQueryUsesDrilldownEvidenceBeforeClarifying();
+  await testAnswerChatQueryUsesActionableSuggestionsForTodoQuestions();
   await testSuggestionEnginePersistsExecutionMetadata();
   testNormalizeDesktopGoalForGoogleSearch();
   testDesktopPlannerReadsUiAfterOpen();

@@ -236,8 +236,71 @@ function initDB() {
         safeSchemaRun(`CREATE TABLE IF NOT EXISTS suggestion_artifacts (
           id TEXT PRIMARY KEY,
           suggestion_id TEXT,
-          data TEXT
+          data TEXT,
+          type TEXT,
+          title TEXT,
+          body TEXT,
+          trigger_summary TEXT,
+          source_node_ids TEXT,
+          source_edge_paths TEXT,
+          confidence REAL,
+          status TEXT DEFAULT 'active',
+          metadata TEXT,
+          created_at TEXT
         )`);
+
+        safeSchemaRun(`CREATE TABLE IF NOT EXISTS relationship_contacts (
+          id TEXT PRIMARY KEY,
+          display_name TEXT NOT NULL,
+          company TEXT,
+          role TEXT,
+          strength_score REAL DEFAULT 0,
+          last_interaction_at TEXT,
+          interaction_count_30d INTEGER DEFAULT 0,
+          relationship_tier TEXT,
+          status TEXT DEFAULT 'warm',
+          metadata TEXT,
+          created_at TEXT,
+          updated_at TEXT
+        )`);
+
+        safeSchemaRun(`CREATE TABLE IF NOT EXISTS relationship_contact_identifiers (
+          id TEXT PRIMARY KEY,
+          contact_id TEXT NOT NULL,
+          identifier_type TEXT NOT NULL,
+          identifier_value TEXT NOT NULL,
+          normalized_value TEXT NOT NULL,
+          source_label TEXT,
+          confidence REAL DEFAULT 1,
+          created_at TEXT,
+          updated_at TEXT,
+          FOREIGN KEY(contact_id) REFERENCES relationship_contacts(id) ON DELETE CASCADE
+        )`);
+
+        safeSchemaRun(`CREATE TABLE IF NOT EXISTS relationship_mentions (
+          id TEXT PRIMARY KEY,
+          contact_id TEXT NOT NULL,
+          event_id TEXT,
+          memory_node_id TEXT,
+          retrieval_doc_id TEXT,
+          timestamp TEXT,
+          source_app TEXT,
+          context_snippet TEXT,
+          confidence REAL DEFAULT 0.7,
+          mention_type TEXT,
+          metadata TEXT,
+          created_at TEXT,
+          FOREIGN KEY(contact_id) REFERENCES relationship_contacts(id) ON DELETE CASCADE
+        )`);
+
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_relationship_contacts_status ON relationship_contacts(status)`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_relationship_contacts_last_interaction ON relationship_contacts(last_interaction_at)`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_relationship_contacts_strength ON relationship_contacts(strength_score)`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_relationship_identifiers_contact ON relationship_contact_identifiers(contact_id)`);
+        safeSchemaRun(`CREATE UNIQUE INDEX IF NOT EXISTS idx_relationship_identifiers_unique ON relationship_contact_identifiers(identifier_type, normalized_value)`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_relationship_mentions_contact ON relationship_mentions(contact_id)`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_relationship_mentions_event ON relationship_mentions(event_id)`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_relationship_mentions_timestamp ON relationship_mentions(timestamp)`);
 
         safeSchemaRun(`CREATE TABLE IF NOT EXISTS text_chunks (
           id TEXT PRIMARY KEY,
@@ -508,6 +571,80 @@ async function ensureSchemaMigrations() {
         await runStatement(`CREATE INDEX IF NOT EXISTS idx_memory_nodes_importance ON memory_nodes(importance)`).catch(() => {});
         await runStatement(`CREATE INDEX IF NOT EXISTS idx_memory_nodes_connection_count ON memory_nodes(connection_count)`).catch(() => {});
         await runStatement(`CREATE INDEX IF NOT EXISTS idx_memory_nodes_last_reheated ON memory_nodes(last_reheated)`).catch(() => {});
+
+        const suggestionCols = await allStatement(`PRAGMA table_info(suggestion_artifacts)`).catch(() => []);
+        const suggestionExisting = new Set((suggestionCols || []).map((c) => c?.name).filter(Boolean));
+        const suggestionRequired = [
+          ['suggestion_id', 'TEXT'],
+          ['data', 'TEXT'],
+          ['type', 'TEXT'],
+          ['title', 'TEXT'],
+          ['body', 'TEXT'],
+          ['trigger_summary', 'TEXT'],
+          ['source_node_ids', 'TEXT'],
+          ['source_edge_paths', 'TEXT'],
+          ['confidence', 'REAL'],
+          ['status', "TEXT DEFAULT 'active'"],
+          ['metadata', 'TEXT'],
+          ['created_at', 'TEXT']
+        ];
+        for (const [name, sqlType] of suggestionRequired) {
+          if (!suggestionExisting.has(name)) {
+            await runStatement(`ALTER TABLE suggestion_artifacts ADD COLUMN ${name} ${sqlType}`).catch(() => {});
+          }
+        }
+        await runStatement(`CREATE INDEX IF NOT EXISTS idx_suggestion_artifacts_status ON suggestion_artifacts(status)`).catch(() => {});
+        await runStatement(`CREATE INDEX IF NOT EXISTS idx_suggestion_artifacts_created_at ON suggestion_artifacts(created_at)`).catch(() => {});
+
+        await runStatement(`CREATE TABLE IF NOT EXISTS relationship_contacts (
+          id TEXT PRIMARY KEY,
+          display_name TEXT NOT NULL,
+          company TEXT,
+          role TEXT,
+          strength_score REAL DEFAULT 0,
+          last_interaction_at TEXT,
+          interaction_count_30d INTEGER DEFAULT 0,
+          relationship_tier TEXT,
+          status TEXT DEFAULT 'warm',
+          metadata TEXT,
+          created_at TEXT,
+          updated_at TEXT
+        )`).catch(() => {});
+        await runStatement(`CREATE TABLE IF NOT EXISTS relationship_contact_identifiers (
+          id TEXT PRIMARY KEY,
+          contact_id TEXT NOT NULL,
+          identifier_type TEXT NOT NULL,
+          identifier_value TEXT NOT NULL,
+          normalized_value TEXT NOT NULL,
+          source_label TEXT,
+          confidence REAL DEFAULT 1,
+          created_at TEXT,
+          updated_at TEXT,
+          FOREIGN KEY(contact_id) REFERENCES relationship_contacts(id) ON DELETE CASCADE
+        )`).catch(() => {});
+        await runStatement(`CREATE TABLE IF NOT EXISTS relationship_mentions (
+          id TEXT PRIMARY KEY,
+          contact_id TEXT NOT NULL,
+          event_id TEXT,
+          memory_node_id TEXT,
+          retrieval_doc_id TEXT,
+          timestamp TEXT,
+          source_app TEXT,
+          context_snippet TEXT,
+          confidence REAL DEFAULT 0.7,
+          mention_type TEXT,
+          metadata TEXT,
+          created_at TEXT,
+          FOREIGN KEY(contact_id) REFERENCES relationship_contacts(id) ON DELETE CASCADE
+        )`).catch(() => {});
+        await runStatement(`CREATE INDEX IF NOT EXISTS idx_relationship_contacts_status ON relationship_contacts(status)`).catch(() => {});
+        await runStatement(`CREATE INDEX IF NOT EXISTS idx_relationship_contacts_last_interaction ON relationship_contacts(last_interaction_at)`).catch(() => {});
+        await runStatement(`CREATE INDEX IF NOT EXISTS idx_relationship_contacts_strength ON relationship_contacts(strength_score)`).catch(() => {});
+        await runStatement(`CREATE INDEX IF NOT EXISTS idx_relationship_identifiers_contact ON relationship_contact_identifiers(contact_id)`).catch(() => {});
+        await runStatement(`CREATE UNIQUE INDEX IF NOT EXISTS idx_relationship_identifiers_unique ON relationship_contact_identifiers(identifier_type, normalized_value)`).catch(() => {});
+        await runStatement(`CREATE INDEX IF NOT EXISTS idx_relationship_mentions_contact ON relationship_mentions(contact_id)`).catch(() => {});
+        await runStatement(`CREATE INDEX IF NOT EXISTS idx_relationship_mentions_event ON relationship_mentions(event_id)`).catch(() => {});
+        await runStatement(`CREATE INDEX IF NOT EXISTS idx_relationship_mentions_timestamp ON relationship_mentions(timestamp)`).catch(() => {});
 
         return;
       }
