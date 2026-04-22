@@ -6,7 +6,7 @@ class WeaveApp {
         this.contacts = [];
         this.selectedContact = null;
         this.currentFilter = 'all';
-        this.activeView = 'today-view';
+        this.activeView = 'presence-view';
         this.expandedCards = new Set();
         this.compactMode = localStorage.getItem('compactMode') === 'true';
         this.notificationsEnabled = localStorage.getItem('notificationsEnabled') !== 'false';
@@ -127,7 +127,7 @@ class WeaveApp {
         this.presenceSummary = document.getElementById('presence-summary');
         this.presencePrimaryAction = document.getElementById('presence-primary-action');
         this.toggleChatHistoryButton = document.getElementById('toggle-chat-history-btn');
-        this.chatView = document.getElementById('chat-view');
+        this.chatView = document.getElementById('action-view');
         this.chatSyncStatus = document.getElementById('chat-sync-status');
         this.suggestionProviderSelect = document.getElementById('suggestion-llm-provider');
         this.suggestionModelInput = document.getElementById('suggestion-llm-model');
@@ -193,10 +193,10 @@ class WeaveApp {
             button.classList.toggle('active', button.dataset.view === viewId);
         });
 
-        if (viewId === "library-view") {
+        if (viewId === "reflection-view") {
             this.renderLibrary("all");
         }
-        if (viewId === 'chat-view') {
+        if (viewId === 'action-view') {
             this.chatInput?.focus();
             this.renderFullMemoryGraph();
             this.scrollChatToBottom();
@@ -252,7 +252,7 @@ class WeaveApp {
         // handle clicks at document level for the common control IDs.
         document.addEventListener('click', async (ev) => {
             try {
-                const target = ev.target.closest && ev.target.closest('#manual-generate-suggestions-btn, #refresh-tasks-btn');
+                const target = ev.target.closest && ev.target.closest('#manual-generate-suggestions-btn, #refresh-tasks-btn, #presence-primary-action');
                 if (!target) return;
                 ev.preventDefault();
                 // Use the app-scoped method (arrow captures `this`)
@@ -879,8 +879,20 @@ const filtered = this.todos.filter((todo) => {
 
     async loadContacts() {
         try {
-            const { detectAndScoreContacts } = await import('../services/agent/contact-detector.js');
-            this.contacts = await detectAndScoreContacts();
+            const contacts = await window.electronAPI.getRelationshipContacts();
+            this.contacts = (contacts || []).map(c => ({
+                id: c.id,
+                name: c.display_name,
+                last_contact_at: c.last_interaction_at,
+                is_overdue_followup: c.status === 'needs_followup',
+                is_weak_tie: c.status === 'cooling' || c.status === 'decaying',
+                strength: c.strength_score,
+                interaction_count: c.interaction_count_30d,
+                recommendation: c.metadata?.recommendation || '',
+                emails: c.metadata?.emails || [],
+                phones: c.metadata?.phones || [],
+                interests: c.metadata?.interests || []
+            }));
             this.renderContactsList();
             console.log(`[App] Loaded ${this.contacts.length} contacts`);
         } catch (error) {
@@ -1082,7 +1094,7 @@ const filtered = this.todos.filter((todo) => {
             if (this.toggleChatHistoryButton) this.toggleChatHistoryButton.textContent = this.chatHistoryCollapsed ? 'Show threads' : 'Hide threads';
         });
         this.chatSyncStatus?.addEventListener('click', () => {
-            this.switchView('library-view');
+            this.switchView('reflection-view');
             this.showToast('Opening what Weave learned');
         });
 
@@ -1285,9 +1297,9 @@ Would you like me to continue with more detail?` : content;
 
     handleChatCardAction(action, data) {
         if (action === 'view_contact') {
-            this.showView('contacts-view');
+            this.switchView('contacts-view');
         } else if (action === 'view_automations') {
-            this.showView('settings-view');
+            this.switchView('settings-view');
         } else if (action === 'open_url' && data.url) {
             window.open(data.url, '_blank', 'noopener');
         }

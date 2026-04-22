@@ -39,13 +39,13 @@
 
     <!-- Bottom Navigation -->
     <nav class="bottom-nav">
-        <button class="nav-pill active" id="nav-today" data-view="today-view" title="Now">
+        <button class="nav-pill active" id="nav-presence" data-view="presence-view" title="Now">
             <span class="material-symbols-outlined">spa</span>
         </button>
-        <button class="nav-pill" id="nav-chat" data-view="chat-view" title="Doing">
+        <button class="nav-pill" id="nav-action" data-view="action-view" title="Doing">
             <span class="material-symbols-outlined">bolt</span>
         </button>
-        <button class="nav-pill" id="nav-library" data-view="library-view" title="Memories">
+        <button class="nav-pill" id="nav-reflection" data-view="reflection-view" title="Memories">
             <span class="material-symbols-outlined">auto_stories</span>
         </button>
         <button class="nav-pill" id="nav-settings" data-view="settings-view" title="Settings">
@@ -56,8 +56,8 @@
     <!-- Main Content Area -->
         <main class="content-area">
 
-            <!-- ───── TODAY VIEW ───── -->
-            <section id="today-view" class="view active">
+            <!-- ───── PRESENCE VIEW (TODAY) ───── -->
+            <section id="presence-view" class="view active">
 
                 <div class="presence-layer" aria-live="polite">
                     <div id="presence-state" class="presence-state">Resting</div>
@@ -285,8 +285,8 @@
                     </div>
             </section>
 
-            <!-- ───── LIBRARY VIEW ───── -->
-            <section id="library-view" class="view hidden">
+            <!-- ───── REFLECTION VIEW (LIBRARY) ───── -->
+            <section id="reflection-view" class="view hidden">
                 <div class="library-container">
                     <div class="library-header">
                         <h2 class="section-title">Memory Library</h2>
@@ -316,8 +316,8 @@
                 </div>
             </section>
 
-            <!-- ───── CHAT VIEW ───── -->
-            <section id="chat-view" class="view hidden">
+            <!-- ───── ACTION VIEW (CHAT) ───── -->
+            <section id="action-view" class="view hidden">
                 <div class="chat-panel">
                     <aside class="chat-history-panel">
                         <div class="chat-history-header">
