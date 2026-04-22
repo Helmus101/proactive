@@ -381,7 +381,7 @@ class WeaveApp {
         if (!silent) {
             this.remindersList.innerHTML = this.emptyStateHTML(
                 'refresh',
-                'Generating suggestions...',
+                'Reflecting on our next steps...',
                 'Reviewing your recent context and building a fresh queue.'
             );
         }
@@ -2869,7 +2869,7 @@ Would you like me to continue with more detail?` : content;
             this.hideVoiceOverlay();
             return;
         }
-        const transcript = payload.transcript || 'Waiting for speech…';
+        const transcript = payload.transcript || 'I'm here...';
         if (payload.status === 'listening') {
             this.updateVoiceOverlay({
                 title: 'Listening…',
@@ -3482,11 +3482,11 @@ Would you like me to continue with more detail?` : content;
         this.presenceMode = mode;
         if (!this.presenceState) return;
         const labels = {
-            idle: 'Idle',
-            thinking: 'Thinking',
-            remembering: 'Remembering',
-            suggesting: 'Suggesting',
-            waiting: 'Waiting'
+            idle: 'Resting',
+            thinking: 'Reflecting',
+            remembering: 'Reminiscing',
+            suggesting: 'Offering',
+            waiting: 'Just being'
         };
         const label = labels[mode] || labels.waiting;
         this.presenceState.textContent = label;
@@ -3502,10 +3502,10 @@ Would you like me to continue with more detail?` : content;
         const el = this.todayWhisperPrompt;
         if (!el) return;
         const prompts = [
-            'What feels most important right now?',
-            'What is pulling at your attention?',
-            'Want a gentle next step?',
-            'What would make today feel lighter?'
+            "What's pulling at your heart right now?",
+            "How can I make your day feel lighter?",
+            "What's on your mind, friend?",
+            "Is there anything you'd like to share?"
         ];
         const initial = Math.floor(Math.random() * prompts.length);
         el.textContent = prompts[initial];
@@ -3528,9 +3528,9 @@ Would you like me to continue with more detail?` : content;
         if (!this.chatInput) return;
         const prompts = [
             "What's on your mind?",
-            'What feels unresolved today?',
-            'Want to think this through together?',
-            'What needs clarity right now?'
+            "I'm here to listen and reflect with you.",
+            "Would you like to explore a thought together?",
+            "What's calling for your attention today?"
         ];
         let index = Math.floor(Math.random() * prompts.length);
         this.chatInput.placeholder = prompts[index];

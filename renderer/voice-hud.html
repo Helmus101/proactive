@@ -6,13 +6,13 @@
   <title>Voice HUD</title>
   <style>
     :root {
-      color-scheme: dark;
-      --bg: rgba(14, 18, 28, 0.74);
-      --border: rgba(255, 255, 255, 0.1);
-      --text: #f6f7fb;
-      --muted: rgba(246, 247, 251, 0.72);
-      --soft: rgba(246, 247, 251, 0.54);
-      --accent: #90c2ff;
+      color-scheme: light;
+      --bg: rgba(253, 252, 240, 0.9);
+      --border: rgba(233, 154, 44, 0.2);
+      --text: #2d241a;
+      --muted: #7c6d5e;
+      --soft: #a69685;
+      --accent: #e99a2c;
     }
     html, body {
       margin: 0;
@@ -52,7 +52,7 @@
     .pill {
       font-size: 9px;
       color: var(--accent);
-      background: rgba(144, 194, 255, 0.12);
+      background: rgba(233, 154, 44, 0.12);
       padding: 3px 7px;
       border-radius: 999px;
     }
@@ -82,11 +82,11 @@
 <body>
   <div class="hud">
     <div class="top">
-      <div id="title" class="title">Voice Control</div>
-      <div id="phase" class="pill">Idle</div>
+      <div id="title" class="title">I'm listening</div>
+      <div id="phase" class="pill">Resting</div>
     </div>
-    <div id="status" class="status">Press the shortcut and speak.</div>
-    <div id="transcript" class="transcript">Waiting for speech…</div>
+    <div id="status" class="status">Speak when you're ready.</div>
+    <div id="transcript" class="transcript">I'm here...</div>
     <div class="meta">
       <div id="effect"></div>
       <div id="remaining"></div>
@@ -108,10 +108,10 @@
 
     ipcRenderer.on('voice-session-update', (_event, payload) => {
       if (!payload) {
-        setText(titleEl, 'Voice Control');
-        setText(phaseEl, 'Idle');
-        setText(statusEl, 'Press the shortcut and speak.');
-        setText(transcriptEl, 'Waiting for speech…');
+        setText(titleEl, "I'm listening");
+        setText(phaseEl, 'Resting');
+        setText(statusEl, "Speak when you're ready.");
+        setText(transcriptEl, "I'm here...");
         setText(effectEl, '');
         setText(remainingEl, '');
         return;
@@ -119,19 +119,19 @@
 
       const phase = String(payload.status || 'idle').replace(/_/g, ' ');
       setText(phaseEl, phase);
-      setText(titleEl, payload.status === 'acting' ? 'Voice Agent' : 'Voice Control');
-      setText(transcriptEl, payload.partial_transcript || payload.transcript || 'Waiting for speech…');
+      setText(titleEl, payload.status === 'acting' ? 'Helping' : "I'm listening");
+      setText(transcriptEl, payload.partial_transcript || payload.transcript || 'I'm here...');
 
       if (payload.status === 'listening') {
-        setText(statusEl, 'Listening.');
+        setText(statusEl, 'Listening...');
       } else if (payload.status === 'transcribing') {
-        setText(statusEl, 'Transcribing.');
+        setText(statusEl, 'Thinking...');
       } else if (payload.status === 'acting') {
-        setText(statusEl, payload.agent_stage ? `Acting: ${payload.agent_stage}` : 'Acting on your command.');
+        setText(statusEl, payload.agent_stage ? `Acting: ${payload.agent_stage}` : 'Helping you out.');
       } else if (payload.status === 'completed') {
-        setText(statusEl, payload.result || 'Voice command completed.');
+        setText(statusEl, payload.result || 'Done.');
       } else if (payload.status === 'failed') {
-        setText(statusEl, payload.error || 'Voice command failed.');
+        setText(statusEl, payload.error || 'I couldn't quite do that.');
       }
 
       setText(effectEl, payload.effect_summary ? `Changed: ${payload.effect_summary}` : '');

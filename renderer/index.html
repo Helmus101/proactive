@@ -39,17 +39,14 @@
 
     <!-- Bottom Navigation -->
     <nav class="bottom-nav">
-        <button class="nav-pill active" id="nav-today" data-view="today-view" title="Today">
-            <span class="material-symbols-outlined">home</span>
+        <button class="nav-pill active" id="nav-today" data-view="today-view" title="Now">
+            <span class="material-symbols-outlined">spa</span>
         </button>
-        <button class="nav-pill" id="nav-contacts" data-view="contacts-view" title="Contacts">
-            <span class="material-symbols-outlined">group</span>
+        <button class="nav-pill" id="nav-chat" data-view="chat-view" title="Doing">
+            <span class="material-symbols-outlined">bolt</span>
         </button>
-        <button class="nav-pill" id="nav-chat" data-view="chat-view" title="Chat">
-            <span class="material-symbols-outlined">forum</span>
-        </button>
-        <button class="nav-pill" id="nav-library" data-view="library-view" title="Library">
-            <span class="material-symbols-outlined">library_books</span>
+        <button class="nav-pill" id="nav-library" data-view="library-view" title="Memories">
+            <span class="material-symbols-outlined">auto_stories</span>
         </button>
         <button class="nav-pill" id="nav-settings" data-view="settings-view" title="Settings">
             <span class="material-symbols-outlined">settings</span>
@@ -63,9 +60,9 @@
             <section id="today-view" class="view active">
 
                 <div class="presence-layer" aria-live="polite">
-                    <div id="presence-state" class="presence-state">Waiting</div>
-                    <p id="presence-summary" class="presence-summary">Start here today.</p>
-                    <button id="presence-primary-action" class="presence-primary-action" type="button">Start here today</button>
+                    <div id="presence-state" class="presence-state">Resting</div>
+                    <p id="presence-summary" class="presence-summary">How can I make your day feel lighter?</p>
+                    <button id="presence-primary-action" class="presence-primary-action" type="button">Begin our day</button>
                 </div>
 
                 <!-- Context Chips -->
@@ -77,7 +74,7 @@
 
                 <div class="today-controls">
                     <button id="today-whisper-prompt" class="today-whisper-prompt" type="button" aria-label="Conversation starter">
-                        What feels most important right now?
+                        What's pulling at your heart right now?
                     </button>
                     <div class="today-controls-subtle">
                         <button id="manual-generate-suggestions-btn" class="ghost-button" type="button">Refresh thought stream</button>
@@ -97,8 +94,8 @@
                         <div class="empty-icon" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;">
                             <span class="material-symbols-outlined">lightbulb</span>
                         </div>
-                        <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">You're all caught up</div>
-                        <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">Ask Weave what deserves attention, or enjoy the quiet.</div>
+                        <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">The air is clear for now</div>
+                        <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">I'm just being here if you need me.</div>
                     </div>
                 </div>
 
@@ -354,8 +351,8 @@
                                     <div class="empty-icon" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;">
                                         <span class="material-symbols-outlined">forum</span>
                                     </div>
-                                    <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">Start a thought</div>
-                                    <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">Ask about your work, memory, relationships, or next move.</div>
+                                    <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">What's on your mind?</div>
+                                    <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">I'm here to listen and reflect with you.</div>
                                 </div>
                             </div>
                             <div class="chat-input-container">
@@ -462,7 +459,7 @@
                 </div>
                 <div class="modal-body">
                     <div id="voice-overlay-status" class="voice-overlay-status">Press the shortcut and start speaking.</div>
-                    <div id="voice-overlay-transcript" class="voice-overlay-transcript">Waiting for speech…</div>
+                    <div id="voice-overlay-transcript" class="voice-overlay-transcript">I'm here...</div>
                     <div id="voice-overlay-meta" class="voice-overlay-meta"></div>
                 </div>
             </div>
