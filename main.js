@@ -25,9 +25,33 @@ const fs = require('fs');
 const { execFile } = require('child_process');
 const axios = require('axios');
 const Store = require('electron-store');
+const ingestion = require('./services/ingestion');
+const { ingestRawEvent } = ingestion;
 const express = require('express');
 const FormData = require('form-data');
 require('dotenv').config(); // Load environment variables
+const db = require('./services/db');
+const engine = require('./services/agent/intelligence-engine');
+const extractor = require('./services/extractors/openLoopExtractor');
+const scoring = require('./services/scoring');
+const { answerChatQuery } = require('./services/agent/chat-engine');
+const { buildHybridGraphRetrieval } = require('./services/agent/hybrid-graph-retrieval');
+const { buildRetrievalThought } = require('./services/agent/retrieval-thought-system');
+const { generateEmbedding } = require('./services/embedding-engine');
+const { generateTopTodosFromMemoryQuery } = require('./services/agent/suggestion-engine');
+const { generateTopTodosFromMemoryQuery, generateAndPersistTasksFromLLM } = require('./services/agent/suggestion-engine');
+const { getLatestRecursiveImprovementLog } = require('./services/agent/recursive-improvement-engine');
+const { getRelationshipContactDetail } = require('./services/relationship-graph');
+const { getRelationshipContacts } = require('./services/relationship-graph');
+const { resetZeroBaseMemory } = require('./services/agent/zero-base-memory');
+const { runDailyInsights } = require('./services/agent/intelligence-engine');
+const { runEpisodeJob } = require('./services/agent/intelligence-engine');
+const { runHourlySemanticPulse } = require('./services/agent/intelligence-engine');
+const { runLivingCoreJob } = require("./services/agent/intelligence-engine");
+const { runRecursiveImprovementCycle } = require('./services/agent/recursive-improvement-engine');
+const { runRelationshipGraphJob } = require('./services/relationship-graph');
+const { runSemanticSummaryWindow } = require('./services/agent/intelligence-engine');
+const { runWeeklyInsightJob } = require('./services/agent/intelligence-engine');
 
 // Database import
 const db = require('./services/db');
@@ -53,6 +77,22 @@ const { rebuildInvertedIndex } = require('./services/summarizer/indexing');
 
 // Initialize electron-store for data persistence
 const store = new Store();
+const storeDebounceTimers = new Map();
+function debouncedStoreSet(key, value, delay = 2000) {
+  if (storeDebounceTimers.has(key)) {
+    clearTimeout(storeDebounceTimers.get(key));
+  }
+  const timer = setTimeout(() => {
+    try {
+      store.set(key, value);
+    } catch (e) {
+      console.warn(`[Store] Debounced set failed for ${key}:`, e.message);
+    }
+    storeDebounceTimers.delete(key);
+  }, delay);
+  storeDebounceTimers.set(key, timer);
+}
+
 
 // Express server for OAuth callback
 const oauthApp = express();
@@ -375,7 +415,6 @@ async function rebuildLayeredMemoryGraphFromEvents(events, apiKey) {
     if (!items.length) continue;
 
     // Process app data with intelligence engine
-    const engine = require('./services/agent/intelligence-engine');
     const appDataMap = { [appId]: { rawItems: items, appName: appId } };
     const graphResult = await engine.buildGlobalGraph({ appDataMap, apiKey, store });
 
@@ -636,7 +675,7 @@ function getSensorEvents() {
   const limit = Math.max(50, Number(maxEvents || DEFAULT_SENSOR_SETTINGS.maxEvents));
   if (Array.isArray(events) && events.length > limit) {
     const trimmed = events.slice(0, limit);
-    store.set('sensorEvents', trimmed);
+    debouncedStoreSet('sensorEvents', trimmed);
     return trimmed;
   }
   return events;
@@ -811,10 +850,10 @@ function mergeSuggestionQueues(existing = [], incoming = [], limit = MAX_PRACTIC
   return deduped.slice(0, Math.max(1, Math.min(MAX_PRACTICAL_SUGGESTIONS, Number(limit || MAX_PRACTICAL_SUGGESTIONS))));
 }
 
-function ensureSensorStorageDir() {
+async function ensureSensorStorageDir() {
   const capturesDir = path.join(app.getPath('userData'), 'screenshots');
   if (!fs.existsSync(capturesDir)) {
-    fs.mkdirSync(capturesDir, { recursive: true });
+    await fs.promises.mkdir(capturesDir, { recursive: true });
   }
   return capturesDir;
 }
@@ -953,7 +992,7 @@ function buildPerceptualFingerprintFromPngBuffer(pngBuffer) {
     const bins = new Array(64).fill(0);
     const counts = new Array(64).fill(0);
     const pixelCount = Math.floor(bitmap.length / 4);
-    for (let idx = 0; idx < pixelCount; idx += 1) {
+    for (let idx = 0; idx < pixelCount; idx += 4) {
       const offset = idx * 4;
       const r = bitmap[offset] || 0;
       const g = bitmap[offset + 1] || 0;
@@ -1065,7 +1104,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   let captureLockReleased = false;
   const timestamp = Date.now();
   const filename = `ocr_capture_${timestamp}_${crypto.randomBytes(4).toString('hex')}.png`;
-  const sensorStorageDir = ensureSensorStorageDir();
+  const sensorStorageDir = await ensureSensorStorageDir();
   const imagePath = path.join(sensorStorageDir, filename);
   let capturePngBuffer = null;
   try {
@@ -1290,7 +1329,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   const { maxEvents } = getSensorSettings();
   const nextEvents = [event, ...existing].slice(0, Math.max(50, Number(maxEvents || DEFAULT_SENSOR_SETTINGS.maxEvents)));
 
-  store.set('sensorEvents', nextEvents);
+  debouncedStoreSet('sensorEvents', nextEvents);
 
   if (isPeriodicScreenshot) {
     // The 30s screenshot cadence must not be blocked by DB/vector ingestion.
@@ -1300,7 +1339,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
 
   // L1 Ingestion - Always save OCR to memory with full metadata
   try {
-    const { ingestRawEvent } = require('./services/ingestion');
+    
     const ingestPayload = {
       type: 'ScreenCapture',
       timestamp: event.timestamp,
@@ -1356,7 +1395,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
 
     console.log(`[OCRIngestion] Saved to memory | app=${event.activeApp} | ${ocrSummary}`);
 
-    store.set('memoryGraphHealth', {
+    debouncedStoreSet('memoryGraphHealth', {
       ...(store.get('memoryGraphHealth') || {}),
       lastDesktopCaptureAt: new Date().toISOString(),
       desktopCaptureStatus: 'idle',
@@ -1382,7 +1421,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   } catch (e) {
     console.error('[captureDesktopSensorSnapshot] L1 ingestion failed:', e.message || e);
     console.error('[captureDesktopSensorSnapshot] Failed to ingest OCR capture from:', event.activeApp || 'unknown app');
-    store.set('memoryGraphHealth', {
+    debouncedStoreSet('memoryGraphHealth', {
       ...(store.get('memoryGraphHealth') || {}),
       desktopCaptureStatus: 'error',
       lastDesktopCaptureError: e?.message || String(e),
@@ -1674,7 +1713,7 @@ async function runMinutelySync() {
   }
   global.__gsuite_sync_lock = true;
   try {
-    store.set('memoryGraphHealth', {
+    debouncedStoreSet('memoryGraphHealth', {
       ...(store.get('memoryGraphHealth') || {}),
       lastSyncAttemptAt: new Date().toISOString(),
       syncStatus: 'running'
@@ -1722,7 +1761,7 @@ async function runMinutelySync() {
         editedEvents: editedEventCount
       }
     });
-    store.set('memoryGraphHealth', {
+    debouncedStoreSet('memoryGraphHealth', {
       ...(store.get('memoryGraphHealth') || {}),
       lastSyncRunAt: new Date().toISOString(),
       syncStatus: 'idle',
@@ -1735,7 +1774,7 @@ async function runMinutelySync() {
 
     // Incremental L1 Data Ingestion: Pipe directly to SQLite events
     try {
-      const { ingestRawEvent } = require('./services/ingestion');
+      
       let ingestedCount = 0;
 
       if (googleDelta.gmail) {
@@ -1830,7 +1869,7 @@ async function runMinutelySync() {
       }
     } catch (gErr) {
       console.warn('[runMinutelySync] L1 ingestion failed:', gErr.message || gErr);
-      store.set('memoryGraphHealth', {
+      debouncedStoreSet('memoryGraphHealth', {
         ...(store.get('memoryGraphHealth') || {}),
         syncStatus: 'error',
         lastSyncError: gErr?.message || String(gErr),
@@ -1844,7 +1883,7 @@ async function runMinutelySync() {
 
 function startMinutelySyncLoop() {
   if (minutelySyncInterval) clearInterval(minutelySyncInterval);
-  store.set('memoryGraphHealth', {
+  debouncedStoreSet('memoryGraphHealth', {
     ...(store.get('memoryGraphHealth') || {}),
     minutelySyncLoopActive: true
   });
@@ -1881,9 +1920,8 @@ async function hasNewEventsSince(jobKey) {
 
 async function runRelationshipGraphUpdate(options = {}) {
   try {
-    const { runRelationshipGraphJob } = require('./services/relationship-graph');
     const result = await runRelationshipGraphJob(options);
-    store.set('memoryGraphHealth', {
+    debouncedStoreSet('memoryGraphHealth', {
       ...(store.get('memoryGraphHealth') || {}),
       lastRelationshipGraphRunAt: new Date().toISOString(),
       relationshipContactCount: result.contacts,
@@ -1892,7 +1930,7 @@ async function runRelationshipGraphUpdate(options = {}) {
     console.log(`[RelationshipGraph] Updated ${result.contacts} contacts${options.backfill ? ' (backfill)' : ''}`);
     return result;
   } catch (error) {
-    store.set('memoryGraphHealth', {
+    debouncedStoreSet('memoryGraphHealth', {
       ...(store.get('memoryGraphHealth') || {}),
       relationshipGraphStatus: 'error',
       lastRelationshipGraphError: error?.message || String(error),
@@ -1923,9 +1961,8 @@ async function runEpisodeGeneration() {
 
   try {
     console.log('[EpisodeJob] Running 15-minute episode generation...');
-    const { runEpisodeJob } = require('./services/agent/intelligence-engine');
 
-    store.set('memoryGraphHealth', {
+    debouncedStoreSet('memoryGraphHealth', {
       ...(store.get('memoryGraphHealth') || {}),
       lastEpisodeAttemptAt: new Date().toISOString(),
       episodeStatus: 'running'
@@ -1934,7 +1971,7 @@ async function runEpisodeGeneration() {
     console.log(`[EpisodeJob] Generated ${newEpisodeIds.length} new episodes`);
     store.set('lastEpisodeRun', new Date().toISOString());
     store.set('lastProcessedEventTimestamp:episode', check.maxTs);
-    store.set('memoryGraphHealth', {
+    debouncedStoreSet('memoryGraphHealth', {
       ...(store.get('memoryGraphHealth') || {}),
       lastEpisodeRunAt: new Date().toISOString(),
       lastEpisodeCount: newEpisodeIds.length,
@@ -1951,7 +1988,7 @@ async function runEpisodeGeneration() {
     }
   } catch (error) {
     console.error('[EpisodeJob] Error:', error.message || error);
-    store.set('memoryGraphHealth', {
+    debouncedStoreSet('memoryGraphHealth', {
       ...(store.get('memoryGraphHealth') || {}),
       episodeStatus: 'error',
       lastEpisodeError: error?.message || String(error),
@@ -1975,7 +2012,6 @@ async function runSemanticWindowGeneration() {
       return;
     }
     console.log('[SemanticWindow] Running 15-minute semantic summary...');
-    const { runSemanticSummaryWindow } = require('./services/agent/intelligence-engine');
     const result = await runSemanticSummaryWindow(15 * 60 * 1000, process.env.DEEPSEEK_API_KEY || null);
     store.set('lastProcessedEventTimestamp:semantic', check.maxTs);
     const semIds = Array.isArray(result) ? result.filter(Boolean) : (result ? [result] : []);
@@ -2049,10 +2085,9 @@ async function runSuggestionEngineJob(options = {}) {
     }
 
     console.log(`[SuggestionEngine] Running hourly top-up (${existingActiveSuggestions.length}/7 active, capacity=${remainingCapacity}, new_events=${Boolean(check.hasNew)}, provider=${llmConfig.provider}, force=${force})...`);
-    const { generateTopTodosFromMemoryQuery, generateAndPersistTasksFromLLM } = require('./services/agent/suggestion-engine');
     const proactiveMemory = store.get('proactiveMemory') || { core: '' };
 
-    store.set('memoryGraphHealth', {
+    debouncedStoreSet('memoryGraphHealth', {
       ...(store.get('memoryGraphHealth') || {}),
       lastSuggestionAttemptAt: new Date().toISOString(),
       suggestionStatus: 'running'
@@ -2071,7 +2106,7 @@ async function runSuggestionEngineJob(options = {}) {
     console.log(`[SuggestionEngine] Generated ${newSuggestions.length} actionable suggestions`);
     store.set('lastSuggestionRun', new Date().toISOString());
     store.set('lastProcessedEventTimestamp:suggestion', check.maxTs);
-    store.set('memoryGraphHealth', {
+    debouncedStoreSet('memoryGraphHealth', {
       ...(store.get('memoryGraphHealth') || {}),
       lastSuggestionRunAt: new Date().toISOString(),
       lastSuggestionCount: newSuggestions.length,
@@ -2147,7 +2182,7 @@ async function runSuggestionEngineJob(options = {}) {
     console.log(`[SuggestionEngine] Published ${outgoingSuggestions.length} AI suggestions`);
   } catch (error) {
     console.error('[SuggestionEngine] Error:', error.message || error);
-    store.set('memoryGraphHealth', {
+    debouncedStoreSet('memoryGraphHealth', {
       ...(store.get('memoryGraphHealth') || {}),
       suggestionStatus: 'error',
       lastSuggestionError: error?.message || String(error),
@@ -2178,7 +2213,6 @@ async function runWeeklyInsightJobScheduled() {
     }
 
     console.log('[WeeklyInsight] Running weekly insight generation...');
-    const { runWeeklyInsightJob } = require('./services/agent/intelligence-engine');
 
     await runWeeklyInsightJob(apiKey);
     store.set('lastRunTimestamp:weekly_insight', check.maxAt);
@@ -2210,7 +2244,6 @@ async function runDailyInsightsScheduled() {
       return;
     }
     console.log('[DailyInsight] Running daily insight generation...');
-    const { runDailyInsights } = require('./services/agent/intelligence-engine');
     const created = await runDailyInsights(apiKey);
     store.set('lastRunTimestamp:daily_insight', check.maxAt);
     console.log('[DailyInsight] Promoted insights:', created.length);
@@ -2232,7 +2265,6 @@ async function runHourlySemanticPulseJob() {
       return;
     }
     console.log('[SemanticPulse] Running hourly semantic pulse (deduplication & graduation)...');
-    const { runHourlySemanticPulse } = require('./services/agent/intelligence-engine');
     const consolidatedIds = await runHourlySemanticPulse(apiKey);
     console.log(`[SemanticPulse] Consolidated ${consolidatedIds.length} semantic nodes`);
 
@@ -2261,7 +2293,6 @@ async function runLivingCoreJobScheduled() {
       return;
     }
     console.log("[LivingCore] Running Living Core synthesis job...");
-    const { runLivingCoreJob } = require("./services/agent/intelligence-engine");
     const created = await runLivingCoreJob(apiKey);
     store.set('lastRunTimestamp:living_core', check.maxAt);
     console.log("[LivingCore] Created core nodes:", created.length);
@@ -2275,7 +2306,7 @@ async function runLivingCoreJobScheduled() {
 
 function startMemoryGraphProcessing() {
   console.log('[MemoryGraph] Starting automated processing...');
-  store.set('memoryGraphHealth', {
+  debouncedStoreSet('memoryGraphHealth', {
     ...(store.get('memoryGraphHealth') || {}),
     processorStartedAt: new Date().toISOString(),
     processorTimersActive: true
@@ -3875,7 +3906,7 @@ oauthApp.post('/extension-data', express.json(), async (req, res) => {
 
     // Persist browser history signals into L1 SQLite with deterministic IDs.
     try {
-      const { ingestRawEvent } = require('./services/ingestion');
+      
       const urls = processedData?.urls || extensionData?.urls || [];
       for (const item of urls) {
         const ts = item.timestamp || item.last_visit_time || Date.now();
@@ -4266,9 +4297,6 @@ async function getBrowserHistory() {
 
 // Read a single Chromium history DB file and return entries
 async function readChromiumHistoryDB(dbPath, browserName) {
-  const fs = require('fs');
-  const path = require('path');
-  const os = require('os');
 
   if (!fs.existsSync(dbPath)) return [];
 
@@ -4282,7 +4310,6 @@ async function readChromiumHistoryDB(dbPath, browserName) {
   }
 
   try {
-    const sqlite3 = require('sqlite3');
 
     return await new Promise((resolve) => {
       const db = new sqlite3.Database(tmpPath, sqlite3.OPEN_READONLY, (err) => {
@@ -4339,9 +4366,6 @@ async function readChromiumHistoryDB(dbPath, browserName) {
 
 // Collect Chromium-family history: Chrome, Brave, Arc — all profiles
 async function getChromiumHistory() {
-  const fs   = require('fs');
-  const path = require('path');
-  const os   = require('os');
   const home = os.homedir();
   const all  = [];
 
@@ -4391,9 +4415,6 @@ async function getChromiumHistory() {
 
 // Get Safari history from SQLite database
 async function getSafariHistory() {
-  const fs = require('fs');
-  const path = require('path');
-  const os = require('os');
 
   try {
     if (process.platform !== 'darwin') return [];
@@ -4422,7 +4443,6 @@ async function getSafariHistory() {
     }
 
     try {
-      const sqlite3 = require('sqlite3');
 
       return await new Promise((resolve) => {
         const db = new sqlite3.Database(tmpPath, sqlite3.OPEN_READONLY, (err) => {
@@ -5118,7 +5138,6 @@ async function generateDailySummary() {
       });
 
       // 1. Process app data with intelligence engine
-      const engine = require('./services/agent/intelligence-engine');
       const appDataMap = { [appId]: { rawItems: items, appName: appId } };
       const graphResult = await engine.buildGlobalGraph({ appDataMap, apiKey, store });
 
@@ -5425,7 +5444,6 @@ ipcMain.handle('run-initial-sync', async (event) => {
 
 // ── IPC: Get full details for a specific event (evidence backlink) ───────────
 ipcMain.handle('get-event-details', async (event, eventId) => {
-  const db = require('./services/db');
   try {
     const row = await db.getQuery(`SELECT * FROM events WHERE id = ? OR source_ref = ?`, [eventId, eventId]);
     if (row) {
@@ -6728,7 +6746,6 @@ async function ensureSummaryChunksIndexed() {
     const existingCount = Number(existing?.count || 0);
     if (existingCount >= 40) return;
 
-    const { generateEmbedding } = require('./services/embedding-engine');
     const historicalSummaries = store.get('historicalSummaries') || {};
     const rows = Object.values(historicalSummaries)
       .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')))
@@ -7022,7 +7039,6 @@ function buildChatRetrievalContext(query) {
 // ── Graph-Based Search ───────────────────────────────────────────────────
 ipcMain.handle('search-graph', async (event, query, filters = {}) => {
   try {
-    const db = require('./services/db');
     const q = `%${query || ''}%`;
     const targetLayer = filters.layer || null;
 
@@ -7105,7 +7121,7 @@ async function persistChatTurnAsRawEvent({ chatSessionId, role, content, chatHis
   const text = String(content || '').trim();
   if (!text) return;
   try {
-    const { ingestRawEvent } = require('./services/ingestion');
+    
     const now = new Date().toISOString();
     const historyWindow = Array.isArray(chatHistory) ? chatHistory.slice(-12) : [];
     const retrievalSnapshot = retrieval ? {
@@ -7306,7 +7322,7 @@ async function loadChatSessionsFromDb(limit = 25) {
 ipcMain.handle('save-chat-sessions-to-memory', async (event, sessions) => {
   try {
     if (!Array.isArray(sessions)) return { success: false, message: 'invalid_sessions' };
-    const { ingestRawEvent } = require('./services/ingestion');
+    
     await saveChatSessionsToDb(sessions).catch((e) => {
       console.warn('[save-chat-sessions-to-memory] durable save failed', e?.message || e);
     });
@@ -7400,8 +7416,6 @@ ipcMain.handle("get-full-memory-graph", async () => {
 // AI Assistant Chat Logic
 ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
   try {
-    const { answerChatQuery } = require('./services/agent/chat-engine');
-    const db = require('./services/db');
     console.log('[ChatMemory] Using SQLite memory DB:', typeof db.getDbPath === 'function' ? db.getDbPath() : 'unknown');
     const proactiveMemory = store.get('proactiveMemory') || { core: '' };
     const historicalSummaries = store.get('historicalSummaries') || {};
@@ -7515,7 +7529,6 @@ ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
 ipcMain.handle('generate-proactive-todos', async (event, payload = {}) => {
   console.log('[Main] IPC generate-proactive-todos invoked from', event?.sender?.getURL ? event.sender.getURL() : 'main');
   try {
-    const { generateTopTodosFromMemoryQuery } = require('./services/agent/suggestion-engine');
     const looksValidAISuggestion = (item) => Boolean(
       item &&
       isActionableSuggestion(item) &&
@@ -9467,8 +9480,6 @@ ipcMain.handle('trigger-suggestion-refresh', async (_event, payload = {}) => {
 ipcMain.handle('run-suggestion-engine', async (event, payload) => {
   try {
     // Lazy-load services to avoid startup cost
-    const extractor = require('./services/extractors/openLoopExtractor');
-    const scoring = require('./services/scoring');
 
     const events = payload && payload.events ? payload.events : (global.extensionData && global.extensionData.urls ? global.extensionData.urls : []);
 
@@ -9534,7 +9545,6 @@ ipcMain.handle('log-automation', async (event, record) => {
 
 ipcMain.handle('list-automations', async () => {
   try {
-    const db = require('./services/db');
     const rows = await db.allQuery(
       `SELECT id, name, description, prompt, interval_minutes, enabled, last_run_at, next_run_at, created_at FROM scheduled_automations ORDER BY created_at DESC`,
       []
@@ -9548,7 +9558,6 @@ ipcMain.handle('list-automations', async () => {
 
 ipcMain.handle('delete-automation', async (_event, automationId) => {
   try {
-    const db = require('./services/db');
     await db.runQuery(`DELETE FROM scheduled_automations WHERE id = ?`, [automationId]);
     return { success: true };
   } catch (e) {
@@ -9559,7 +9568,6 @@ ipcMain.handle('delete-automation', async (_event, automationId) => {
 
 ipcMain.handle('toggle-automation', async (_event, automationId, enabled) => {
   try {
-    const db = require('./services/db');
     await db.runQuery(`UPDATE scheduled_automations SET enabled = ? WHERE id = ?`, [enabled ? 1 : 0, automationId]);
     return { success: true };
   } catch (e) {
@@ -9586,7 +9594,6 @@ async function runRecursiveImprovementOnce(trigger = 'scheduled') {
   if (shouldDeferBackgroundWork('RecursiveImprovement')) return { skipped: true, reason: 'active_use' };
   try {
     const apiKey = process.env.DEEPSEEK_API_KEY || null;
-    const { runRecursiveImprovementCycle } = require('./services/agent/recursive-improvement-engine');
     const cycle = await runRecursiveImprovementCycle({ apiKey });
 
     if (mainWindow && mainWindow.webContents) {
@@ -9625,7 +9632,6 @@ function startAutomationScheduler() {
   if (automationSchedulerTimer) return;
   automationSchedulerTimer = setInterval(async () => {
     try {
-      const db = require('./services/db');
       const now = new Date().toISOString();
       const due = await db.allQuery(
         `SELECT * FROM scheduled_automations WHERE enabled = 1 AND (next_run_at IS NULL OR next_run_at <= ?)`,
@@ -9634,7 +9640,6 @@ function startAutomationScheduler() {
 
       for (const automation of due) {
         try {
-          const { answerChatQuery } = require('./services/agent/chat-engine');
           const apiKey = process.env.DEEPSEEK_API_KEY;
           const result = await answerChatQuery({
             apiKey,
@@ -9650,7 +9655,7 @@ function startAutomationScheduler() {
           });
 
           // Persist result to memory as a raw event
-          const { ingestRawEvent } = require('./services/ingestion');
+          
           await ingestRawEvent({
             type: 'automation_result',
             source: 'scheduled_automation',
@@ -9692,7 +9697,6 @@ ipcMain.handle('run-recursive-improvement', async () => {
 
 ipcMain.handle('get-recursive-improvement-status', async () => {
   try {
-    const { getLatestRecursiveImprovementLog } = require('./services/agent/recursive-improvement-engine');
     const latest = await getLatestRecursiveImprovementLog();
     return {
       enabled: recursiveImprovementEnabled(),
@@ -9715,8 +9719,7 @@ ipcMain.handle('sync-google-data', async () => {
 
 // Full GSuite sync flow extracted so it can be invoked after OAuth and by IPC
 async function fullGoogleSync({ since, forceHistoricalBackfill = false } = {}) {
-  const { ingestRawEvent } = require('./services/ingestion');
-  const engine = require('./services/agent/intelligence-engine');
+  
   const apiKey = process.env.DEEPSEEK_API_KEY;
 
   const sendProgress = (phase, done, total) => {
@@ -9825,7 +9828,6 @@ ipcMain.handle('get-google-data', () => {
 
 ipcMain.handle('get-memory-graph-status', async () => {
   try {
-    const db = require('./services/db');
 
     const eventCount = await db.getQuery(`SELECT COUNT(*) as count FROM events`).catch(() => ({ count: 0 }));
     const nodeCounts = await db.allQuery(`SELECT layer, COUNT(*) as count FROM memory_nodes GROUP BY layer`).catch(() => []);
@@ -9884,7 +9886,6 @@ ipcMain.handle('get-memory-graph-status', async () => {
 
 ipcMain.handle('search-memory-graph', async (event, query, options = {}) => {
   try {
-    const db = require('./services/db');
     const { limit = 20, nodeTypes = [], app, date_range: dateRange, data_source: dataSource } = options;
     const appFilters = Array.isArray(app) ? app.map((item) => String(item || '').toLowerCase()).filter(Boolean) : (app ? [String(app).toLowerCase()] : []);
     const startMs = dateRange?.start ? Date.parse(String(dateRange.start)) : null;
@@ -9951,8 +9952,6 @@ ipcMain.handle('search-memory-graph', async (event, query, options = {}) => {
     // Router-based retrieval first: query-first, core-first, or hybrid based on intent.
     if (effectiveQuery && effectiveQuery.length >= 2) {
       try {
-        const { buildRetrievalThought } = require('./services/agent/retrieval-thought-system');
-        const { buildHybridGraphRetrieval } = require('./services/agent/hybrid-graph-retrieval');
         const thought = await buildRetrievalThought({
           query: effectiveQuery,
           mode: 'chat',
@@ -10119,7 +10118,6 @@ ipcMain.handle('search-memory-graph', async (event, query, options = {}) => {
 
 ipcMain.handle('get-related-nodes', async (event, nodeId, relationType = null) => {
   try {
-    const db = require('./services/db');
 
     let sql = `
       SELECT n.id, n.layer, n.title, n.summary, n.metadata, n.anchor_at, n.created_at, n.updated_at, e.edge_type
@@ -10161,7 +10159,6 @@ ipcMain.handle('get-related-nodes', async (event, nodeId, relationType = null) =
 
 ipcMain.handle('get-core-memory', async () => {
   try {
-    const db = require('./services/db');
     const coreNode = await db.get(`SELECT * FROM memory_nodes WHERE id = 'core_living_doc'`).catch(() => null);
     const rows = await db.allQuery(
       `SELECT title, summary, confidence
@@ -10209,7 +10206,6 @@ ipcMain.handle('trigger-memory-graph-job', async (event, jobType) => {
 
 ipcMain.handle('search-raw-events', async (event, query) => {
   try {
-    const db = require('./services/db');
     const q = `%${query || ''}%`;
 
     const results = await db.allQuery(`
@@ -10232,7 +10228,6 @@ ipcMain.handle('search-raw-events', async (event, query) => {
 
 ipcMain.handle('get-memory-drilldown', async (event, refs = []) => {
   try {
-    const db = require('./services/db');
     const ids = Array.from(new Set((Array.isArray(refs) ? refs : [refs]).filter(Boolean).map((item) => {
       if (typeof item === 'string') return item;
       return item.ref || item.event_id || item.id || null;
@@ -10277,7 +10272,6 @@ ipcMain.handle('get-memory-drilldown', async (event, refs = []) => {
 
 ipcMain.handle('reset-memory-system', async (event, options = {}) => {
   try {
-    const { resetZeroBaseMemory } = require('./services/agent/zero-base-memory');
     const result = await resetZeroBaseMemory({
       includeEvents: options?.includeEvents !== false,
       rederive: Boolean(options?.rederive)
@@ -10621,7 +10615,6 @@ ipcMain.handle('clear-extension-data', async () => {
 });
 
 ipcMain.handle('get-relationship-contacts', async (_event, payload = {}) => {
-  const { getRelationshipContacts } = require('./services/relationship-graph');
   return getRelationshipContacts({
     limit: payload?.limit || 50,
     status: payload?.status || null
@@ -10629,7 +10622,6 @@ ipcMain.handle('get-relationship-contacts', async (_event, payload = {}) => {
 });
 
 ipcMain.handle('get-relationship-contact-detail', async (_event, contactId) => {
-  const { getRelationshipContactDetail } = require('./services/relationship-graph');
   return getRelationshipContactDetail(contactId);
 });
 
@@ -10798,11 +10790,12 @@ ipcMain.handle('execute-todo', async (event, todo) => {
 
 app.whenReady().then(async () => {
   try {
-    await db.initDB();
+    await db.ensureDB();
+    await ingestion.initIngestion();
     console.log('SQLite Graph DB Initialized');
     await repairEmailEventTimestamps();
-  } catch (e) {
-    console.error('Failed to init SQLite Graph DB:', e);
+  } catch (err) {
+    console.error('Failed to initialize database or ingestion:', err);
   }
   createWindow();
   createVoiceHudWindow();

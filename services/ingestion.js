@@ -1,9 +1,28 @@
 const crypto = require('crypto');
 const { canonicalAppIdForName } = require('./app-scope-catalog');
 const db = require('./db');
-const { generateEmbedding } = require('./embedding-engine');
+const { generateEmbedding, calculateSentimentScore } = require('./embedding-engine');
 const { upsertRetrievalDoc } = require('./agent/graph-store');
 const cognitiveRouter = require('./agent/cognitive-router');
+const { linkMentionsForEvent } = require('./relationship-graph');
+
+let ingestionInitialized = false;
+let initializingPromise = null;
+
+async function initIngestion() {
+  if (ingestionInitialized) return;
+  if (initializingPromise) return initializingPromise;
+
+  initializingPromise = (async () => {
+    await ensureEventsDateColumn();
+    await ensureEventEnvelopeColumns();
+    await ensureTextChunksColumns();
+    ingestionInitialized = true;
+  })();
+
+  return initializingPromise;
+}
+
 let eventsDateColumnReady = false;
 let eventEnvelopeColumnsReady = false;
 let textChunksColumnsReady = false;
@@ -947,7 +966,7 @@ async function indexEventChunks({
   text,
   metadata
 }) {
-  await ensureTextChunksColumns();
+  await initIngestion();
   const operationalSource = inferOperationalDataSource(eventType, source, metadata);
   const isScreenLike = operationalSource === 'screenshot_ocr';
   const chunks = chunkText(text, {
@@ -1083,9 +1102,7 @@ async function upsertIngestionSemanticNodes({ envelope = {}, entities = [], even
  * Standardize an external payload into the universal L1 format and store in SQLite
  */
 async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
-  await ensureEventsDateColumn();
-  await ensureEventEnvelopeColumns();
-  const { calculateSentimentScore } = require('./embedding-engine');
+  await initIngestion();
 
   const normalizedTime = pickOccurredAt(
     type,
@@ -1320,7 +1337,6 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
     }
 
     try {
-      const { linkMentionsForEvent } = require('./relationship-graph');
       const linkedContacts = await linkMentionsForEvent({
         eventId: id,
         type,
@@ -1358,5 +1374,6 @@ module.exports = {
   inferAppId,
   inferOperationalDataSource,
   normalizeEventEnvelope,
-  ingestRawEvent
+  ingestRawEvent,
+  initIngestion
 };
