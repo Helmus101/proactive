@@ -6921,3 +6921,89 @@ body {
     border-color: var(--accent-blue);
     transform: translateY(-1px);
 }
+
+/* ─── PROFESSIONAL HOME REFINEMENT ───────────────────────────────── */
+.presence-layer {
+    padding: 32px !important;
+    border: none !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 20px !important;
+}
+
+.presence-state {
+    font-size: 12px !important;
+    letter-spacing: 0.1em !important;
+    text-transform: uppercase !important;
+    color: var(--accent-blue-strong) !important;
+    opacity: 0.8 !important;
+}
+
+.presence-summary {
+    font-family: 'Fraunces', serif !important;
+    font-size: 32px !important;
+    font-weight: 500 !important;
+    color: var(--text-primary) !important;
+    line-height: 1.2 !important;
+}
+
+.today-snapshot {
+    display: flex !important;
+    gap: 32px !important;
+    margin-top: 8px !important;
+}
+
+.today-snapshot-item {
+    background: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 4px !important;
+}
+
+.today-snapshot-item span {
+    font-size: 28px !important;
+    font-weight: 300 !important;
+    color: var(--text-primary) !important;
+}
+
+.today-snapshot-item small {
+    font-size: 11px !important;
+    color: var(--text-secondary) !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.05em !important;
+}
+
+.presence-primary-action {
+    align-self: flex-start !important;
+    margin-top: 12px !important;
+}
+
+#presence-view .context-chips {
+    padding: 0 32px !important;
+}
+
+#reminders-list {
+    padding: 0 32px 64px !important;
+}
+
+.suggestion-card.conversation-entry {
+    border: 1px solid var(--glass-border) !important;
+    background: var(--glass-bg) !important;
+    padding: 24px !important;
+    border-radius: 20px !important;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+.suggestion-card.conversation-entry:hover {
+    border-color: var(--accent-blue) !important;
+    transform: translateY(-2px) !important;
+    box-shadow: var(--glass-shadow-hover) !important;
+}
+
+.claude-chat-messages {
+    background: transparent !important;
+}
