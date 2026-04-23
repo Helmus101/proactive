@@ -12,6 +12,7 @@ class WeaveApp {
         this.notificationsEnabled = localStorage.getItem('notificationsEnabled') !== 'false';
         this.soundEnabled = localStorage.getItem('soundEnabled') === 'true';
         this.desktopCaptureEnabled = localStorage.getItem('desktopCaptureEnabled') !== 'false';
+        this.suggestionRefreshInFlight = null;
         this.lastReasoning = null;
         this.memorySearchResults = [];
         this.morningBriefs = [];
@@ -219,6 +220,11 @@ class WeaveApp {
 
     setupSuggestions() {
         this.setupTodayWhisperPrompt();
+        const triggerRefresh = async (event = null) => {
+            event?.preventDefault?.();
+            event?.stopPropagation?.();
+            await this.generateSuggestions({ replace: true, silent: false, forceEngineRefresh: true });
+        };
 
         this.filterChips.forEach((chip) => {
             chip.addEventListener('click', () => {
@@ -229,15 +235,9 @@ class WeaveApp {
             });
         });
 
-        this.refreshButton?.addEventListener('click', async () => {
-            await this.generateSuggestions({ replace: true, silent: false, forceEngineRefresh: true });
-        });
-        this.manualGenerateSuggestionsButton?.addEventListener('click', async () => {
-            await this.generateSuggestions({ replace: true, silent: false, forceEngineRefresh: true });
-        });
-        this.presencePrimaryAction?.addEventListener('click', async () => {
-            await this.generateSuggestions({ replace: true, silent: false, forceEngineRefresh: true });
-        });
+        this.refreshButton?.addEventListener('click', triggerRefresh);
+        this.manualGenerateSuggestionsButton?.addEventListener('click', triggerRefresh);
+        this.presencePrimaryAction?.addEventListener('click', triggerRefresh);
         this.clearAllSuggestionsButton?.addEventListener('click', async () => {
             await this.clearAllSuggestions();
         });
@@ -260,9 +260,11 @@ class WeaveApp {
         // handle clicks at document level for the common control IDs.
         document.addEventListener('click', async (ev) => {
             try {
+                if (ev.defaultPrevented) return;
                 const target = ev.target.closest && ev.target.closest('#manual-generate-suggestions-btn, #refresh-tasks-btn, #presence-primary-action');
                 if (!target) return;
                 ev.preventDefault();
+                ev.stopPropagation();
                 await this.generateSuggestions({ replace: true, silent: false, forceEngineRefresh: true });
             } catch (err) {
                 console.error('[Renderer] fallback generateSuggestions handler failed:', err);
@@ -371,8 +373,25 @@ class WeaveApp {
         });
     }
 
+    async withTimeout(promise, timeoutMs, label = 'operation') {
+        let timer = null;
+        try {
+            return await Promise.race([
+                Promise.resolve(promise),
+                new Promise((_, reject) => {
+                    timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+                })
+            ]);
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
+    }
+
     async generateSuggestions({ replace = true, silent = false, forceEngineRefresh = false } = {}) {
         if (!this.remindersList) return;
+        if (this.suggestionRefreshInFlight) {
+            return this.suggestionRefreshInFlight;
+        }
         this.setPresenceMode('thinking');
 
         const activeSuggestions = (Array.isArray(this.todos) ? this.todos : []).filter((todo) => !todo?.completed);
@@ -393,16 +412,20 @@ class WeaveApp {
             );
         }
 
-        try {
+        const run = async () => {
             if (forceEngineRefresh && typeof window.electronAPI?.triggerSuggestionRefresh === 'function') {
-                const refreshResult = await window.electronAPI.triggerSuggestionRefresh({
-                    requested_at: Date.now(),
-                    source: this.activeView || 'presence-view'
-                });
+                const refreshResult = await this.withTimeout(
+                    window.electronAPI.triggerSuggestionRefresh({
+                        requested_at: Date.now(),
+                        source: this.activeView || 'presence-view'
+                    }),
+                    20000,
+                    'triggerSuggestionRefresh'
+                );
                 if (Array.isArray(refreshResult?.suggestions) && refreshResult.suggestions.length) {
                     const normalizedRefreshed = this.normalizeTodos(refreshResult.suggestions);
                     this.todos = this.mergeTodos(replace ? [] : this.todos, normalizedRefreshed).filter((todo) => !todo.completed).slice(0, 7);
-                    await window.electronAPI.savePersistentTodos(this.todos);
+                    await this.withTimeout(window.electronAPI.savePersistentTodos(this.todos), 5000, 'savePersistentTodos');
                     this.renderSuggestions();
                     this.setPresenceMode('suggesting');
                     if (!silent) this.showToast('Priorities refreshed from memory');
@@ -413,10 +436,14 @@ class WeaveApp {
             if (!window.electronAPI || typeof window.electronAPI.generateProactiveTodos !== 'function') {
                 throw new Error('electronAPI.generateProactiveTodos is not available');
             }
-            const generated = await window.electronAPI.generateProactiveTodos({
-                maxNewSuggestions: remainingCapacity,
-                activeSuggestionCount: activeSuggestions.length
-            });
+            const generated = await this.withTimeout(
+                window.electronAPI.generateProactiveTodos({
+                    maxNewSuggestions: remainingCapacity,
+                    activeSuggestionCount: activeSuggestions.length
+                }),
+                20000,
+                'generateProactiveTodos'
+            );
             console.debug('[Renderer] generateSuggestions received', Array.isArray(generated) ? `${generated.length} items` : typeof generated);
             const normalized = this.normalizeTodos(generated);
 
@@ -427,15 +454,21 @@ class WeaveApp {
             }
             this.todos = this.todos.filter((todo) => !todo.completed).slice(0, 7);
 
-            await window.electronAPI.savePersistentTodos(this.todos);
+            await this.withTimeout(window.electronAPI.savePersistentTodos(this.todos), 5000, 'savePersistentTodos');
             this.renderSuggestions();
             this.setPresenceMode('suggesting');
-        } catch (error) {
+        };
+
+        this.suggestionRefreshInFlight = run().catch((error) => {
             console.error('Failed to generate suggestions:', error);
             this.showToast('Priority refresh failed');
             this.renderSuggestions();
             this.setPresenceMode('waiting');
-        }
+        }).finally(() => {
+            this.suggestionRefreshInFlight = null;
+        });
+
+        return this.suggestionRefreshInFlight;
     }
 
     async clearAllSuggestions() {
@@ -1131,7 +1164,7 @@ class WeaveApp {
                 if (this.chatInput) {
                     this.chatInput.value = result.draft;
                     this.chatInput.style.height = 'auto';
-                    this.chatInput.style.height = f"{Math.min(this.chatInput.scrollHeight, 120)}px";
+                    this.chatInput.style.height = `${Math.min(this.chatInput.scrollHeight, 120)}px`;
                     this.chatInput.focus();
                 }
             }

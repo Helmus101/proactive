@@ -38,7 +38,6 @@ const { answerChatQuery } = require('./services/agent/chat-engine');
 const { buildHybridGraphRetrieval } = require('./services/agent/hybrid-graph-retrieval');
 const { buildRetrievalThought } = require('./services/agent/retrieval-thought-system');
 const { generateEmbedding } = require('./services/embedding-engine');
-const { generateTopTodosFromMemoryQuery } = require('./services/agent/suggestion-engine');
 const { generateTopTodosFromMemoryQuery, generateAndPersistTasksFromLLM } = require('./services/agent/suggestion-engine');
 const { getLatestRecursiveImprovementLog } = require('./services/agent/recursive-improvement-engine');
 const { getRelationshipContactDetail } = require('./services/relationship-graph');
@@ -52,9 +51,6 @@ const { runRecursiveImprovementCycle } = require('./services/agent/recursive-imp
 const { runRelationshipGraphJob } = require('./services/relationship-graph');
 const { runSemanticSummaryWindow } = require('./services/agent/intelligence-engine');
 const { runWeeklyInsightJob } = require('./services/agent/intelligence-engine');
-
-// Database import
-const db = require('./services/db');
 
 // ── Summarizer services ──────────────────────────────────────────────────────
 const { runInitialSync, searchSummaries } = require('./services/summarizer/initialSync');
@@ -91,6 +87,18 @@ function debouncedStoreSet(key, value, delay = 2000) {
     storeDebounceTimers.delete(key);
   }, delay);
   storeDebounceTimers.set(key, timer);
+}
+
+function withTimeout(promise, timeoutMs, label = 'operation') {
+  let timer = null;
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+    })
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 
@@ -2092,17 +2100,21 @@ async function runSuggestionEngineJob(options = {}) {
       lastSuggestionAttemptAt: new Date().toISOString(),
       suggestionStatus: 'running'
     });
-    const newSuggestions = await generateTopTodosFromMemoryQuery(llmConfig, {
-      query: `What are the top tasks and things to do right now?`,
-      standing_notes: proactiveMemory.core || '',
-      max_suggestions: capacityToGenerate,
-      existing_suggestions: existingActiveSuggestions.map((item) => ({
-        title: item.title,
-        reason: item.reason || item.description || '',
-        primary_action: item.primary_action?.label || item.recommended_action || ''
-      })),
-      study_context: getStudySessionState()
-    });
+    const newSuggestions = await withTimeout(
+      generateTopTodosFromMemoryQuery(llmConfig, {
+        query: `What are the top tasks and things to do right now?`,
+        standing_notes: proactiveMemory.core || '',
+        max_suggestions: capacityToGenerate,
+        existing_suggestions: existingActiveSuggestions.map((item) => ({
+          title: item.title,
+          reason: item.reason || item.description || '',
+          primary_action: item.primary_action?.label || item.recommended_action || ''
+        })),
+        study_context: getStudySessionState()
+      }),
+      20000,
+      'generateTopTodosFromMemoryQuery'
+    );
     console.log(`[SuggestionEngine] Generated ${newSuggestions.length} actionable suggestions`);
     store.set('lastSuggestionRun', new Date().toISOString());
     store.set('lastProcessedEventTimestamp:suggestion', check.maxTs);
@@ -7570,18 +7582,22 @@ ipcMain.handle('generate-proactive-todos', async (event, payload = {}) => {
     if (!llmConfig) {
       return Array.isArray(existingSuggestions) ? existingSuggestions : [];
     }
-    const suggestions = await generateTopTodosFromMemoryQuery(llmConfig, {
-      query: `Look through my memory and generate ${maxNewSuggestions} short actionable todos or actions I need to do right now. Do not duplicate existing active suggestions.`,
-      standing_notes: proactiveMemory.core || '',
-      max_suggestions: maxNewSuggestions,
-      active_suggestion_count: activeCount,
-      existing_suggestions: existingSuggestions.slice(0, MAX_PRACTICAL_SUGGESTIONS).map((item) => ({
-        title: item.title,
-        reason: item.reason || item.description || '',
-        primary_action: item.primary_action?.label || item.recommended_action || ''
-      })),
-      study_context: getStudySessionState()
-    });
+    const suggestions = await withTimeout(
+      generateTopTodosFromMemoryQuery(llmConfig, {
+        query: `Look through my memory and generate ${maxNewSuggestions} short actionable todos or actions I need to do right now. Do not duplicate existing active suggestions.`,
+        standing_notes: proactiveMemory.core || '',
+        max_suggestions: maxNewSuggestions,
+        active_suggestion_count: activeCount,
+        existing_suggestions: existingSuggestions.slice(0, MAX_PRACTICAL_SUGGESTIONS).map((item) => ({
+          title: item.title,
+          reason: item.reason || item.description || '',
+          primary_action: item.primary_action?.label || item.recommended_action || ''
+        })),
+        study_context: getStudySessionState()
+      }),
+      20000,
+      'generateTopTodosFromMemoryQuery'
+    );
     const validatedSuggestions = (Array.isArray(suggestions) ? suggestions : [])
       .filter(looksValidAISuggestion)
       .slice(0, maxNewSuggestions);
