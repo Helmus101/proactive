@@ -961,73 +961,18 @@ class WeaveApp {
 
         // Add click handlers
         document.querySelectorAll('.contact-item').forEach((item) => {
-            item.addEventListener('click', async () => {
-                document.querySelectorAll('.contact-item').forEach(i => i.classList.remove('active'));
-                item.classList.add('active');
+            item.addEventListener('click', () => {
                 const id = item.dataset.contactId;
-                try {
-                    const detail = await window.electronAPI.getRelationshipContactDetail(id);
-                    if (detail) {
-                        const mapped = {
-                            id: detail.id,
-                            name: detail.display_name,
-                            company: detail.company,
-                            role: detail.role,
-                            last_contact_at: detail.last_interaction_at,
-                            is_overdue_followup: detail.status === 'needs_followup',
-                            is_weak_tie: detail.status === 'cooling' || detail.status === 'decaying',
-                            strength: detail.strength_score,
-                            warmth: detail.warmth_score,
-                            depth: detail.depth_score,
-                            centrality: detail.network_centrality,
-                            summary: detail.relationship_summary,
-                            interaction_count: detail.interaction_count_30d,
-                            recommendation: detail.metadata?.recommendation || '',
-                            emails: detail.metadata?.emails || [],
-                            phones: detail.metadata?.phones || [],
-                            interests: detail.metadata?.interests || [],
-                            related_contacts: detail.related_contacts || []
-                        };
-                        this.showContactDetail(mapped);
-                    }
-                } catch (err) {
-                    console.error('Failed to load contact detail:', err);
-                }
+                this.loadContactDetailById(id);
             });
         });
 
         // Show first contact by default
         if (sorted.length > 0) {
-            const firstId = sorted[0].id;
-            window.electronAPI.getRelationshipContactDetail(firstId).then(detail => {
-                if (detail) {
-                    const mapped = {
-                        id: detail.id,
-                        name: detail.display_name,
-                        company: detail.company,
-                        role: detail.role,
-                        last_contact_at: detail.last_interaction_at,
-                        is_overdue_followup: detail.status === 'needs_followup',
-                        is_weak_tie: detail.status === 'cooling' || detail.status === 'decaying',
-                        strength: detail.strength_score,
-                        warmth: detail.warmth_score,
-                        depth: detail.depth_score,
-                        centrality: detail.network_centrality,
-                        summary: detail.relationship_summary,
-                        interaction_count: detail.interaction_count_30d,
-                        recommendation: detail.metadata?.recommendation || '',
-                        emails: detail.metadata?.emails || [],
-                        phones: detail.metadata?.phones || [],
-                        interests: detail.metadata?.interests || [],
-                        related_contacts: detail.related_contacts || []
-                    };
-                    this.showContactDetail(mapped);
-                }
-            });
+            this.loadContactDetailById(sorted[0].id);
         }
     }
-
-        showContactDetail(contact) {
+    showContactDetail(contact) {
         const detailPanel = document.getElementById('contact-detail');
         if (!detailPanel) return;
 
@@ -1039,12 +984,12 @@ class WeaveApp {
         let suggestedActionsHtml = '<h4>Suggested Actions</h4>';
         
         if (contact.is_overdue_followup) {
-            suggestedActionsHtml += `<button class="action-btn">📧 Send Follow-up</button>`;
+            suggestedActionsHtml += `<button class="action-btn" data-action="followup">📧 Send Follow-up</button>`;
         }
         if (contact.is_weak_tie) {
-            suggestedActionsHtml += `<button class="action-btn">👋 Reconnect (weak tie)</button>`;
+            suggestedActionsHtml += `<button class="action-btn" data-action="reconnect">👋 Reconnect (weak tie)</button>`;
         }
-        suggestedActionsHtml += `<button class="action-btn">📎 Share Article</button>`;
+        suggestedActionsHtml += `<button class="action-btn" data-action="share">📎 Share Article</button>`;
 
         detailPanel.innerHTML = `
             <div class="contact-detail">
@@ -1092,7 +1037,7 @@ class WeaveApp {
                     <div style="font-size: 12px; color: var(--text-tertiary); margin-bottom: 4px;">Common Connections (Bridges)</div>
                     <div style="display: flex; flex-wrap: wrap; gap: 6px;">
                         ${contact.related_contacts.map(rc => `
-                            <span class="pill-btn" style="font-size: 11px; padding: 2px 8px;">${this.escapeHtml(rc.display_name)}</span>
+                            <span class="pill-btn bridge-contact" style="font-size: 11px; padding: 2px 8px; cursor: pointer;" data-contact-id="${rc.id}">${this.escapeHtml(rc.display_name)}</span>
                         `).join('')}
                     </div>
                 </div>
@@ -1116,7 +1061,28 @@ class WeaveApp {
                 </div>
             </div>
         `;
+
+        // Add event listeners to bridge contacts
+        detailPanel.querySelectorAll('.bridge-contact').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const id = btn.dataset.contactId;
+                this.loadContactDetailById(id);
+            });
+        });
+
+        // Add event listeners to suggested actions
+        detailPanel.querySelectorAll('.action-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const action = btn.dataset.action;
+                if (action === 'followup' || action === 'reconnect') {
+                    this.startRelationshipDraft(contact.id);
+                } else if (action === 'share') {
+                    this.showToast('Article sharing coming soon');
+                }
+            });
+        });
     }
+
 
 
     async setupContactsView() {

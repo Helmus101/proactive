@@ -569,44 +569,43 @@ async function rescoreRelationshipContacts() {
   const centralityMap = new Map(centralityRows.map(r => [r.contact_id, r.degree]));
   const maxDegree = Math.max(1, ...centralityRows.map(r => r.degree), 1);
 
+  // Pre-calculate stats for all contacts to avoid N+1 queries
+  const since30 = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const statsRows = await db.allQuery(`
+    SELECT 
+      contact_id,
+      COUNT(*) AS total_count,
+      AVG(COALESCE(CAST(json_extract(metadata, '$.sentiment_score') AS REAL), 0)) AS sentiment_avg,
+      COUNT(DISTINCT source_app) as app_diversity,
+      MIN(timestamp) as first_interaction,
+      SUM(CASE WHEN datetime(timestamp) >= datetime(?) THEN 1 ELSE 0 END) as count_30d
+    FROM relationship_mentions
+    GROUP BY contact_id
+  `, [since30]).catch(() => []);
+  
+  const statsMap = new Map(statsRows.map(r => [r.contact_id, r]));
+
   for (const contact of contacts || []) {
     const lastMs = Date.parse(contact.last_interaction_at || '') || 0;
     const days = lastMs ? Math.max(0, (now - lastMs) / (24 * 60 * 60 * 1000)) : 365;
-    const since30 = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
     
-    const statsRow = await db.getQuery(
-      `SELECT 
-         COUNT(*) AS count, 
-         AVG(COALESCE(CAST(json_extract(metadata, '$.sentiment_score') AS REAL), 0)) AS sentiment_avg,
-         COUNT(DISTINCT source_app) as app_diversity,
-         MIN(timestamp) as first_interaction
-       FROM relationship_mentions
-       WHERE contact_id = ?`,
-      [contact.id]
-    ).catch(() => ({ count: 0, sentiment_avg: 0, app_diversity: 0, first_interaction: null }));
+    const stats = statsMap.get(contact.id) || { total_count: 0, sentiment_avg: 0, app_diversity: 0, first_interaction: null, count_30d: 0 };
 
-    const recentRow = await db.getQuery(
-      `SELECT COUNT(*) AS count
-       FROM relationship_mentions
-       WHERE contact_id = ? AND datetime(timestamp) >= datetime(?)`,
-      [contact.id, since30]
-    ).catch(() => ({ count: 0 }));
-
-    const frequency = Math.min(1, Number(recentRow?.count || 0) / 8);
+    const frequency = Math.min(1, Number(stats.count_30d || 0) / 8);
     const recency = Math.exp((-Math.log(2) * days) / 14);
     const tier = String(contact.relationship_tier || 'network').toLowerCase();
     const tierPriority = tier.includes('inner') ? 1 : (tier.includes('network') ? 0.78 : 0.62);
-    const sentiment = Math.max(-1, Math.min(1, Number(statsRow?.sentiment_avg || 0)));
+    const sentiment = Math.max(-1, Math.min(1, Number(stats.sentiment_avg || 0)));
     const sentimentScore = (sentiment + 1) / 2;
 
     // Warmth: Current quality/investment
     const warmth = Math.max(0, Math.min(1, (recency * 0.45) + (frequency * 0.35) + (sentimentScore * 0.2)));
 
     // Depth: Long-term significance
-    const firstMs = Date.parse(statsRow?.first_interaction || contact.created_at || '') || now;
+    const firstMs = Date.parse(stats.first_interaction || contact.created_at || '') || now;
     const ageDays = Math.max(1, (now - firstMs) / (24 * 60 * 60 * 1000));
-    const volumeScore = Math.min(1, (statsRow?.count || 0) / 50);
-    const diversityScore = Math.min(1, (statsRow?.app_diversity || 0) / 4);
+    const volumeScore = Math.min(1, (stats.total_count || 0) / 50);
+    const diversityScore = Math.min(1, (stats.app_diversity || 0) / 4);
     const ageScore = Math.min(1, ageDays / 365);
     const depth = Math.max(0, Math.min(1, (volumeScore * 0.4) + (diversityScore * 0.3) + (ageScore * 0.3)));
 
@@ -619,9 +618,11 @@ async function rescoreRelationshipContacts() {
     
     const status = scoreStatus(score, days);
     
-    // Generate simple summary if missing
+    // Generate simple summary if missing or if it looks auto-generated
     let summary = contact.relationship_summary;
-    if (!summary || summary.length < 5) {
+    const isAutoSummary = !summary || summary.endsWith(".") && (summary.includes("relationship") || summary.includes("active") || summary.includes("cooled") || summary.includes("hub"));
+    
+    if (isAutoSummary) {
       const parts = [];
       if (depth > 0.7) parts.push("Long-standing relationship");
       else if (depth > 0.4) parts.push("Developing relationship");
@@ -660,7 +661,7 @@ async function rescoreRelationshipContacts() {
         Number(warmth.toFixed(4)), 
         Number(depth.toFixed(4)), 
         Number(centrality.toFixed(4)),
-        Number(recentRow?.count || 0), 
+        Number(stats.count_30d || 0), 
         status, 
         summary,
         JSON.stringify(metadata), 
