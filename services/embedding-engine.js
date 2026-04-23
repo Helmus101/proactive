@@ -97,6 +97,18 @@ async function generateEmbedding(text, apiKey = process.env.OPENAI_API_KEY) {
   }
 }
 
+const positiveKeywords = new Set([
+  'good', 'great', 'excellent', 'amazing', 'wonderful', 'fantastic', 'love', 'success', 'achieved',
+  'completed', 'fixed', 'working', 'solved', 'progress', 'breakthrough', 'excited', 'happy',
+  'efficient', 'elegant', 'beautiful', 'smooth', 'productive', 'accomplished'
+]);
+
+const negativeKeywords = new Set([
+  'bad', 'terrible', 'awful', 'horrible', 'hate', 'failing', 'failed', 'error', 'bug', 'broken',
+  'stuck', 'frustrated', 'angry', 'blocked', 'issue', 'problem', 'critical', 'urgent', 'risk',
+  'delay', 'inefficient', 'slow', 'crash', 'timeout', 'unstable', 'worried', 'disappointed'
+]);
+
 /**
  * Calculate sentiment score from text using heuristic analysis
  * Returns float -1.0 to 1.0
@@ -104,37 +116,21 @@ async function generateEmbedding(text, apiKey = process.env.OPENAI_API_KEY) {
  */
 function calculateSentimentScore(text = '') {
   const input = String(text || '').toLowerCase();
+  if (!input.trim()) return 0;
 
-  const positiveKeywords = [
-    'good', 'great', 'excellent', 'amazing', 'wonderful', 'fantastic', 'love', 'success', 'achieved',
-    'completed', 'fixed', 'working', 'solved', 'progress', 'breakthrough', 'excited', 'happy',
-    'efficient', 'elegant', 'beautiful', 'smooth', 'productive', 'accomplished'
-  ];
-
-  const negativeKeywords = [
-    'bad', 'terrible', 'awful', 'horrible', 'hate', 'failing', 'failed', 'error', 'bug', 'broken',
-    'stuck', 'frustrated', 'angry', 'blocked', 'issue', 'problem', 'critical', 'urgent', 'risk',
-    'delay', 'inefficient', 'slow', 'crash', 'timeout', 'unstable', 'worried', 'disappointed'
-  ];
+  const tokens = input.split(/[^a-z0-9]+/);
 
   let score = 0;
   let matches = 0;
 
-  for (const word of positiveKeywords) {
-    const regex = new RegExp(`\\b${word}\\b`, 'g');
-    const count = (input.match(regex) || []).length;
-    if (count > 0) {
-      score += count;
-      matches += count;
-    }
-  }
-
-  for (const word of negativeKeywords) {
-    const regex = new RegExp(`\\b${word}\\b`, 'g');
-    const count = (input.match(regex) || []).length;
-    if (count > 0) {
-      score -= count;
-      matches += count;
+  for (const token of tokens) {
+    if (!token) continue;
+    if (positiveKeywords.has(token)) {
+      score += 1;
+      matches += 1;
+    } else if (negativeKeywords.has(token)) {
+      score -= 1;
+      matches += 1;
     }
   }
 

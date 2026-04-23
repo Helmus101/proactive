@@ -1,4 +1,4 @@
-const sqlite3 = require('sqlite3').verbose();
+const sqlite3 = (process.env.NODE_ENV === 'production') ? require('sqlite3') : require('sqlite3').verbose();
 const path = require('path');
 let app;
 try {
@@ -522,8 +522,10 @@ async function ensureSchemaMigrations() {
         await runStatement(`CREATE TRIGGER IF NOT EXISTS retrieval_docs_ad AFTER DELETE ON retrieval_docs BEGIN
           DELETE FROM retrieval_docs_fts WHERE doc_id = old.doc_id;
         END`).catch(() => {});
-        await runStatement(`DELETE FROM retrieval_docs_fts`).catch(() => {});
-        await runStatement(`INSERT INTO retrieval_docs_fts(doc_id, text) SELECT doc_id, COALESCE(text, '') FROM retrieval_docs`).catch(() => {});
+        const ftsCheck = await allStatement(`SELECT doc_id FROM retrieval_docs_fts LIMIT 1`).catch(() => []);
+        if (ftsCheck.length === 0) {
+          await runStatement(`INSERT INTO retrieval_docs_fts(doc_id, text) SELECT doc_id, COALESCE(text, '') FROM retrieval_docs`).catch(() => {});
+        }
         await runStatement(`CREATE INDEX IF NOT EXISTS idx_retrieval_docs_app ON retrieval_docs(app)`).catch(() => {});
         await runStatement(`CREATE INDEX IF NOT EXISTS idx_retrieval_docs_timestamp ON retrieval_docs(timestamp)`).catch(() => {});
         await runStatement(`CREATE INDEX IF NOT EXISTS idx_retrieval_docs_source_type ON retrieval_docs(source_type)`).catch(() => {});
@@ -660,24 +662,27 @@ async function ensureSchemaMigrations() {
   return schemaReadyPromise;
 }
 
+let dbInitialized = false;
+
 // Helpers
 // Ensure DB is initialized before running queries. This guards against
 // cases where other modules call queries before `initDB()` finished.
 async function ensureDB() {
+  if (dbInitialized) return;
   if (db) {
     await ensureSchemaMigrations();
+    dbInitialized = true;
     return;
   }
   // initDB may throw if the Electron app isn't ready; propagate that clearly
   await initDB();
   await ensureSchemaMigrations();
+  dbInitialized = true;
 }
 
 const runQuery = async (sql, params = []) => {
-  try {
-    await ensureDB();
-  } catch (e) {
-    return Promise.reject(new Error(`DB not available: ${e.message}`));
+  if (!db) {
+    return Promise.reject(new Error(`DB not available`));
   }
   return withSqliteBusyRetry(() => {
     return new Promise((resolve, reject) => {
@@ -693,10 +698,8 @@ const runQuery = async (sql, params = []) => {
 };
 
 const getQuery = async (sql, params = []) => {
-  try {
-    await ensureDB();
-  } catch (e) {
-    return Promise.reject(new Error(`DB not available: ${e.message}`));
+  if (!db) {
+    return Promise.reject(new Error(`DB not available`));
   }
   return withSqliteBusyRetry(() => {
     return new Promise((resolve, reject) => {
@@ -712,10 +715,8 @@ const getQuery = async (sql, params = []) => {
 };
 
 const allQuery = async (sql, params = []) => {
-  try {
-    await ensureDB();
-  } catch (e) {
-    return Promise.reject(new Error(`DB not available: ${e.message}`));
+  if (!db) {
+    return Promise.reject(new Error(`DB not available`));
   }
   return withSqliteBusyRetry(() => {
     return new Promise((resolve, reject) => {
@@ -740,5 +741,6 @@ module.exports = {
   getDbPath,
   runQuery,
   getQuery,
-  allQuery
+  allQuery,
+  ensureDB
 };
