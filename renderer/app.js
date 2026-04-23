@@ -696,7 +696,9 @@ class WeaveApp {
                     ` : ''}
                 </article>
             `;
-    }    renderMorningBriefBanner() {
+    }
+
+    renderMorningBriefBanner() {
         const latest = (this.morningBriefs || [])[0];
         if (!latest) return '';
         const subtitle = (latest.priorities || []).slice(0, 3).map((p) => p.title).filter(Boolean).join(' • ');
@@ -1384,7 +1386,7 @@ class WeaveApp {
         const message = document.createElement('div');
         message.className = 'claude-message assistant';
         if (!this.chatMessages) return;
-        contentArea.innerHTML = `
+        message.innerHTML = `
             <div class="claude-avatar assistant">W</div>
             <div class="claude-message-body">
                 <div class="claude-message-role">Weave</div>
