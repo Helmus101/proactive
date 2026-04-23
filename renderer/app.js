@@ -30,8 +30,11 @@ class WeaveApp {
         this.desktopTimelineEntries = [];
         this.showExtendedToday = localStorage.getItem('showExtendedToday') === 'true';
         this.showPeopleSection = localStorage.getItem('showPeopleSection') !== 'false';
-        this.chatHistoryCollapsed = localStorage.getItem('chatHistoryCollapsed') !== 'false';
+        this.chatHistoryCollapsed = localStorage.getItem('chatHistoryCollapsed') === 'true';
         this.presenceMode = 'waiting';
+        this.contactsLoaded = false;
+        this.settingsDataLoaded = false;
+        this.settingsDataLoading = null;
         this.init();
     }
 
@@ -45,7 +48,7 @@ class WeaveApp {
         this.setupNavigation();
         this.setupSuggestions();
         await this.setupChat();
-        await this.setupContactsView();
+        this.setupContactsView();
         this.setupSettings();
         this.setupLibrary();
         window.electronAPI.onProactiveSuggestions?.((suggestions) => {
@@ -77,13 +80,14 @@ class WeaveApp {
     cacheDom() {
         this.views = Array.from(document.querySelectorAll('.view'));
         this.navButtons = Array.from(document.querySelectorAll('.nav-pill'));
-        this.filterChips = Array.from(document.querySelectorAll('.context-chip'));
+        this.filterChips = Array.from(document.querySelectorAll('#presence-view .context-chip'));
         this.remindersList = document.getElementById('reminders-list');
         this.refreshButton = document.getElementById('refresh-tasks-btn');
         this.chatMessages = document.getElementById('chat-messages');
         this.chatInput = document.getElementById('chat-input');
         this.chatCharCounter = document.getElementById('chat-char-counter');
         this.sendChatButton = document.getElementById('send-chat-btn');
+        this.chatRefreshPrioritiesButton = document.getElementById('chat-refresh-priorities-btn');
         this.chatHistoryList = document.getElementById('chat-history-list');
         this.chatThreadTitle = document.getElementById('chat-thread-title');
         this.newChatButton = document.getElementById('new-chat-btn');
@@ -126,6 +130,9 @@ class WeaveApp {
         this.presenceState = document.getElementById('presence-state');
         this.presenceSummary = document.getElementById('presence-summary');
         this.presencePrimaryAction = document.getElementById('presence-primary-action');
+        this.todayOpenCount = document.getElementById('today-open-count');
+        this.todayClientCount = document.getElementById('today-client-count');
+        this.todayDeliveryCount = document.getElementById('today-delivery-count');
         this.toggleChatHistoryButton = document.getElementById('toggle-chat-history-btn');
         this.chatView = document.getElementById('action-view');
         this.chatSyncStatus = document.getElementById('chat-sync-status');
@@ -134,6 +141,7 @@ class WeaveApp {
         this.suggestionBaseUrlInput = document.getElementById('suggestion-llm-base-url');
         this.suggestionApiKeyInput = document.getElementById('suggestion-llm-api-key');
         this.suggestionProviderStatus = document.getElementById('suggestion-llm-status');
+        this.saveSuggestionProviderButton = document.getElementById('save-suggestion-llm-btn');
         this.discoveryOrbitContainer = document.getElementById('discovery-orbit-container');
         this.discoveryOrbitLabel = document.getElementById('discovery-orbit-label');
         this.libraryList = document.getElementById("library-list");
@@ -193,16 +201,16 @@ class WeaveApp {
             button.classList.toggle('active', button.dataset.view === viewId);
         });
 
-        if (viewId === "reflection-view") {
-            this.renderLibrary("all");
-        }
         if (viewId === 'action-view') {
+            this.startNewChatDraft();
             this.chatInput?.focus();
-            this.renderFullMemoryGraph();
+            this.updateChatSyncStatus();
             this.scrollChatToBottom();
         }
         if (viewId === 'contacts-view') {
-            this.loadContacts(); // Refresh contacts when view is opened
+            if (!this.contactsLoaded) {
+                this.loadContacts();
+            }
         }
         if (viewId === 'settings-view') {
             this.loadSettingsData();
@@ -222,13 +230,13 @@ class WeaveApp {
         });
 
         this.refreshButton?.addEventListener('click', async () => {
-            await this.generateSuggestions({ replace: true, silent: false });
+            await this.generateSuggestions({ replace: true, silent: false, forceEngineRefresh: true });
         });
         this.manualGenerateSuggestionsButton?.addEventListener('click', async () => {
-            await this.generateSuggestions({ replace: true, silent: false });
+            await this.generateSuggestions({ replace: true, silent: false, forceEngineRefresh: true });
         });
         this.presencePrimaryAction?.addEventListener('click', async () => {
-            await this.generateSuggestions({ replace: true, silent: false });
+            await this.generateSuggestions({ replace: true, silent: false, forceEngineRefresh: true });
         });
         this.clearAllSuggestionsButton?.addEventListener('click', async () => {
             await this.clearAllSuggestions();
@@ -242,9 +250,9 @@ class WeaveApp {
             this.renderSuggestions();
         });
         this.customizeTodayButton?.addEventListener('click', () => {
-            this.showPeopleSection = !this.showPeopleSection;
-            localStorage.setItem('showPeopleSection', String(this.showPeopleSection));
-            this.showToast(this.showPeopleSection ? 'People section shown' : 'People section hidden');
+            this.showExtendedToday = !this.showExtendedToday;
+            localStorage.setItem('showExtendedToday', String(this.showExtendedToday));
+            this.showToast(this.showExtendedToday ? 'Expanded today view' : 'Focused today view');
             this.renderSuggestions();
         });
 
@@ -255,11 +263,10 @@ class WeaveApp {
                 const target = ev.target.closest && ev.target.closest('#manual-generate-suggestions-btn, #refresh-tasks-btn, #presence-primary-action');
                 if (!target) return;
                 ev.preventDefault();
-                // Use the app-scoped method (arrow captures `this`)
-                await this.generateSuggestions({ replace: true, silent: false });
+                await this.generateSuggestions({ replace: true, silent: false, forceEngineRefresh: true });
             } catch (err) {
                 console.error('[Renderer] fallback generateSuggestions handler failed:', err);
-                try { this.showToast('Suggestion generation failed'); } catch (_) {}
+                try { this.showToast('Priority refresh failed'); } catch (_) {}
             }
         });
 
@@ -354,7 +361,7 @@ class WeaveApp {
         if (!this.suggestionAutoTimer) {
             this.suggestionAutoTimer = window.setInterval(() => {
                 if (document.hidden) return;
-                this.generateSuggestions({ replace: true, silent: true }).catch(() => {});
+                this.generateSuggestions({ replace: false, silent: true }).catch(() => {});
             }, 60 * 60 * 1000);
         }
 
@@ -364,7 +371,7 @@ class WeaveApp {
         });
     }
 
-    async generateSuggestions({ replace = true, silent = false } = {}) {
+    async generateSuggestions({ replace = true, silent = false, forceEngineRefresh = false } = {}) {
         if (!this.remindersList) return;
         this.setPresenceMode('thinking');
 
@@ -372,7 +379,7 @@ class WeaveApp {
         const remainingCapacity = Math.max(0, 7 - activeSuggestions.length);
 
         if (remainingCapacity <= 0) {
-            if (!silent) this.showToast('You already have 7 active suggestions');
+            if (!silent) this.showToast('You already have 7 active priorities');
             this.renderSuggestions();
             this.setPresenceMode('waiting');
             return;
@@ -381,12 +388,27 @@ class WeaveApp {
         if (!silent) {
             this.remindersList.innerHTML = this.emptyStateHTML(
                 'refresh',
-                'Reflecting on our next steps...',
-                'Reviewing your recent context and building a fresh queue.'
+                'Refreshing priorities...',
+                'Reviewing recent client work, meetings, and open loops.'
             );
         }
 
         try {
+            if (forceEngineRefresh && typeof window.electronAPI?.triggerSuggestionRefresh === 'function') {
+                const refreshResult = await window.electronAPI.triggerSuggestionRefresh({
+                    requested_at: Date.now(),
+                    source: this.activeView || 'presence-view'
+                });
+                if (Array.isArray(refreshResult?.suggestions) && refreshResult.suggestions.length) {
+                    const normalizedRefreshed = this.normalizeTodos(refreshResult.suggestions);
+                    this.todos = this.mergeTodos(replace ? [] : this.todos, normalizedRefreshed).filter((todo) => !todo.completed).slice(0, 7);
+                    await window.electronAPI.savePersistentTodos(this.todos);
+                    this.renderSuggestions();
+                    this.setPresenceMode('suggesting');
+                    if (!silent) this.showToast('Priorities refreshed from memory');
+                    return;
+                }
+            }
             console.debug('[Renderer] generateSuggestions invoked; electronAPI present=', !!window.electronAPI, 'generateProactiveTodos=', typeof window.electronAPI?.generateProactiveTodos);
             if (!window.electronAPI || typeof window.electronAPI.generateProactiveTodos !== 'function') {
                 throw new Error('electronAPI.generateProactiveTodos is not available');
@@ -398,19 +420,19 @@ class WeaveApp {
             console.debug('[Renderer] generateSuggestions received', Array.isArray(generated) ? `${generated.length} items` : typeof generated);
             const normalized = this.normalizeTodos(generated);
 
-            if (replace) {
+            if (replace && !activeSuggestions.length) {
                 this.todos = normalized;
             } else {
                 this.todos = this.mergeTodos(this.todos, normalized);
             }
-            this.todos = this.todos.filter((todo) => !todo.completed);
+            this.todos = this.todos.filter((todo) => !todo.completed).slice(0, 7);
 
             await window.electronAPI.savePersistentTodos(this.todos);
             this.renderSuggestions();
             this.setPresenceMode('suggesting');
         } catch (error) {
             console.error('Failed to generate suggestions:', error);
-            this.showToast('Suggestion generation failed');
+            this.showToast('Priority refresh failed');
             this.renderSuggestions();
             this.setPresenceMode('waiting');
         }
@@ -423,10 +445,10 @@ class WeaveApp {
             await window.electronAPI.savePersistentTodos([]);
             await window.electronAPI.clearSuggestions?.();
             this.renderSuggestions();
-            this.showToast('All suggestions deleted');
+            this.showToast('All priorities cleared');
         } catch (error) {
             console.error('Failed to clear all suggestions:', error);
-            this.showToast('Failed to delete suggestions');
+            this.showToast('Failed to clear priorities');
         }
     }
 
@@ -445,7 +467,7 @@ class WeaveApp {
                 const suggestedActions = Array.isArray(item.suggested_actions)
                     ? item.suggested_actions.slice(0, 1).map((action) => ({
                         ...action,
-                        label: compact(action?.label, 46) || 'Do it'
+                        label: compact(action?.label, 46) || 'Review details'
                     }))
                     : [];
                 const mappedActionPlan = suggestedActions.map((action, i) => ({
@@ -460,7 +482,7 @@ class WeaveApp {
                     : '';
                 return {
                     id: item.id || `suggestion_${Date.now()}_${index}`,
-                    title: compact(item.title || 'Untitled suggestion', 62),
+                    title: compact(item.title || 'Untitled priority', 62),
                     description: compact(item.description || item.body || whyNow || 'No extra context yet.', 88),
                     intent: compact(item.intent || item.description || '', 88),
                     reason: compact(item.reason || item.description || '', 88),
@@ -550,20 +572,17 @@ class WeaveApp {
 
         if (!visibleTodos.length) {
             this.remindersList.innerHTML = briefBanner + this.emptyStateHTML(
-                'lightbulb',
-                "You're all caught up",
-                'Ask Weave what deserves attention, or enjoy the quiet.'
+                'task_alt',
+                'No urgent client work found',
+                'Sync Google, refresh priorities, or ask Weave what needs attention.'
             );
             this.setPresenceMode('waiting');
             return;
         }
 
-        const peopleTodos = visibleTodos.filter((todo) => ['followup', 'relationship_intelligence'].includes(todo.category));
-        const taskTodos = visibleTodos.filter((todo) => !['followup', 'relationship_intelligence'].includes(todo.category));
-        const primaryNow = taskTodos.slice(0, 1);
-        const supportingNow = taskTodos.slice(1, 3);
-        const extraTasks = taskTodos.slice(3, 7);
-        const peoplePreview = peopleTodos.slice(0, 2);
+        const primaryNow = visibleTodos.slice(0, 1);
+        const supportingNow = visibleTodos.slice(1, 3);
+        const extraTasks = visibleTodos.slice(3, 7);
         this.setPresenceMode('suggesting');
 
         const section = (items, offset = 0) => {
@@ -577,8 +596,7 @@ class WeaveApp {
 
         const moreContent = [
             section(supportingNow, 1),
-            section(extraTasks, 3),
-            this.showPeopleSection ? section(peoplePreview, 6) : ''
+            section(extraTasks, 3)
         ].join('');
 
         this.remindersList.innerHTML = `
@@ -602,12 +620,6 @@ class WeaveApp {
             const text = String(value || '').replace(/\s+/g, ' ').trim();
             return text.length > limit ? `${text.slice(0, Math.max(0, limit - 1)).trim()}…` : text;
         };
-        const evidenceSummary = evidencePath.slice(0, 1).map((edge) => {
-            const from = edge?.from || '?';
-            const to = edge?.to || '?';
-            const relation = edge?.relation || 'links';
-            return `${from} -> ${to} (${relation})`;
-        }).join(' • ');
         const riskLabel = todo.risk_level ? `Risk: ${todo.risk_level}` : '';
         const bundleSummary = todo.display?.summary || '';
         const primaryAction = todo.primary_action || (Array.isArray(todo.suggested_actions) ? todo.suggested_actions.find((a) => this.isConcreteActionLabel(a?.label)) : null);
@@ -620,21 +632,29 @@ class WeaveApp {
         const receiptSummary = Array.isArray(todo.epistemic_trace) && todo.epistemic_trace.length
             ? todo.epistemic_trace.slice(0, 1).map((r) => compact(`${r.source || 'Source'}: ${r.text || ''}`, 86)).join(' • ')
             : '';
+        const categoryLabel = this.prettyCategory(todo.category);
+        const actionLabel = primaryAction?.label || 'Review details';
+        const cardTone = this.cardToneClass(todo.category);
         return `
-                <article class="suggestion-card conversation-entry${isStudy ? ' suggestion-study' : ''}" data-id="${this.escapeHtml(todo.id)}" tabindex="0" style="animation-delay:${index * 40}ms;">
+                <article class="suggestion-card conversation-entry ${this.escapeHtml(cardTone)}${isStudy ? ' suggestion-study' : ''}" data-id="${this.escapeHtml(todo.id)}" tabindex="0" style="animation-delay:${index * 40}ms;">
                     <div class="suggestion-header">
                         <div class="suggestion-content">
+                            <div class="suggestion-kicker">
+                                <span>${this.escapeHtml(categoryLabel)}</span>
+                                <span>${this.escapeHtml(this.prettyPriority(todo.priority))} priority</span>
+                                ${todo.time_anchor ? `<span>${this.escapeHtml(todo.time_anchor)}</span>` : ''}
+                            </div>
                             <div class="suggestion-title">${this.escapeHtml(todo.title)}</div>
-                            <div class="suggestion-description">${this.escapeHtml(whyNowCompact)}</div>
-                            ${evidenceCompact ? `<div class="suggestion-context">${this.escapeHtml(evidenceCompact)}</div>` : ''}
-                            ${primaryAction ? `<div class="suggestion-context">${this.escapeHtml(primaryAction.label)}</div>` : ''}
-                            ${aiCanAutomate ? '<div class="suggestion-context suggestion-subtle-note">Can be automated when you want.</div>' : ''}
-                            ${!expanded ? '<div class="suggestion-primary-wrap"><button class="presence-primary-action" type="button" data-action="info">Start here</button></div>' : ''}
+                            ${whyNowCompact ? `<div class="suggestion-description">${this.escapeHtml(whyNowCompact)}</div>` : ''}
+                            ${evidenceCompact ? `<div class="suggestion-context"><span>Evidence</span>${this.escapeHtml(evidenceCompact)}</div>` : ''}
+                            <div class="suggestion-primary-line"><span>Next action</span>${this.escapeHtml(actionLabel)}</div>
+                            ${aiCanAutomate ? '<div class="suggestion-context suggestion-subtle-note"><span>Automation</span>Can draft or run when you approve.</div>' : ''}
+                            ${!expanded ? '<div class="suggestion-primary-wrap"><button class="presence-primary-action" type="button" data-action="info">Details</button></div>' : ''}
                         </div>
                     </div>
                     ${expanded ? `
                         <div class="suggestion-details suggestion-details-quick" style="display:block;">
-                            ${primaryAction ? `<div class="suggestion-goal"><span>Do</span>${this.escapeHtml(primaryAction.label)}</div>` : ''}
+                            ${primaryAction ? `<div class="suggestion-goal"><span>Action</span>${this.escapeHtml(primaryAction.label)}</div>` : ''}
                             ${todo.reason ? `<div class="suggestion-why"><span>Why</span>${this.escapeHtml(todo.reason)}</div>` : ''}
                             ${todo.time_anchor ? `<div class="suggestion-why"><span>When</span>${this.escapeHtml(todo.time_anchor)}</div>` : ''}
                             ${todo.step_plan.length ? `<div class="suggestion-steps">${todo.step_plan.map((step, stepIndex) => `<div class="suggestion-step">${stepIndex + 1}. ${this.escapeHtml(step)}</div>`).join('')}</div>` : ''}
@@ -648,7 +668,7 @@ class WeaveApp {
                             <div class="reminder-actions" style="opacity:1; margin-top:16px;">
                                 ${todo.source === 'morning-brief'
                                     ? '<button class="pill-btn" type="button" data-action="brief-open">Open brief</button><button class="pill-btn" type="button" data-action="brief-archive">Archive</button>'
-                                    : `${todo.ai_doable ? '<button class="pill-btn" type="button" data-action="draft">Draft</button><button class="pill-btn" type="button" data-action="execute">Do it</button>' : ''}<button class="pill-btn" type="button" data-action="info">More info</button><button class="pill-btn" type="button" data-action="done">Complete</button><button class="pill-btn" type="button" data-action="snooze">Snooze</button><button class="pill-btn destructive" type="button" data-action="remove">Remove</button>`
+                                    : `${todo.ai_doable ? '<button class="pill-btn" type="button" data-action="draft">Draft</button><button class="pill-btn" type="button" data-action="execute">Run</button>' : ''}<button class="pill-btn" type="button" data-action="info">Details</button><button class="pill-btn" type="button" data-action="done">Done</button><button class="pill-btn" type="button" data-action="snooze">Snooze</button><button class="pill-btn destructive" type="button" data-action="remove">Remove</button>`
                                 }
                             </div>
                         </div>
@@ -664,8 +684,8 @@ class WeaveApp {
         return `
             <article class="morning-brief-flow" data-id="brief_banner" tabindex="0">
                 <div class="morning-brief-date">${this.escapeHtml(latest.dateLabel || '')}</div>
-                <p class="morning-brief-text">${this.escapeHtml(subtitle || 'Since yesterday: one short snapshot of what matters first.')}</p>
-                <button class="ghost-button" type="button" data-action="brief-open">Since yesterday</button>
+                <p class="morning-brief-text">${this.escapeHtml(subtitle || 'Since yesterday: a short snapshot of client work and open priorities.')}</p>
+                <button class="ghost-button" type="button" data-action="brief-open">Open brief</button>
             </article>
         `;
     }
@@ -703,7 +723,7 @@ class WeaveApp {
             await this.generateSuggestions({ replace: true, silent: true });
         }
 
-        this.showToast('Added to your network memory');
+        this.showToast('Marked done');
     }
 
     async removeSuggestion(taskId) {
@@ -711,7 +731,7 @@ class WeaveApp {
         this.expandedCards.delete(taskId);
         try {
             await window.electronAPI.savePersistentTodos(this.todos);
-            this.showToast('Task removed');
+            this.showToast('Priority removed');
         } catch (error) {
             console.error('Failed to remove suggestion:', error);
             this.showToast('Remove failed');
@@ -853,23 +873,25 @@ class WeaveApp {
 
     getVisibleTodos() {
         const now = Date.now();
-const filtered = this.todos.filter((todo) => {
-        if (todo.completed) return false;
-        if (todo.snoozedUntil && Number(todo.snoozedUntil) > now) return false;
-        if (this.currentFilter === 'all') return true;
-        if (this.currentFilter === 'focus') return ['work', 'creative', 'study'].includes(todo.category);
-        if (this.currentFilter === 'people') return ['followup', 'relationship_intelligence'].includes(todo.category);
-        if (this.currentFilter === 'followups') return todo.category === 'followup';
-        return todo.category === this.currentFilter;
-    });
+        const filtered = this.todos.filter((todo) => {
+            if (todo.completed) return false;
+            if (todo.snoozedUntil && Number(todo.snoozedUntil) > now) return false;
+            if (this.currentFilter === 'all') return true;
+            if (this.currentFilter === 'client') return ['followup', 'relationship_intelligence'].includes(todo.category) || this.hasClientSignal(todo);
+            if (this.currentFilter === 'delivery') return ['work', 'creative', 'study'].includes(todo.category);
+            if (this.currentFilter === 'followups') return ['followup', 'relationship_intelligence'].includes(todo.category);
+            if (this.currentFilter === 'focus') return ['work', 'creative', 'study'].includes(todo.category);
+            if (this.currentFilter === 'people') return ['followup', 'relationship_intelligence'].includes(todo.category);
+            return todo.category === this.currentFilter;
+        });
 
-    return filtered
-        .sort((a, b) => {
-            const priorityDelta = this.priorityWeight(b.priority) - this.priorityWeight(a.priority);
-            if (priorityDelta !== 0) return priorityDelta;
-            return (b.createdAt || 0) - (a.createdAt || 0);
-        })
-        .slice(0, 10);
+        return filtered
+            .sort((a, b) => {
+                const priorityDelta = this.priorityWeight(b.priority) - this.priorityWeight(a.priority);
+                if (priorityDelta !== 0) return priorityDelta;
+                return (b.createdAt || 0) - (a.createdAt || 0);
+            })
+            .slice(0, 10);
     }
 
     formatConfidence(value) {
@@ -1052,12 +1074,12 @@ const filtered = this.todos.filter((todo) => {
             });
         }
 
-        await this.loadContacts();
     }
 
     async updateChatSyncStatus() {
         const statusEl = document.getElementById('chat-sync-status');
         if (!statusEl) return;
+        if (document.hidden || this.activeView !== 'action-view') return;
 
         try {
             const status = await window.electronAPI.getMemoryGraphStatus();
@@ -1066,11 +1088,11 @@ const filtered = this.todos.filter((todo) => {
             
             if (isSyncing) {
                 statusEl.classList.add('syncing');
-                if (textEl) textEl.textContent = 'Syncing memory...';
+                if (textEl) textEl.textContent = 'Updating work memory...';
                 this.setPresenceMode('remembering');
             } else {
                 statusEl.classList.remove('syncing');
-                if (textEl) textEl.textContent = 'Memory updated';
+                if (textEl) textEl.textContent = 'Work memory updated';
                 this.setPresenceMode('waiting');
             }
         } catch (e) {
@@ -1080,12 +1102,16 @@ const filtered = this.todos.filter((todo) => {
 
     async setupChat() {
         this.chatSessions = await this.loadChatSessions();
-        const sorted = [...this.chatSessions].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-        this.activeChatId = sorted[0]?.id || null;
+        this.activeChatId = null;
         this.chatView?.classList.toggle('chat-history-collapsed', this.chatHistoryCollapsed);
         if (this.toggleChatHistoryButton) {
             this.toggleChatHistoryButton.textContent = this.chatHistoryCollapsed ? 'Show threads' : 'Hide threads';
         }
+        this.chatDraftPrompts = this.getChatStarterPrompts();
+        this.chatRefreshPrioritiesButton?.addEventListener('click', async () => {
+            await this.generateSuggestions({ replace: true, silent: false, forceEngineRefresh: true });
+            this.startNewChatDraft();
+        });
         this.newChatButton?.addEventListener('click', () => this.startNewChatDraft());
         this.toggleChatHistoryButton?.addEventListener('click', () => {
             this.chatHistoryCollapsed = !this.chatHistoryCollapsed;
@@ -1094,8 +1120,7 @@ const filtered = this.todos.filter((todo) => {
             if (this.toggleChatHistoryButton) this.toggleChatHistoryButton.textContent = this.chatHistoryCollapsed ? 'Show threads' : 'Hide threads';
         });
         this.chatSyncStatus?.addEventListener('click', () => {
-            this.switchView('reflection-view');
-            this.showToast('Opening what Weave learned');
+            this.showToast('Work memory is updating in the background');
         });
 
         this.sendChatButton?.addEventListener('click', () => this.sendChatMessage());
@@ -2226,6 +2251,7 @@ Would you like me to continue with more detail?` : content;
 
     startNewChatDraft() {
         this.activeChatId = null;
+        this.chatDraftPrompts = this.getChatStarterPrompts();
         this.renderChatHistory();
         this.renderActiveChat();
         this.updateChatSyncStatus();
@@ -2284,19 +2310,34 @@ Would you like me to continue with more detail?` : content;
         if (!this.chatMessages) return;
         const chat = this.getActiveChat();
         if (!chat) {
-            if (this.chatThreadTitle) this.chatThreadTitle.textContent = 'New thread';
+            const prompts = Array.isArray(this.chatDraftPrompts) && this.chatDraftPrompts.length
+                ? this.chatDraftPrompts
+                : this.getChatStarterPrompts();
+            if (this.chatThreadTitle) this.chatThreadTitle.textContent = 'New chat';
             this.chatMessages.innerHTML = `
                 <div class="empty-state" style="text-align: center; padding: 60px 20px;">
                     <div class="empty-icon" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;">
                         <span class="material-symbols-outlined">forum</span>
                     </div>
-                    <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">Start a thought</div>
-                    <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">A thread appears when you send the first message.</div>
+                    <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">Start a new chat</div>
+                    <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">Use one of these context-aware prompts or open a previous thread from the left.</div>
+                    <div style="margin-top:16px; display:flex; flex-wrap:wrap; gap:8px; justify-content:center;">
+                        ${prompts.map((p, idx) => `<button class="pill-btn" data-starter-prompt="${idx}" type="button">${this.escapeHtml(p)}</button>`).join('')}
+                    </div>
                 </div>
             `;
+            this.chatMessages.querySelectorAll('[data-starter-prompt]').forEach((btn) => {
+                btn.addEventListener('click', () => {
+                    const idx = Number(btn.getAttribute('data-starter-prompt'));
+                    const prompt = prompts[idx];
+                    if (!prompt) return;
+                    this.chatInput.value = prompt;
+                    this.sendChatMessage();
+                });
+            });
             return;
         }
-        if (this.chatThreadTitle) this.chatThreadTitle.textContent = chat.title || 'Current thread';
+        if (this.chatThreadTitle) this.chatThreadTitle.textContent = chat.title || 'Current work thread';
 
         this.chatMessages.innerHTML = '';
         if (!chat.messages?.length) {
@@ -2306,8 +2347,8 @@ Would you like me to continue with more detail?` : content;
                     <div class="empty-icon" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;">
                         <span class="material-symbols-outlined">forum</span>
                     </div>
-                    <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">Start a thought</div>
-                    <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">Ask about your work, memory, relationships, or next move.</div>
+                    <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">Ask about your work</div>
+                    <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">Use work memory to prepare for meetings, inspect client history, or close follow-ups.</div>
                     <div style="margin-top:16px; display:flex; flex-wrap:wrap; gap:8px; justify-content:center;">
                         ${prompts.map((p, idx) => `<button class="pill-btn" data-starter-prompt="${idx}" type="button">${this.escapeHtml(p)}</button>`).join('')}
                     </div>
@@ -2333,14 +2374,21 @@ Would you like me to continue with more detail?` : content;
 
     getChatStarterPrompts() {
         const prompts = [];
-        const todos = this.getVisibleTodos().slice(0, 3);
-        if (todos[0]) prompts.push(`What is the single next step for "${todos[0].title}"?`);
+        const todos = this.getVisibleTodos().slice(0, 4);
+        const topTodo = todos[0];
+        const clientTodo = todos.find((todo) => ['followup', 'relationship_intelligence'].includes(todo.category) || this.hasClientSignal(todo));
+        const deliveryTodo = todos.find((todo) => ['work', 'creative', 'study'].includes(todo.category));
         const brief = (this.morningBriefs || [])[0];
         const firstPriority = brief?.priorities?.[0]?.title;
-        if (firstPriority) prompts.push(`Help me execute this priority fast: "${firstPriority}".`);
-        prompts.push('What should I focus on today based on my latest context?');
-        prompts.push('What is one thing I can close in the next 30 minutes?');
-        return Array.from(new Set(prompts)).slice(0, 3);
+        if (topTodo?.title) prompts.push(`What is the best next move for "${topTodo.title}" right now?`);
+        if (topTodo?.title) prompts.push(`What are my top priorities right now based on memory, starting with "${topTodo.title}"?`);
+        if (clientTodo?.title) prompts.push(`Draft the right outreach or follow-up for "${clientTodo.title}".`);
+        if (deliveryTodo?.title) prompts.push(`What could block delivery on "${deliveryTodo.title}", and how should I handle it?`);
+        if (firstPriority) prompts.push(`Turn "${firstPriority}" into a concrete plan for today.`);
+        prompts.push('Which client follow-up matters most today, and why?');
+        prompts.push('Prepare me for the next meeting or commitment on my plate.');
+        prompts.push('What is the riskiest open delivery item in my current work?');
+        return Array.from(new Set(prompts.filter(Boolean))).slice(0, 3);
     }
 
     setupSettings() {
@@ -2358,6 +2406,18 @@ Would you like me to continue with more detail?` : content;
         });
         this.refreshDailyOcrButton?.addEventListener('click', async () => {
             await this.refreshDailyOcrText();
+        });
+        this.suggestionProviderSelect?.addEventListener('change', () => {
+            if (this.suggestionBaseUrlInput) {
+                this.suggestionBaseUrlInput.disabled = this.suggestionProviderSelect.value !== 'ollama';
+            }
+            this.renderSuggestionProviderStatus();
+        });
+        [this.suggestionModelInput, this.suggestionBaseUrlInput, this.suggestionApiKeyInput].forEach((input) => {
+            input?.addEventListener('input', () => this.renderSuggestionProviderStatus());
+        });
+        this.saveSuggestionProviderButton?.addEventListener('click', async () => {
+            await this.saveSuggestionProviderSettings();
         });
 
         // Delete all data button (factory reset)
@@ -2397,15 +2457,24 @@ Would you like me to continue with more detail?` : content;
     }
 
     async loadSettingsData() {
-        await Promise.all([
+        if (this.settingsDataLoading) {
+            await this.settingsDataLoading;
+            return;
+        }
+
+        this.settingsDataLoading = Promise.all([
             this.loadGoogleStatus(),
             this.loadExtensionStatus(),
             this.loadVoiceControlStatus(),
             this.loadBrowserHistory(),
-            this.loadSensorData(),
-            this.loadMemoryGraphStatus(),
-            this.loadSuggestionProviderSettings()
+            this.loadSensorData()
         ]);
+        try {
+            await this.settingsDataLoading;
+            this.settingsDataLoaded = true;
+        } finally {
+            this.settingsDataLoading = null;
+        }
         this.renderDesktopTimeline();
     }
 
@@ -2436,6 +2505,38 @@ Would you like me to continue with more detail?` : content;
             console.error('Failed to load suggestion provider settings:', error);
             if (this.suggestionProviderStatus) {
                 this.suggestionProviderStatus.textContent = 'Suggestion provider settings failed to load';
+            }
+        }
+    }
+
+    async saveSuggestionProviderSettings() {
+        if (!window.electronAPI?.saveSuggestionLLMSettings) {
+            this.showToast('Provider settings are unavailable');
+            return;
+        }
+        const button = this.saveSuggestionProviderButton;
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Saving...';
+        }
+        try {
+            const payload = {
+                provider: this.suggestionProviderSelect?.value || 'deepseek',
+                model: this.suggestionModelInput?.value || '',
+                baseUrl: this.suggestionBaseUrlInput?.value || '',
+                apiKey: this.suggestionApiKeyInput?.value || ''
+            };
+            const saved = await window.electronAPI.saveSuggestionLLMSettings(payload);
+            if (this.suggestionApiKeyInput) this.suggestionApiKeyInput.value = '';
+            this.renderSuggestionProviderStatus(saved || payload);
+            this.showToast('Provider settings saved');
+        } catch (error) {
+            console.error('Failed to save suggestion provider settings:', error);
+            this.showToast('Provider settings failed to save');
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.textContent = 'Save provider';
             }
         }
     }
@@ -2881,7 +2982,7 @@ Would you like me to continue with more detail?` : content;
             this.hideVoiceOverlay();
             return;
         }
-        const transcript = payload.transcript || 'I'm here...';
+        const transcript = payload.transcript || "I'm here...";
         if (payload.status === 'listening') {
             this.updateVoiceOverlay({
                 title: 'Listening…',
@@ -3137,7 +3238,6 @@ Would you like me to continue with more detail?` : content;
                 proc.classList.toggle('inactive', !active);
             }
 
-            await this.searchMemoryGraph();
         } catch (error) {
             console.error('Failed to load memory graph status:', error);
             this.setText('mem-processing-status', 'Unavailable');
@@ -3146,7 +3246,7 @@ Would you like me to continue with more detail?` : content;
 
     async searchMemoryGraph() {
         if (!this.memoryResults) return;
-        this.memoryResults.innerHTML = '<div class="history-row"><div class="history-row-title">Searching memory graph...</div></div>';
+        this.memoryResults.innerHTML = '<div class="history-row"><div class="history-row-title">Searching work memory...</div></div>';
 
         const query = (this.memorySearchInput?.value || '').trim();
         const filterType = this.memoryFilterType?.value || 'all';
@@ -3173,7 +3273,7 @@ Would you like me to continue with more detail?` : content;
             this.renderMemoryResults(this.memorySearchResults);
         } catch (error) {
             console.error('Memory graph search failed:', error);
-            this.memoryResults.innerHTML = '<div class="history-row"><div class="history-row-title">Memory graph search failed</div></div>';
+            this.memoryResults.innerHTML = '<div class="history-row"><div class="history-row-title">Work memory search failed</div></div>';
         }
     }
 
@@ -3464,11 +3564,11 @@ Would you like me to continue with more detail?` : content;
         const hour = new Date().getHours();
         const name = this.userName || 'Willem';
         const visibleCount = this.getVisibleTodos ? this.getVisibleTodos().length : (this.todos || []).length;
-        const period = hour < 12 ? 'morning' : (hour < 18 ? 'afternoon' : 'evening');
+        const period = hour < 12 ? 'Morning' : (hour < 18 ? 'Afternoon' : 'Evening');
         const focusLine = visibleCount === 0
-            ? 'a clear slate.'
-            : (visibleCount === 1 ? 'one thing worth your attention.' : `${visibleCount} things worth your attention.`);
-        element.textContent = `${period}, ${name} — ${focusLine}`;
+            ? 'no urgent priorities.'
+            : (visibleCount === 1 ? '1 priority open.' : `${visibleCount} priorities open.`);
+        element.textContent = `${period}, ${name} - ${focusLine}`;
         this.applyAmbientTone(hour);
         this.updatePresenceSummary(this.getVisibleTodos ? this.getVisibleTodos() : (this.todos || []));
     }
@@ -3476,29 +3576,39 @@ Would you like me to continue with more detail?` : content;
     updatePresenceSummary(visibleTodos = []) {
         if (!this.presenceSummary || !this.presencePrimaryAction) return;
         const count = Array.isArray(visibleTodos) ? visibleTodos.length : 0;
+        this.updateTodaySnapshot(visibleTodos);
         if (count === 0) {
-            this.presenceSummary.textContent = 'You are clear right now. I can surface a fresh next step when you want.';
-            this.presencePrimaryAction.textContent = 'Start here today';
+            this.presenceSummary.textContent = 'No urgent client work found. Refresh priorities when you want a fresh review.';
+            this.presencePrimaryAction.textContent = 'Review today';
             return;
         }
 
         const top = visibleTodos[0];
         const title = this.truncate(top?.title || 'Start here', 72);
         this.presenceSummary.textContent = count === 1
-            ? `One thing stands out right now: ${title}`
-            : `${count} things are open. Start with: ${title}`;
-        this.presencePrimaryAction.textContent = 'Start here today';
+            ? `One priority needs attention: ${title}`
+            : `${count} priorities are open. Start with: ${title}`;
+        this.presencePrimaryAction.textContent = 'Review today';
+    }
+
+    updateTodaySnapshot(visibleTodos = []) {
+        const items = Array.isArray(visibleTodos) ? visibleTodos : [];
+        const clientCount = items.filter((todo) => ['followup', 'relationship_intelligence'].includes(todo.category) || this.hasClientSignal(todo)).length;
+        const deliveryCount = items.filter((todo) => ['work', 'creative', 'study'].includes(todo.category)).length;
+        if (this.todayOpenCount) this.todayOpenCount.textContent = String(items.length);
+        if (this.todayClientCount) this.todayClientCount.textContent = String(clientCount);
+        if (this.todayDeliveryCount) this.todayDeliveryCount.textContent = String(deliveryCount);
     }
 
     setPresenceMode(mode = 'waiting') {
         this.presenceMode = mode;
         if (!this.presenceState) return;
         const labels = {
-            idle: 'Resting',
-            thinking: 'Reflecting',
-            remembering: 'Reminiscing',
-            suggesting: 'Offering',
-            waiting: 'Just being'
+            idle: 'Today',
+            thinking: 'Reviewing context',
+            remembering: 'Updating memory',
+            suggesting: 'Priorities ready',
+            waiting: 'Today'
         };
         const label = labels[mode] || labels.waiting;
         this.presenceState.textContent = label;
@@ -3514,10 +3624,10 @@ Would you like me to continue with more detail?` : content;
         const el = this.todayWhisperPrompt;
         if (!el) return;
         const prompts = [
-            "What's pulling at your heart right now?",
-            "How can I make your day feel lighter?",
-            "What's on your mind, friend?",
-            "Is there anything you'd like to share?"
+            'Ask about a client, project, or next step',
+            'Review open client follow-ups',
+            'Prepare for an upcoming meeting',
+            'Find the next delivery item to close'
         ];
         const initial = Math.floor(Math.random() * prompts.length);
         el.textContent = prompts[initial];
@@ -3539,10 +3649,10 @@ Would you like me to continue with more detail?` : content;
     startChatPromptRotation() {
         if (!this.chatInput) return;
         const prompts = [
-            "What's on your mind?",
-            "I'm here to listen and reflect with you.",
-            "Would you like to explore a thought together?",
-            "What's calling for your attention today?"
+            'Ask about a client, project, meeting, or next step',
+            'What client follow-up should I handle first?',
+            'Prepare me for my next client meeting',
+            'What work can I close in the next 30 minutes?'
         ];
         let index = Math.floor(Math.random() * prompts.length);
         this.chatInput.placeholder = prompts[index];
@@ -3569,8 +3679,30 @@ Would you like me to continue with more detail?` : content;
 
     prettyCategory(category) {
         if (category === 'followup') return 'Follow-up';
-        if (category === 'relationship_intelligence') return 'People';
+        if (category === 'relationship_intelligence') return 'Client relationship';
+        if (['work', 'creative', 'study'].includes(category)) return 'Delivery';
+        if (category === 'personal') return 'General';
         return category.charAt(0).toUpperCase() + category.slice(1);
+    }
+
+    hasClientSignal(todo = {}) {
+        const haystack = [
+            todo.title,
+            todo.reason,
+            todo.description,
+            todo.trigger_summary,
+            todo.intent,
+            todo.primary_action?.label,
+            todo.opportunity_type,
+            todo.suggestion_group
+        ].map((value) => String(value || '').toLowerCase()).join(' ');
+        return /\b(client|customer|proposal|invoice|contract|retainer|stakeholder|meeting|follow ?up|reply|scope|brief)\b/.test(haystack);
+    }
+
+    cardToneClass(category = '') {
+        if (['followup', 'relationship_intelligence'].includes(category)) return 'suggestion-client';
+        if (['work', 'creative', 'study'].includes(category)) return 'suggestion-delivery';
+        return 'suggestion-general';
     }
 
     prettyPriority(priority) {
@@ -3779,12 +3911,12 @@ Would you like me to continue with more detail?` : content;
         
         if (syncStatusEl) {
             const textEl = syncStatusEl.querySelector(".sync-text");
-            if (textEl) textEl.textContent = "Syncing memory...";
+            if (textEl) textEl.textContent = "Updating work memory...";
             syncStatusEl.classList.add("syncing");
             
             clearTimeout(this._syncResetTimer);
             this._syncResetTimer = setTimeout(() => {
-                if (textEl) textEl.textContent = "Memory updated";
+                if (textEl) textEl.textContent = "Work memory updated";
                 syncStatusEl.classList.remove("syncing");
             }, 3000);
         }
@@ -3864,7 +3996,7 @@ Would you like me to continue with more detail?` : content;
         }
 
         if (!this.libraryList) return;
-        this.libraryList.innerHTML = '<div class="graph-placeholder">Searching memory graph...</div>';
+        this.libraryList.innerHTML = '<div class="graph-placeholder">Searching work memory...</div>';
 
         try {
             const activeFilter = this.libraryFilters.find(f => f.classList.contains('active'))?.dataset.libFilter || 'all';
@@ -3955,143 +4087,7 @@ Would you like me to continue with more detail?` : content;
     }
 
     async renderFullMemoryGraph() {
-        if (!this.settingsGraphContainer) return;
-        this.settingsGraphContainer.innerHTML = '<div class="graph-placeholder">Initializing graph...</div>';
-        try {
-            const { nodes, edges } = await window.electronAPI.getFullMemoryGraph();
-            if (!nodes || !nodes.length) {
-                this.settingsGraphContainer.innerHTML = '<div class="graph-placeholder">No memory nodes yet.</div>';
-                return;
-            }
-
-            // Filter out orphaned edges
-            const filteredNodes = nodes.filter(n => n.layer !== "cloud");
-            const nodeIds = new Set(filteredNodes.map(n => n.id));
-            const filteredEdges = (edges || []).filter(e => {
-                const s = typeof e.source === 'object' ? e.source.id : e.source;
-                const t = typeof e.target === 'object' ? e.target.id : e.target;
-                return nodeIds.has(s) && nodeIds.has(t);
-            });
-
-            this.settingsGraphContainer.innerHTML = "";
-            const width = this.settingsGraphContainer.clientWidth || 800;
-            const height = 600;
-
-            const layers = ['core', 'insight', 'semantic', 'episode', 'raw'];
-            const layerY = (layer) => {
-                const index = layers.indexOf(layer === 'event' ? 'raw' : layer);
-                if (index === -1) return width / 2;
-                return (height / (layers.length + 1)) * (index + 1);
-            };
-
-            const svg = d3.select(this.settingsGraphContainer)
-                .append("svg")
-                .attr("width", width)
-                .attr("height", height);
-
-            // Add background brackets and labels
-            layers.forEach((layer) => {
-                const y = layerY(layer);
-                
-                svg.append("line")
-                    .attr("x1", 40)
-                    .attr("y1", y)
-                    .attr("x2", width - 40)
-                    .attr("y2", y)
-                    .attr("stroke", "var(--glass-border)")
-                    .attr("stroke-width", 1);
-
-                svg.append("line")
-                    .attr("x1", 40)
-                    .attr("y1", y - 5)
-                    .attr("x2", 40)
-                    .attr("y2", y + 5)
-                    .attr("stroke", "var(--glass-border)")
-                    .attr("stroke-width", 1);
-
-                svg.append("line")
-                    .attr("x1", width - 40)
-                    .attr("y1", y - 5)
-                    .attr("x2", width - 40)
-                    .attr("y2", y + 5)
-                    .attr("stroke", "var(--glass-border)")
-                    .attr("stroke-width", 1);
-                
-                svg.append("text")
-                    .attr("x", 10)
-                    .attr("y", y + 4)
-                    .attr("text-anchor", "start")
-                    .attr("fill", "var(--text-tertiary)")
-                    .attr("font-size", "10px")
-                    .attr("font-weight", "600")
-                    .attr("style", "text-transform: uppercase; letter-spacing: 0.05em;")
-                    .text(layer);
-            });
-
-            const simulation = d3.forceSimulation(filteredNodes)
-                .force("link", d3.forceLink(filteredEdges).id(d => d.id).distance(80))
-                .force("charge", d3.forceManyBody().strength(-120))
-                .force("center", d3.forceCenter(width / 2, height / 2))
-                .force("x", d3.forceX(width / 2).strength(0.2))
-                .force("y", d3.forceY(d => layerY(d.layer)).strength(1.5))
-                .force("collide", d3.forceCollide(25));
-            const linkGroup = svg.append("g");
-            const link = linkGroup.selectAll(".graph-link-container").data(filteredEdges).enter().append("g").attr("class", "graph-link-container");
-            link.append("line").attr("class", "graph-link").attr("stroke", "var(--accent-blue)").attr("stroke-opacity", 0.25).attr("stroke-width", d => Math.sqrt(d.weight || 1));
-            link.append("text").attr("class", "graph-edge-label").attr("text-anchor", "middle").attr("font-size", "8px").attr("fill", "var(--text-tertiary)").text(d => d.edge_type || d.trace_label || "");
-
-            const node = svg.append("g")
-                .selectAll("circle")
-                .data(filteredNodes)
-                .enter().append("circle")
-                .attr("class", "graph-node")
-                .attr("r", d => d.layer === "core" ? 9 : 5)
-                .attr("fill", d => {
-                    if (d.layer === "core") return "var(--accent-coral)";
-                    if (d.layer === "insight") return "var(--accent-amber)";
-                    if (d.layer === "episode") return "var(--accent-teal)";
-                    if (d.layer === "semantic") return "var(--accent-blue)";
-                    return "var(--text-tertiary)";
-                })
-                .attr("stroke", "var(--glass-bg)")
-                .attr("stroke-width", 1.5)
-                .call(d3.drag()
-                    .on("start", (event) => {
-                        if (!event.active) simulation.alphaTarget(0.3).restart();
-                        event.subject.fx = event.subject.x;
-                        event.subject.fy = event.subject.y;
-                    })
-                    .on("drag", (event) => {
-                        event.subject.fx = event.x;
-                        event.subject.fy = event.y;
-                    })
-                    .on("end", (event) => {
-                        if (!event.active) simulation.alphaTarget(0);
-                        event.subject.fx = null;
-                        event.subject.fy = null;
-                    }))
-                .on("click", (event, d) => this.openMemoryDetailById(d.id));
-
-            node.append("title").text(d => `${d.title}\n(${d.layer})`);
-
-            simulation.on("tick", () => {
-                link.select("line")
-                    .attr("x1", d => d.source.x)
-                    .attr("y1", d => d.source.y)
-                    .attr("x2", d => d.target.x)
-                    .attr("y2", d => d.target.y);
-                
-                link.select("text")
-                    .attr("x", d => (d.source.x + d.target.x) / 2)
-                    .attr("y", d => (d.source.y + d.target.y) / 2);
-
-                node.attr("cx", d => d.x)
-                    .attr("cy", d => d.y);
-            });
-        } catch (err) {
-            console.error("Graph render error:", err);
-            this.settingsGraphContainer.innerHTML = '<div class="graph-placeholder">Failed to load graph.</div>';
-        }
+        return;
     }
 
     async openMemoryDetailById(nodeId) {

@@ -12,7 +12,7 @@
 </head>
 <body>
 
-    <!-- Liquid Glass Background -->
+    <!-- App Background -->
     <div class="liquid-background"></div>
     <div class="ambient-bloom ambient-bloom-1"></div>
     <div class="ambient-bloom ambient-bloom-2"></div>
@@ -39,16 +39,13 @@
 
     <!-- Bottom Navigation -->
     <nav class="bottom-nav">
-        <button class="nav-pill active" id="nav-presence" data-view="presence-view" title="Now">
-            <span class="material-symbols-outlined">spa</span>
+        <button class="nav-pill active" id="nav-presence" data-view="presence-view" title="Today" aria-label="Today">
+            <span class="material-symbols-outlined">today</span>
         </button>
-        <button class="nav-pill" id="nav-action" data-view="action-view" title="Doing">
-            <span class="material-symbols-outlined">bolt</span>
+        <button class="nav-pill" id="nav-action" data-view="action-view" title="Assistant" aria-label="Assistant">
+            <span class="material-symbols-outlined">forum</span>
         </button>
-        <button class="nav-pill" id="nav-reflection" data-view="reflection-view" title="Memories">
-            <span class="material-symbols-outlined">auto_stories</span>
-        </button>
-        <button class="nav-pill" id="nav-settings" data-view="settings-view" title="Settings">
+        <button class="nav-pill" id="nav-settings" data-view="settings-view" title="Settings" aria-label="Settings">
             <span class="material-symbols-outlined">settings</span>
         </button>
     </nav>
@@ -60,30 +57,46 @@
             <section id="presence-view" class="view active">
 
                 <div class="presence-layer" aria-live="polite">
-                    <div id="presence-state" class="presence-state">Resting</div>
-                    <p id="presence-summary" class="presence-summary">How can I make your day feel lighter?</p>
-                    <button id="presence-primary-action" class="presence-primary-action" type="button">Begin our day</button>
+                    <div id="presence-state" class="presence-state">Today</div>
+                    <p id="presence-summary" class="presence-summary">What needs your attention today?</p>
+                    <div class="today-snapshot" aria-label="Today status">
+                        <div class="today-snapshot-item">
+                            <span id="today-open-count">0</span>
+                            <small>open priorities</small>
+                        </div>
+                        <div class="today-snapshot-item">
+                            <span id="today-client-count">0</span>
+                            <small>client follow-ups</small>
+                        </div>
+                        <div class="today-snapshot-item">
+                            <span id="today-delivery-count">0</span>
+                            <small>delivery items</small>
+                        </div>
+                    </div>
+                    <button id="presence-primary-action" class="presence-primary-action" type="button">Review today</button>
                 </div>
 
                 <!-- Context Chips -->
                 <div class="context-chips">
-                    <button class="context-chip active" data-filter="all">What matters now</button>
-                    <button class="context-chip" data-filter="focus">Focus work</button>
-                    <button class="context-chip" data-filter="people">People</button>
+                    <button class="context-chip active" data-filter="all">All</button>
+                    <button class="context-chip" data-filter="client">Client work</button>
+                    <button class="context-chip" data-filter="delivery">Delivery</button>
+                    <button class="context-chip" data-filter="followups">Follow-ups</button>
                 </div>
 
                 <div class="today-controls">
                     <button id="today-whisper-prompt" class="today-whisper-prompt" type="button" aria-label="Conversation starter">
-                        What's pulling at your heart right now?
+                        Ask about a client, project, or next step
                     </button>
                     <div class="today-controls-subtle">
-                        <button id="manual-generate-suggestions-btn" class="ghost-button" type="button">Refresh thought stream</button>
+                        <button id="manual-generate-suggestions-btn" class="ghost-button" type="button">Refresh priorities</button>
                         <button id="customize-today-btn" class="ghost-button" type="button">Customize today</button>
-                        <button id="clear-all-suggestions-btn" class="ghost-button" type="button">Clear stream</button>
+                        <button id="clear-all-suggestions-btn" class="ghost-button" type="button">Clear priorities</button>
                         <select id="focus-mode-select" class="ghost-select" aria-label="Choose conversation focus">
                             <option value="all">All</option>
-                            <option value="focus">Focus work</option>
-                            <option value="people">People</option>
+                            <option value="client">Client work</option>
+                            <option value="delivery">Delivery</option>
+                            <option value="followups">Follow-ups</option>
                         </select>
                     </div>
                 </div>
@@ -94,8 +107,8 @@
                         <div class="empty-icon" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;">
                             <span class="material-symbols-outlined">lightbulb</span>
                         </div>
-                        <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">The air is clear for now</div>
-                        <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">I'm just being here if you need me.</div>
+                        <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">No urgent client work found</div>
+                        <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">Sync Google, refresh priorities, or ask Weave what needs attention.</div>
                     </div>
                 </div>
 
@@ -103,11 +116,11 @@
                 <div id="execute-confirm-modal" class="modal-overlay hidden">
                     <div class="modal-content glass-card" style="max-width:520px;">
                         <div class="modal-header">
-                            <h3 id="confirm-modal-title">Execute Suggestion</h3>
+                            <h3 id="confirm-modal-title">Run Priority</h3>
                             <button class="close-modal" id="confirm-close-btn">✕</button>
                         </div>
                         <div class="modal-body" id="confirm-modal-body" style="font-size:13px; color:var(--text-primary);">
-                            <p id="confirm-modal-text">Are you sure you want to run this automation?</p>
+                            <p id="confirm-modal-text">Review before running this automation for your client work.</p>
                         </div>
                         <div class="modal-footer" style="display:flex; gap:8px; justify-content:flex-end;">
                             <button class="pill-btn" id="confirm-cancel-btn">Cancel</button>
@@ -167,11 +180,15 @@
             <!-- ───── SETTINGS VIEW ───── -->
             <section id="settings-view" class="view hidden">
                 <div class="settings-section">
+                    <div class="settings-group-heading">
+                        <h2>Data capture</h2>
+                        <p>Control what Weave can observe and turn into work memory.</p>
+                    </div>
                     <div class="settings-card">
                         <div class="settings-row">
                             <div>
-                                <div class="settings-label">Frontmost OCR Capture</div>
-                                <div class="settings-description">Capture text from the frontmost window every 30 seconds with Apple Vision OCR, keep the image ephemeral, and store only structured context.</div>
+                                <div class="settings-label">Frontmost OCR capture</div>
+                                <div class="settings-description">Capture visible work context opportunistically in the background. Screenshots stay ephemeral; extracted text becomes searchable work memory.</div>
                             </div>
                             <div class="settings-control">
                                 <div class="toggle-switch" id="capture-toggle"></div>
@@ -179,8 +196,8 @@
                         </div>
                         <div class="settings-row" style="margin-top: 16px; align-items: flex-start;">
                             <div>
-                                <div class="settings-label" style="font-size: 12px;">Screen Recording Permission</div>
-                                <div class="settings-description">macOS requires Screen Recording permission for frontmost-window OCR capture.</div>
+                                <div class="settings-label" style="font-size: 12px;">Screen Recording permission</div>
+                                <div class="settings-description">Required by macOS before Weave can read frontmost-window text.</div>
                             </div>
                             <div class="settings-control">
                                 <button id="open-screen-recording-btn" class="pill-btn" type="button">Enable Screen Recording</button>
@@ -189,72 +206,10 @@
                     </div>
 
                     <div class="settings-card" style="margin-top: 24px;">
-                        <div class="settings-label" style="margin-bottom: 12px;">How OCR Works</div>
-                        <div class="settings-description" style="margin-bottom: 14px;">
-                            Proactive uses a multi-stage OCR pipeline to turn the text in your frontmost window into searchable memory.
-                        </div>
-                        <div style="display: grid; gap: 14px;">
-                            <div>
-                                <div class="settings-label" style="font-size: 12px; margin-bottom: 6px;">1. Frontmost Window Snapshot</div>
-                                <div class="settings-description">
-                                    Every few seconds while you are active, Proactive captures the frontmost window instead of blindly scanning the whole desktop. The image is treated as a temporary OCR input and is discarded after text extraction.
-                                </div>
-                            </div>
-                            <div>
-                                <div class="settings-label" style="font-size: 12px; margin-bottom: 6px;">2. macOS Vision OCR</div>
-                                <div class="settings-description">
-                                    Text is extracted with Apple Vision on-device. The OCR pass finds visible text regions, applies language-aware recognition, and keeps confidence scores so weak reads can be filtered out.
-                                </div>
-                            </div>
-                            <div>
-                                <div class="settings-label" style="font-size: 12px; margin-bottom: 6px;">3. Structure + Context</div>
-                                <div class="settings-description">
-                                    OCR text is combined with macOS Accessibility data, window title, app name, and timestamp so the result is more than a bag of words.
-                                </div>
-                                <table class="msg-table" style="margin-top: 10px;">
-                                    <thead>
-                                        <tr>
-                                            <th>Layer</th>
-                                            <th>What it provides</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        <tr>
-                                            <td>OCR (Vision)</td>
-                                            <td>Literal text visible in custom UI, images, and surfaces without native text labels.</td>
-                                        </tr>
-                                        <tr>
-                                            <td>Accessibility API</td>
-                                            <td>Structural roles such as buttons, fields, URL bars, and other interface semantics.</td>
-                                        </tr>
-                                        <tr>
-                                            <td>Context Wrapper</td>
-                                            <td>App name, window title, timestamp, and frontmost-window metadata.</td>
-                                        </tr>
-                                    </tbody>
-                                </table>
-                            </div>
-                            <div>
-                                <div class="settings-label" style="font-size: 12px; margin-bottom: 6px;">4. Memory Processing</div>
-                                <div class="settings-description">
-                                    Repeated states are deduplicated, sensitive patterns can be filtered before storage, and the resulting text is indexed so the memory graph can retrieve meaning instead of just exact keywords.
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="settings-card" style="margin-top: 24px;">
-                        <div class="settings-label" style="margin-bottom: 12px;">Interactive Memory Graph</div>
-                        <div id="settings-graph-container" class="graph-explorer-container">
-                            <div class="graph-placeholder">Loading memory graph...</div>
-                        </div>
-                    </div>
-
-                    <div class="settings-card" style="margin-top: 24px;">
                         <div class="settings-row" style="align-items: flex-start; gap: 16px;">
                             <div style="flex: 1; min-width: 0;">
-                                <div class="settings-label">Daily OCR Export</div>
-                                <div class="settings-description">Review and copy all text gathered from today&apos;s frontmost-window OCR captures.</div>
+                                <div class="settings-label">Daily OCR export</div>
+                                <div class="settings-description">Review and copy the work-context text captured today.</div>
                                 <div id="daily-ocr-meta" class="history-row-meta" style="margin-top: 10px;">Loading today's OCR…</div>
                             </div>
                             <div class="settings-control" style="display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end;">
@@ -270,48 +225,21 @@
                             style="margin-top: 16px; min-height: 220px; resize: vertical; white-space: pre-wrap;"
                         ></textarea>
                     </div>
-                </div>
 
-                    <div class="settings-card" style="margin-top: 24px;">
+                    <div class="settings-group-heading">
+                        <h2>Data management</h2>
+                        <p>Reset local memory when you need a clean workspace.</p>
+                    </div>
+                    <div class="settings-card" style="margin-top: 16px;">
                         <div class="settings-row">
                             <div>
-                                <div class="settings-label">Danger Zone</div>
+                                <div class="settings-label">Danger zone</div>
                                 <div class="settings-description">Remove all local data and reset the app to a fresh state. This will relaunch the app.</div>
                             </div>
                             <div class="settings-control">
                                 <button id="delete-all-data-btn" class="pill-btn destructive">Delete all data</button>
                             </div>
                         </div>
-                    </div>
-            </section>
-
-            <!-- ───── REFLECTION VIEW (LIBRARY) ───── -->
-            <section id="reflection-view" class="view hidden">
-                <div class="library-container">
-                    <div class="library-header">
-                        <h2 class="section-title">Memory Library</h2>
-                        <div class="library-filters">
-                            <button class="context-chip active" data-lib-filter="all">All</button>
-                            <button class="context-chip" data-lib-filter="episode">Episodes</button>
-                            <button class="context-chip" data-lib-filter="semantic">Concepts</button>
-                            <button class="context-chip" data-lib-filter="insight">Insights</button>
-                        </div>
-                    </div>
-
-                    <div class="library-search-container" style="padding: 0 24px 16px;">
-                        <div class="chat-input-wrapper" style="margin-bottom: 12px; display: flex; gap: 8px; align-items: center;">
-                            <input type="text" id="library-search-input" class="chat-input" placeholder="Search your memory graph..." style="padding: 12px 16px; flex: 1;">
-                            <button id="library-search-btn" class="send-button" style="position: static; width: 44px; height: 44px; flex-shrink: 0;">
-                                <span class="material-symbols-outlined">search</span>
-                            </button>
-                        </div>
-                        <div id="library-search-queries" class="search-queries-display hidden" style="font-size: 11px; color: var(--text-tertiary); margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px;">
-                            <!-- Generated queries will appear here -->
-                        </div>
-                    </div>
-
-                    <div id="library-list" class="library-grid">
-                        <!-- Library items will be rendered here -->
                     </div>
                 </div>
             </section>
@@ -321,15 +249,18 @@
                 <div class="chat-panel">
                     <aside class="chat-history-panel">
                         <div class="chat-history-header">
-                            <div class="settings-label">Your conversations</div>
-                            <button class="ghost-button" id="new-chat-btn">New thread</button>
+                            <div class="settings-label">Assistant threads</div>
+                            <div style="display:flex; gap:8px; align-items:center;">
+                                <button class="ghost-button" id="chat-refresh-priorities-btn" type="button">Refresh priorities</button>
+                                <button class="ghost-button" id="new-chat-btn">New thread</button>
+                            </div>
                         </div>
                         <div class="chat-history-list" id="chat-history-list"></div>
                     </aside>
                     <div class="chat-main">
                         <div class="chat-main-header">
                             <div class="chat-title-wrap">
-                                <div class="settings-label" id="chat-thread-title">Current thread</div>
+                                <div class="settings-label" id="chat-thread-title">Current work thread</div>
                                 <button class="ghost-button" id="toggle-chat-history-btn" type="button">Show threads</button>
                             </div>
                             <div style="display: flex; align-items: center; gap: 16px;">
@@ -337,11 +268,11 @@
                                     <div class="scanning-orbit">
                                         <div class="scanning-dot"></div>
                                     </div>
-                                    <span>Scanning Graph...</span>
+                                    <span>Scanning work memory...</span>
                                 </div>
-                                <div id="chat-sync-status" class="sync-status-mini chat-sync-quiet" aria-label="Memory status">
+                                <div id="chat-sync-status" class="sync-status-mini chat-sync-quiet" aria-label="Work memory status">
                                     <span class="sync-dot"></span>
-                                    <span class="sync-text">Memory updated</span>
+                                    <span class="sync-text">Work memory updated</span>
                                 </div>
                             </div>
                         </div>
@@ -351,8 +282,8 @@
                                     <div class="empty-icon" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;">
                                         <span class="material-symbols-outlined">forum</span>
                                     </div>
-                                    <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">What's on your mind?</div>
-                                    <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">I'm here to listen and reflect with you.</div>
+                                    <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">Ask about your work</div>
+                                    <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">Ask Weave about client history, open work, meetings, or follow-ups.</div>
                                 </div>
                             </div>
                             <div class="chat-input-container">
@@ -360,7 +291,7 @@
                                     <textarea 
                                         id="chat-input" 
                                         class="chat-input" 
-                                        placeholder="What's on your mind?"
+                                        placeholder="Ask about a client, project, meeting, or next step"
                                         rows="1"
                                     ></textarea>
                                     <span id="chat-char-counter" class="chat-char-counter" aria-live="polite"></span>
@@ -385,11 +316,11 @@
             <div id="add-task-modal" class="modal-overlay hidden">
                 <div class="modal-content glass-card">
                     <div class="modal-header">
-                        <h3>Add Suggestion</h3>
+                        <h3>Add Priority</h3>
                         <button class="close-modal" id="close-modal-btn">✕</button>
                     </div>
                     <div class="modal-body">
-                        <input type="text" id="task-title-input" placeholder="What needs to be done?">
+                        <input type="text" id="task-title-input" placeholder="What client work needs attention?">
                         <textarea id="task-desc-input" placeholder="Add details or context (optional)"></textarea>
                 <div class="modal-options">
                     <select id="task-priority-select">
@@ -405,18 +336,18 @@
             </div>
                     <div class="modal-footer">
                         <button class="pill-btn" id="cancel-task-btn">Cancel</button>
-                        <button class="pill-btn pill-btn-primary" id="save-task-btn">Add to Suggestions</button>
+                        <button class="pill-btn pill-btn-primary" id="save-task-btn">Add priority</button>
                     </div>
             </div>
         </div>
 
-        <!-- Memory Detail Modal -->
+        <!-- Work Memory Detail Modal -->
         <div id="memory-detail-modal" class="modal-overlay hidden" style="z-index: 10001; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.4); backdrop-filter: blur(12px); display: none; align-items: center; justify-content: center;">
             <div class="glass-card modal-content" style="max-width: 800px; width: 90%; max-height: 85vh; display:flex; flex-direction:column; padding:0; overflow:hidden; background: var(--bg2); border: 1px solid var(--border-color);">
                 <div style="padding: 24px; border-bottom: 1px solid var(--border-color); display:flex; justify-content:space-between; align-items:start;">
                     <div>
                         <div id="modal-memory-layer" style="font-size:10px; text-transform:uppercase; letter-spacing:1px; color:#d49fff; margin-bottom:8px;">Layer</div>
-                        <h2 id="modal-memory-title" class="section-title" style="margin:0; font-size:24px; color:var(--text-primary);">Memory Title</h2>
+                        <h2 id="modal-memory-title" class="section-title" style="margin:0; font-size:24px; color:var(--text-primary);">Work Memory</h2>
                         <p id="modal-memory-time" style="font-size:12px; color:var(--text-secondary); margin-top:4px;">Time</p>
                     </div>
                     <button class="pill-btn pill-btn-ghost" onclick="app.closeMemoryModal()" style="padding: 8px;">✕</button>

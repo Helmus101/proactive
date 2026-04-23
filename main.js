@@ -64,13 +64,32 @@ let voiceHudWindow = null;
 let pendingAITasks = [];
 let sensorCaptureTimer = null;
 let periodicScreenshotTimer = null;
+let periodicScreenshotWatchdogTimer = null;
 let sensorCaptureInProgress = false;
+let sensorCaptureStartedAt = 0;
 let activeVoiceSession = null;
 let activeStudySession = null;
 const DEFAULT_VOICE_SHORTCUT = 'CommandOrControl+Shift+Space';
 const LEGACY_VOICE_SHORTCUT = 'CommandOrControl+Space';
 const PLANNER_STEP_THROTTLE_MS = 700;
 const SCREENSHOT_RETENTION_DAYS = 36500;
+
+function inferStudySignal(text = '', event = {}) {
+  const haystack = [
+    text,
+    event.activeApp,
+    event.activeWindowTitle,
+    event.study_goal,
+    event.study_subject
+  ].map((value) => String(value || '').toLowerCase()).join(' ');
+
+  if (!haystack.trim()) return null;
+  if (/\b(exam|quiz|flashcard|anki|revision|review|practice test|problem set)\b/.test(haystack)) return 'reviewing';
+  if (/\b(reading|chapter|article|paper|lecture notes|textbook|research)\b/.test(haystack)) return 'reading';
+  if (/\b(homework|assignment|submit|due|canvas|classroom|instructure|exercise)\b/.test(haystack)) return 'task';
+  if (/\b(study|course|class|lesson|learn|vocab|thesis)\b/.test(haystack)) return 'study';
+  return null;
+}
 
 // Memory Graph Processing Timers
 let episodeGenerationTimer = null;
@@ -87,16 +106,19 @@ let lastSuggestionLockSkipLogAt = 0;
 let suggestionRunQueued = false;
 let lastCaptureSuggestionTriggerAt = 0;
 const MAX_PRACTICAL_SUGGESTIONS = 7;
-const CAPTURE_TRIGGER_MIN_INTERVAL_MS = 15 * 60 * 1000;
-const SUGGESTION_REFRESH_INTERVAL_MINUTES = 30;
+const CAPTURE_TRIGGER_MIN_INTERVAL_MS = 60 * 60 * 1000;
+const SUGGESTION_REFRESH_INTERVAL_MINUTES = 60;
 const PERIODIC_SCREENSHOT_INTERVAL_MS = 30 * 1000;
 const PERIODIC_SCREENSHOT_WAKE_DELAY_MS = 2500;
 const LOW_POWER_OCR_MIN_INTERVAL_MS = 5 * 60 * 1000;
-const LOW_POWER_HEAVY_JOB_MIN_GAP_MS = 30 * 60 * 1000;
+const LOW_POWER_HEAVY_JOB_MIN_GAP_MS = 60 * 60 * 1000;
+const CAPTURE_STALE_LOCK_MS = 2 * 60 * 1000;
+const APP_ACTIVE_CAPTURE_COOLDOWN_MS = 3 * 60 * 1000;
+const SCREENSHOT_WATCHDOG_INTERVAL_MS = 60 * 1000;
 const CAPTURE_VISUAL_DIFF_THRESHOLD = Number(process.env.CAPTURE_VISUAL_DIFF_THRESHOLD || 0.05);
 const STARTUP_HEAVY_JOB_DELAY_MS = Math.max(5 * 60 * 1000, Number(process.env.STARTUP_HEAVY_JOB_DELAY_MS || 10 * 60 * 1000));
 const STARTUP_INITIAL_SYNC_DELAY_MS = Math.max(10 * 60 * 1000, Number(process.env.STARTUP_INITIAL_SYNC_DELAY_MS || 20 * 60 * 1000));
-const GSUITE_SYNC_INTERVAL_MS = Math.max(5 * 60 * 1000, Number(process.env.GSUITE_SYNC_INTERVAL_MS || 5 * 60 * 1000));
+const GSUITE_SYNC_INTERVAL_MS = Math.max(15 * 60 * 1000, Number(process.env.GSUITE_SYNC_INTERVAL_MS || 15 * 60 * 1000));
 let lastLowPowerOCRAt = 0;
 let lastEpisodeHeavyRunAt = 0;
 let lastSuggestionHeavyRunAt = 0;
@@ -108,6 +130,11 @@ let periodicScreenshotPauseReason = '';
 const performanceState = {
   onBattery: false,
   thermalState: 'unknown'
+};
+const appInteractionState = {
+  focused: false,
+  minimized: false,
+  lastInteractionAt: 0
 };
 
 function getPerformanceMode() {
@@ -141,9 +168,27 @@ function canRunHeavyJob(lastRunAt = 0) {
 
 function shouldDeferBackgroundWork(label = 'background') {
   const idleTime = (powerMonitor && typeof powerMonitor.getSystemIdleTime === 'function') ? powerMonitor.getSystemIdleTime() : 0;
-  const defer = idleTime < 180;
+  const appBusy = isAppInteractionHot();
+  const defer = idleTime < 180 || appBusy;
   if (defer) console.log(`[${label}] Deferring heavy work until idle; idle=${idleTime}s`);
   return defer;
+}
+
+function markAppInteraction(reason = 'interaction') {
+  appInteractionState.lastInteractionAt = Date.now();
+  if (reason) {
+    store.set('lastAppInteraction', {
+      reason,
+      at: new Date(appInteractionState.lastInteractionAt).toISOString()
+    });
+  }
+}
+
+function isAppInteractionHot() {
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  if (appInteractionState.minimized) return false;
+  if (!appInteractionState.focused) return false;
+  return (Date.now() - Number(appInteractionState.lastInteractionAt || 0)) < APP_ACTIVE_CAPTURE_COOLDOWN_MS;
 }
 
 function updatePerformanceState(next = {}) {
@@ -158,8 +203,11 @@ function updatePerformanceState(next = {}) {
   });
 
   if (oldMode !== newMode) {
-    console.log(`[Performance] Mode changed from ${oldMode} to ${newMode}. Restarting sensor timer only; screenshot cadence stays fixed at 30s.`);
+    console.log(`[Performance] Mode changed from ${oldMode} to ${newMode}. Restarting capture timers with updated cadence.`);
     startSensorCaptureLoop(newMode);
+    if (periodicScreenshotRunning && !screenshotsPausedForDisplayOff) {
+      startPeriodicScreenshotCapture(newMode);
+    }
   }
 }
 
@@ -410,6 +458,27 @@ function createWindow() {
 
   mainWindow.loadFile('renderer/index.html');
 
+  appInteractionState.focused = mainWindow.isFocused();
+  appInteractionState.minimized = mainWindow.isMinimized();
+  if (appInteractionState.focused) markAppInteraction('window-created');
+  mainWindow.on('focus', () => {
+    appInteractionState.focused = true;
+    markAppInteraction('focus');
+  });
+  mainWindow.on('blur', () => {
+    appInteractionState.focused = false;
+  });
+  mainWindow.on('minimize', () => {
+    appInteractionState.minimized = true;
+  });
+  mainWindow.on('restore', () => {
+    appInteractionState.minimized = false;
+    markAppInteraction('restore');
+  });
+  mainWindow.webContents.on('before-input-event', () => {
+    markAppInteraction('input');
+  });
+
   if (process.argv.includes('--dev')) {
     mainWindow.webContents.openDevTools();
   }
@@ -571,6 +640,26 @@ function getSensorEvents() {
     return trimmed;
   }
   return events;
+}
+
+function pruneOldSensorCaptures(events = []) {
+  const list = Array.isArray(events) ? events : [];
+  const retentionMs = Math.max(1, Number(SCREENSHOT_RETENTION_DAYS || 36500)) * 24 * 60 * 60 * 1000;
+  const cutoff = Date.now() - retentionMs;
+  const { maxEvents } = getSensorSettings();
+  const limit = Math.max(50, Number(maxEvents || DEFAULT_SENSOR_SETTINGS.maxEvents));
+
+  return list
+    .filter((event) => {
+      const ts = Number(event?.timestamp) || Date.parse(String(event?.captured_at || event?.time || ''));
+      return !Number.isFinite(ts) || ts <= 0 || ts >= cutoff;
+    })
+    .sort((a, b) => {
+      const aTs = Number(a?.timestamp) || Date.parse(String(a?.captured_at || '')) || 0;
+      const bTs = Number(b?.timestamp) || Date.parse(String(b?.captured_at || '')) || 0;
+      return bTs - aTs;
+    })
+    .slice(0, limit);
 }
 
 function getSensorStatus() {
@@ -958,6 +1047,11 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
       screenshot_present: false
     };
   }
+  if (sensorCaptureInProgress && (Date.now() - sensorCaptureStartedAt) > CAPTURE_STALE_LOCK_MS) {
+    console.warn('[SensorCapture] Resetting stale capture lock');
+    sensorCaptureInProgress = false;
+    sensorCaptureStartedAt = 0;
+  }
   if (sensorCaptureInProgress) {
     // Avoid overlapping captures
     return {
@@ -967,6 +1061,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     };
   }
   sensorCaptureInProgress = true;
+  sensorCaptureStartedAt = Date.now();
   let captureLockReleased = false;
   const timestamp = Date.now();
   const filename = `ocr_capture_${timestamp}_${crypto.randomBytes(4).toString('hex')}.png`;
@@ -1108,14 +1203,14 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   const inStudySession = studySession?.status === 'active' && Boolean(studySession?.session_id);
 
   const axText = String(windowContext.extractedText || '').trim();
-  const canUseAxOnly = !forceCapture && !isPeriodicScreenshot && axText.length >= 80;
+  const canUseAxOnly = !forceCapture && axText.length >= 80;
   let ocrStartTime = Date.now();
   const ocr = canUseAxOnly
     ? {
         text: '',
         lines: [],
         confidence: 0,
-        status: isPeriodicScreenshot ? 'skipped_periodic_capture' : 'skipped_ax_text_available'
+        status: 'skipped_ax_text_available'
       }
     : await runVisionOCR(imagePath);
   const ocrDuration = Date.now() - ocrStartTime;
@@ -1275,13 +1370,14 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     const triggerInterval = isReducedLoadMode()
       ? Math.max(CAPTURE_TRIGGER_MIN_INTERVAL_MS * 2, LOW_POWER_HEAVY_JOB_MIN_GAP_MS)
       : Math.max(CAPTURE_TRIGGER_MIN_INTERVAL_MS, LOW_POWER_HEAVY_JOB_MIN_GAP_MS);
-    if ((Date.now() - lastCaptureSuggestionTriggerAt) >= triggerInterval) {
+    const activeSuggestionCount = mergeSuggestionQueues(store.get('suggestions') || [], [], MAX_PRACTICAL_SUGGESTIONS).length;
+    if (activeSuggestionCount < MAX_PRACTICAL_SUGGESTIONS && (Date.now() - lastCaptureSuggestionTriggerAt) >= triggerInterval) {
       lastCaptureSuggestionTriggerAt = Date.now();
       setTimeout(() => {
         runSuggestionEngineJob().catch(err =>
           console.log('Background suggestion engine trigger failed:', err?.message || err)
         );
-      }, 10000); // 10 second delay to allow ingestion to complete
+      }, 5 * 60 * 1000); // Delay to avoid doing LLM work during active screenshot/OCR cycles.
     }
   } catch (e) {
     console.error('[captureDesktopSensorSnapshot] L1 ingestion failed:', e.message || e);
@@ -1299,6 +1395,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     console.error('[captureDesktopSensorSnapshot] capture failed:', error?.message || error);
     throw error;
   } finally {
+    sensorCaptureStartedAt = 0;
     if (!captureLockReleased) {
       sensorCaptureInProgress = false;
     }
@@ -1339,6 +1436,24 @@ function clearPeriodicScreenshotTimer() {
   }
 }
 
+function startPeriodicScreenshotWatchdog() {
+  if (periodicScreenshotWatchdogTimer) return;
+  periodicScreenshotWatchdogTimer = setInterval(() => {
+    if (!periodicScreenshotRunning || screenshotsPausedForDisplayOff) return;
+    if (sensorCaptureInProgress && (Date.now() - sensorCaptureStartedAt) > CAPTURE_STALE_LOCK_MS) {
+      console.warn('[Screenshot] Clearing stale capture state from watchdog');
+      sensorCaptureInProgress = false;
+      sensorCaptureStartedAt = 0;
+    }
+    if (!periodicScreenshotTimer) {
+      const intervalMs = getPeriodicScreenshotIntervalMs();
+      periodicScreenshotNextDueAt = Date.now() + intervalMs;
+      scheduleNextPeriodicScreenshot(intervalMs);
+      console.warn('[Screenshot] Watchdog restored missing periodic screenshot timer');
+    }
+  }, SCREENSHOT_WATCHDOG_INTERVAL_MS);
+}
+
 function scheduleNextPeriodicScreenshot(delayMs) {
   clearPeriodicScreenshotTimer();
   const safeDelayMs = Math.max(1000, Number(delayMs || getPeriodicScreenshotIntervalMs()));
@@ -1363,7 +1478,6 @@ async function runPeriodicScreenshotTick() {
     console.log('[Screenshot] Paused because display/system is asleep');
     return;
   }
-
   const now = Date.now();
   const intervalMs = getPeriodicScreenshotIntervalMs();
   if (!periodicScreenshotNextDueAt || periodicScreenshotNextDueAt <= now) {
@@ -1430,7 +1544,6 @@ function resumePeriodicScreenshotCapture(reason = 'display/system awake') {
   }
 }
 
-// Periodic screenshot capture with a fixed 30-second cadence.
 function startPeriodicScreenshotCapture(mode = null, options = {}) {
   clearPeriodicScreenshotTimer();
 
@@ -1443,9 +1556,8 @@ function startPeriodicScreenshotCapture(mode = null, options = {}) {
 
   console.log(`[Screenshot] Starting periodic screenshot capture every ${Math.round(intervalMs / 1000)}s (mode=${currentMode}, first=${Math.round(initialDelayMs / 100) / 10}s)`);
 
-  // Avoid an immediate startup capture; OCR and embedding work must not compete
-  // with the renderer while the app is still becoming interactive.
   scheduleNextPeriodicScreenshot(initialDelayMs);
+  startPeriodicScreenshotWatchdog();
 }
 
 function stopPeriodicScreenshotCapture() {
@@ -1745,11 +1857,6 @@ function startSourceWarmup() {
   setTimeout(() => {
     runMinutelySync().catch((e) => console.warn('[Warmup] Minutely sync failed:', e?.message || e));
   }, STARTUP_HEAVY_JOB_DELAY_MS);
-
-  setTimeout(() => {
-    if (!getSensorSettings().enabled) return;
-    captureDesktopSensorSnapshot('startup').catch((e) => console.warn('[Warmup] Startup capture failed:', e?.message || e));
-  }, 3 * 60 * 1000);
 }
 
 // ── Memory Graph Processing Functions ───────────────────────────────
@@ -1904,15 +2011,12 @@ async function runSuggestionEngineJob() {
   }
   const check = await hasNewEventsSince('suggestion');
   const existingActiveSuggestions = mergeSuggestionQueues(store.get('suggestions') || [], [], MAX_PRACTICAL_SUGGESTIONS);
-  if (!check.hasNew && existingActiveSuggestions.length >= MAX_PRACTICAL_SUGGESTIONS) {
+  const remainingCapacity = Math.max(0, MAX_PRACTICAL_SUGGESTIONS - existingActiveSuggestions.length);
+  if (remainingCapacity <= 0) {
     if ((store.get('suggestions') || []).length !== existingActiveSuggestions.length) {
       store.set('suggestions', existingActiveSuggestions);
     }
-    console.log('[SuggestionEngine] No new events and active suggestion pool is full, skipping');
-    return;
-  }
-  if (!canRunHeavyJob(lastSuggestionHeavyRunAt)) {
-    console.log('[SuggestionEngine] Skipping to reduce system load / active use');
+    console.log('[SuggestionEngine] Active suggestion pool is full (7/7), skipping hourly top-up');
     return;
   }
   lastSuggestionHeavyRunAt = Date.now();
@@ -1942,7 +2046,7 @@ async function runSuggestionEngineJob() {
       });
     }
 
-    console.log(`[SuggestionEngine] Running 30-minute suggestion engine (${llmConfig.provider})...`);
+    console.log(`[SuggestionEngine] Running hourly top-up (${existingActiveSuggestions.length}/7 active, capacity=${remainingCapacity}, new_events=${Boolean(check.hasNew)}, provider=${llmConfig.provider})...`);
     const { generateTopTodosFromMemoryQuery, generateAndPersistTasksFromLLM } = require('./services/agent/suggestion-engine');
     const proactiveMemory = store.get('proactiveMemory') || { core: '' };
 
@@ -1952,8 +2056,14 @@ async function runSuggestionEngineJob() {
       suggestionStatus: 'running'
     });
     const newSuggestions = await generateTopTodosFromMemoryQuery(llmConfig, {
-      query: 'Look through my memory and generate top 7 todos or actions I need to do right now.',
+      query: `Look through my memory and generate ${remainingCapacity} short actionable todos or actions I need to do right now. Do not duplicate existing suggestions.`,
       standing_notes: proactiveMemory.core || '',
+      max_suggestions: remainingCapacity,
+      existing_suggestions: existingActiveSuggestions.map((item) => ({
+        title: item.title,
+        reason: item.reason || item.description || '',
+        primary_action: item.primary_action?.label || item.recommended_action || ''
+      })),
       study_context: getStudySessionState()
     });
     console.log(`[SuggestionEngine] Generated ${newSuggestions.length} actionable suggestions`);
@@ -1971,7 +2081,7 @@ async function runSuggestionEngineJob() {
       .filter((item) => item && item.ai_generated !== false)
       .filter(isActionableSuggestion)
       .sort((a, b) => Number(b.score || b.confidence || 0) - Number(a.score || a.confidence || 0))
-      .slice(0, MAX_PRACTICAL_SUGGESTIONS);
+      .slice(0, remainingCapacity);
     const existingSuggestions = store.get('suggestions') || [];
     const outgoingSuggestions = mergeSuggestionQueues(existingSuggestions, latestSuggestions, MAX_PRACTICAL_SUGGESTIONS);
     store.set('suggestions', outgoingSuggestions);
@@ -2214,7 +2324,7 @@ function startMemoryGraphProcessing() {
       console.warn('[MemoryGraph] Failed to schedule aligned hourly pulse:', e?.message || e);
     }
 
-  // Suggestion engine every 30 minutes
+  // Suggestion engine hourly; each run only fills missing slots up to 7.
   if (suggestionEngineTimer) clearInterval(suggestionEngineTimer);
   suggestionEngineTimer = setInterval(runSuggestionEngineJob, SUGGESTION_REFRESH_INTERVAL_MINUTES * 60 * 1000);
 
@@ -2235,10 +2345,10 @@ function startMemoryGraphProcessing() {
 
   // Avoid heavy graph work during initial UI load; rely on scheduled aligned runs.
 
-  // Suggestions can lag slightly behind the graph warmup.
+  // Suggestions can lag behind graph warmup; avoid launch-time battery spikes.
   setTimeout(() => {
     runSuggestionEngineJob().catch((e) => console.warn('[MemoryGraph] Initial suggestion generation failed:', e?.message || e));
-  }, 30000);
+  }, 10 * 60 * 1000);
 }
 
 function scheduleWeeklyInsights() {
@@ -7435,8 +7545,15 @@ ipcMain.handle('generate-proactive-todos', async (event, payload = {}) => {
       return Array.isArray(existingSuggestions) ? existingSuggestions : [];
     }
     const suggestions = await generateTopTodosFromMemoryQuery(llmConfig, {
-      query: 'Look through my memory and generate top 7 todos or actions I need to do right now.',
+      query: `Look through my memory and generate ${maxNewSuggestions} short actionable todos or actions I need to do right now. Do not duplicate existing active suggestions.`,
       standing_notes: proactiveMemory.core || '',
+      max_suggestions: maxNewSuggestions,
+      active_suggestion_count: activeCount,
+      existing_suggestions: existingSuggestions.slice(0, MAX_PRACTICAL_SUGGESTIONS).map((item) => ({
+        title: item.title,
+        reason: item.reason || item.description || '',
+        primary_action: item.primary_action?.label || item.recommended_action || ''
+      })),
       study_context: getStudySessionState()
     });
     const validatedSuggestions = (Array.isArray(suggestions) ? suggestions : [])
@@ -9310,6 +9427,29 @@ ipcMain.handle('debug-trigger-suggestions', async () => {
   return { success: true, message: 'Suggestions triggered manually' };
 });
 
+ipcMain.handle('trigger-suggestion-refresh', async (_event, payload = {}) => {
+  try {
+    console.log('[Suggestions] User-triggered refresh requested');
+    await runSuggestionEngineJob();
+    const suggestions = store.get('suggestions') || [];
+    const persistentTodos = store.get('persistentTodos') || [];
+    return {
+      success: true,
+      suggestions: Array.isArray(suggestions) ? suggestions.slice(0, MAX_PRACTICAL_SUGGESTIONS) : [],
+      persistentTodos: Array.isArray(persistentTodos) ? persistentTodos.slice(0, 25) : [],
+      source: 'memory-suggestion-engine',
+      payload
+    };
+  } catch (error) {
+    console.error('[Suggestions] User-triggered refresh failed:', error);
+    return {
+      success: false,
+      suggestions: Array.isArray(store.get('suggestions')) ? store.get('suggestions').slice(0, MAX_PRACTICAL_SUGGESTIONS) : [],
+      error: error?.message || String(error)
+    };
+  }
+});
+
 // Run suggestion engine: accepts optional events payload or uses global.extensionData
 ipcMain.handle('run-suggestion-engine', async (event, payload) => {
   try {
@@ -9452,7 +9592,6 @@ async function runRecursiveImprovementOnce(trigger = 'scheduled') {
 
 function startRecursiveImprovementLoop() {
   if (!recursiveImprovementEnabled()) {
-    console.log('[RecursiveImprovement] Disabled by configuration');
     return;
   }
   if (recursiveImprovementTimer) return;
@@ -10732,7 +10871,9 @@ app.whenReady().then(async () => {
 
   // Start user-defined automation scheduler
   setTimeout(() => startAutomationScheduler(), STARTUP_HEAVY_JOB_DELAY_MS);
-  setTimeout(() => startRecursiveImprovementLoop(), STARTUP_HEAVY_JOB_DELAY_MS + 60 * 1000);
+  if (recursiveImprovementEnabled()) {
+    setTimeout(() => startRecursiveImprovementLoop(), STARTUP_HEAVY_JOB_DELAY_MS + 60 * 1000);
+  }
 
   // ── Auto-trigger initial sync on first launch ──────────────────────────
   const syncDone = store.get('initialSyncDone') || false;

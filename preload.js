@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getSuggestions: () => ipcRenderer.invoke('get-suggestions'),
   saveSuggestions: (suggestions) => ipcRenderer.invoke('save-suggestions', suggestions),
   clearSuggestions: () => ipcRenderer.invoke('clear-suggestions'),
+  triggerSuggestionRefresh: (payload = {}) => ipcRenderer.invoke('trigger-suggestion-refresh', payload),
   runSuggestionEngine: (payload) => ipcRenderer.invoke('run-suggestion-engine', payload),
   logAutomation: (record) => ipcRenderer.invoke('log-automation', record),
   getMorningBriefs: () => ipcRenderer.invoke('get-morning-briefs'),
