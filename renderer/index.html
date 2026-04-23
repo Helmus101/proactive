@@ -39,8 +39,8 @@
 
     <!-- Bottom Navigation -->
     <nav class="bottom-nav">
-        <button class="nav-pill active" id="nav-presence" data-view="presence-view" title="Today" aria-label="Today">
-            <span class="material-symbols-outlined">today</span>
+        <button class="nav-pill active" id="nav-presence" data-view="presence-view" title="Home" aria-label="Home">
+            <span class="material-symbols-outlined">home</span>
         </button>
         <button class="nav-pill" id="nav-action" data-view="action-view" title="Assistant" aria-label="Assistant">
             <span class="material-symbols-outlined">forum</span>
@@ -53,27 +53,27 @@
     <!-- Main Content Area -->
         <main class="content-area">
 
-            <!-- ───── PRESENCE VIEW (TODAY) ───── -->
+            <!-- ───── PRESENCE VIEW (HOME) ───── -->
             <section id="presence-view" class="view active">
 
                 <div class="presence-layer" aria-live="polite">
-                    <div id="presence-state" class="presence-state">Today</div>
-                    <p id="presence-summary" class="presence-summary">What needs your attention today?</p>
-                    <div class="today-snapshot" aria-label="Today status">
+                    <div id="presence-state" class="presence-state">Home</div>
+                    <p id="presence-summary" class="presence-summary">Your work summary</p>
+                    <div class="today-snapshot" aria-label="Home status">
                         <div class="today-snapshot-item">
                             <span id="today-open-count">0</span>
-                            <small>open priorities</small>
+                            <small>Active priorities</small>
                         </div>
                         <div class="today-snapshot-item">
                             <span id="today-client-count">0</span>
-                            <small>client follow-ups</small>
+                            <small>Client items</small>
                         </div>
                         <div class="today-snapshot-item">
                             <span id="today-delivery-count">0</span>
-                            <small>delivery items</small>
+                            <small>Delivery</small>
                         </div>
                     </div>
-                    <button id="presence-primary-action" class="presence-primary-action" type="button">Review today</button>
+                    <button id="presence-primary-action" class="presence-primary-action" type="button">Review priorities</button>
                 </div>
 
                 <!-- Context Chips -->
@@ -277,27 +277,26 @@
                             </div>
                         </div>
                         <div class="chat-container">
-                            <div class="chat-messages" id="chat-messages">
-                                <div class="empty-state" style="text-align: center; padding: 60px 20px;">
-                                    <div class="empty-icon" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;">
-                                        <span class="material-symbols-outlined">forum</span>
-                                    </div>
-                                    <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">Ask about your work</div>
-                                    <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">Ask Weave about client history, open work, meetings, or follow-ups.</div>
+                            <div class="chat-messages claude-chat-messages" id="chat-messages">
+                                <div class="claude-empty-state">
+                                    <div class="claude-empty-kicker">ASSISTANT</div>
+                                    <h2 class="claude-empty-title">Ask about your work</h2>
+                                    <p class="claude-empty-sub">Ask Weave about client history, open work, meetings, or follow-ups.</p>
                                 </div>
                             </div>
-                            <div class="chat-input-container">
-                                <div class="chat-input-wrapper">
+                            <div class="claude-chat-input-wrap">
+                                <div class="claude-composer">
                                     <textarea 
                                         id="chat-input" 
-                                        class="chat-input" 
                                         placeholder="Ask about a client, project, meeting, or next step"
                                         rows="1"
                                     ></textarea>
-                                    <span id="chat-char-counter" class="chat-char-counter" aria-live="polite"></span>
-                                    <button id="send-chat-btn" class="send-button">
-                                        <span class="material-symbols-outlined">arrow_upward</span>
-                                    </button>
+                                    <div class="claude-composer-footer">
+                                        <div class="claude-composer-hint">Shift + Enter for new line</div>
+                                        <button id="send-chat-btn" class="claude-send-btn">
+                                            <span class="material-symbols-outlined">arrow_upward</span>
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
                         </div>

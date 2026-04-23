@@ -644,11 +644,7 @@ class WeaveApp {
         const expanded = this.expandedCards.has(todo.id);
         const suggestionCategory = todo.suggestion_category || todo.category || 'work';
         const isStudy = suggestionCategory === 'study';
-        // ai_doable + non-manual = something the automation layer can actually execute
         const aiCanAutomate = Boolean(todo.ai_doable && todo.action_type && todo.action_type !== 'manual_next_step');
-        const evidencePath = Array.isArray(todo.evidence_path) && todo.evidence_path.length
-            ? todo.evidence_path
-            : (Array.isArray(todo.source_edge_paths) ? todo.source_edge_paths : []);
         const compact = (value, limit = 90) => {
             const text = String(value || '').replace(/\s+/g, ' ').trim();
             return text.length > limit ? `${text.slice(0, Math.max(0, limit - 1)).trim()}…` : text;
@@ -656,7 +652,6 @@ class WeaveApp {
         const riskLabel = todo.risk_level ? `Risk: ${todo.risk_level}` : '';
         const bundleSummary = todo.display?.summary || '';
         const primaryAction = todo.primary_action || (Array.isArray(todo.suggested_actions) ? todo.suggested_actions.find((a) => this.isConcreteActionLabel(a?.label)) : null);
-        // Prefer the most specific one-liner: reason > trigger_summary > display.summary
         const rawSubtitle = todo.reason || todo.trigger_summary || bundleSummary || todo.why_now || todo.description || '';
         const whyNowCompact = compact(rawSubtitle, 88);
         const evidenceCompact = todo.evidence_line || (Array.isArray(todo.epistemic_trace) && todo.epistemic_trace.length
@@ -668,49 +663,40 @@ class WeaveApp {
         const categoryLabel = this.prettyCategory(todo.category);
         const actionLabel = primaryAction?.label || 'Review details';
         const cardTone = this.cardToneClass(todo.category);
+        
         return `
                 <article class="suggestion-card conversation-entry ${this.escapeHtml(cardTone)}${isStudy ? ' suggestion-study' : ''}" data-id="${this.escapeHtml(todo.id)}" tabindex="0" style="animation-delay:${index * 40}ms;">
                     <div class="suggestion-header">
                         <div class="suggestion-content">
                             <div class="suggestion-kicker">
                                 <span>${this.escapeHtml(categoryLabel)}</span>
-                                <span>${this.escapeHtml(this.prettyPriority(todo.priority))} priority</span>
+                                <span>${this.escapeHtml(this.prettyPriority(todo.priority))}</span>
                                 ${todo.time_anchor ? `<span>${this.escapeHtml(todo.time_anchor)}</span>` : ''}
                             </div>
                             <div class="suggestion-title">${this.escapeHtml(todo.title)}</div>
                             ${whyNowCompact ? `<div class="suggestion-description">${this.escapeHtml(whyNowCompact)}</div>` : ''}
-                            ${evidenceCompact ? `<div class="suggestion-context"><span>Evidence</span>${this.escapeHtml(evidenceCompact)}</div>` : ''}
-                            <div class="suggestion-primary-line"><span>Next action</span>${this.escapeHtml(actionLabel)}</div>
-                            ${aiCanAutomate ? '<div class="suggestion-context suggestion-subtle-note"><span>Automation</span>Can draft or run when you approve.</div>' : ''}
-                            ${!expanded ? '<div class="suggestion-primary-wrap"><button class="presence-primary-action" type="button" data-action="info">Details</button></div>' : ''}
+                            ${evidenceCompact ? `<div class="suggestion-context" style="font-style: italic; opacity: 0.8;">${this.escapeHtml(evidenceCompact)}</div>` : ''}
+                            <div class="suggestion-primary-line" style="font-weight: 500; color: var(--accent-blue-strong);">${this.escapeHtml(actionLabel)}</div>
+                            ${aiCanAutomate ? '<div class="suggestion-context suggestion-subtle-note" style="font-size: 11px; margin-top: 4px;">AI-assisted automation available</div>' : ''}
+                            ${!expanded ? '<div class="suggestion-primary-wrap"><button class="presence-primary-action" type="button" data-action="info" style="padding: 6px 12px; font-size: 11px;">View details</button></div>' : ''}
                         </div>
                     </div>
                     ${expanded ? `
-                        <div class="suggestion-details suggestion-details-quick" style="display:block;">
-                            ${primaryAction ? `<div class="suggestion-goal"><span>Action</span>${this.escapeHtml(primaryAction.label)}</div>` : ''}
-                            ${todo.reason ? `<div class="suggestion-why"><span>Why</span>${this.escapeHtml(todo.reason)}</div>` : ''}
-                            ${todo.time_anchor ? `<div class="suggestion-why"><span>When</span>${this.escapeHtml(todo.time_anchor)}</div>` : ''}
-                            ${todo.step_plan.length ? `<div class="suggestion-steps">${todo.step_plan.map((step, stepIndex) => `<div class="suggestion-step">${stepIndex + 1}. ${this.escapeHtml(step)}</div>`).join('')}</div>` : ''}
-                            ${receiptSummary ? `<div class="suggestion-why"><span>Receipt</span>${this.escapeHtml(receiptSummary)}</div>` : ''}
-                            <div class="suggestion-meta" style="margin-top:12px;">
-                                <span>${this.escapeHtml(this.prettyCategory(todo.category))}</span>
-                                <span>${this.escapeHtml(this.prettyPriority(todo.priority))} priority</span>
-                                ${riskLabel ? `<span>${this.escapeHtml(riskLabel)}</span>` : ''}
-                                <span>${this.escapeHtml(todo.ai_doable ? 'AI can do' : 'Manual')}</span>
-                            </div>
-                            <div class="reminder-actions" style="opacity:1; margin-top:16px;">
+                        <div class="suggestion-details suggestion-details-quick" style="display:block; margin-top: 16px; border-top: 1px solid var(--glass-border); padding-top: 16px;">
+                            ${todo.reason ? `<div class="suggestion-why" style="margin-bottom: 12px;"><span style="display: block; font-size: 10px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 4px;">Context</span>${this.escapeHtml(todo.reason)}</div>` : ''}
+                            ${todo.step_plan.length ? `<div class="suggestion-steps" style="margin-bottom: 12px;"><span style="display: block; font-size: 10px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 4px;">Plan</span>${todo.step_plan.map((step, stepIndex) => `<div class="suggestion-step">${stepIndex + 1}. ${this.escapeHtml(step)}</div>`).join('')}</div>` : ''}
+                            ${receiptSummary ? `<div class="suggestion-why" style="margin-bottom: 12px;"><span style="display: block; font-size: 10px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 4px;">Source</span>${this.escapeHtml(receiptSummary)}</div>` : ''}
+                            <div class="reminder-actions" style="opacity:1; margin-top:20px; display: flex; gap: 8px;">
                                 ${todo.source === 'morning-brief'
                                     ? '<button class="pill-btn" type="button" data-action="brief-open">Open brief</button><button class="pill-btn" type="button" data-action="brief-archive">Archive</button>'
-                                    : `${todo.ai_doable ? '<button class="pill-btn" type="button" data-action="draft">Draft</button><button class="pill-btn" type="button" data-action="execute">Run</button>' : ''}<button class="pill-btn" type="button" data-action="info">Details</button><button class="pill-btn" type="button" data-action="done">Done</button><button class="pill-btn" type="button" data-action="snooze">Snooze</button><button class="pill-btn destructive" type="button" data-action="remove">Remove</button>`
+                                    : `${todo.ai_doable ? '<button class="pill-btn pill-btn-primary" type="button" data-action="execute">Execute</button>' : ''}<button class="pill-btn" type="button" data-action="done">Mark done</button><button class="pill-btn" type="button" data-action="snooze">Snooze</button><button class="pill-btn destructive" type="button" data-action="remove">Dismiss</button>`
                                 }
                             </div>
                         </div>
                     ` : ''}
                 </article>
             `;
-    }
-
-    renderMorningBriefBanner() {
+    }    renderMorningBriefBanner() {
         const latest = (this.morningBriefs || [])[0];
         if (!latest) return '';
         const subtitle = (latest.priorities || []).slice(0, 3).map((p) => p.title).filter(Boolean).join(' • ');
@@ -1361,17 +1347,31 @@ class WeaveApp {
     appendChatMessage(role, payload) {
         if (!this.chatMessages) return;
 
-        const emptyState = this.chatMessages.querySelector('.empty-state');
+        const emptyState = this.chatMessages.querySelector('.empty-state, .claude-empty-state');
         if (emptyState) emptyState.remove();
 
         const message = document.createElement('div');
-        message.className = `message ${role}`;
+        message.className = `claude-message ${role}`;
+        
+        const avatarInitial = role === 'assistant' ? 'W' : 'Y';
+        const roleLabel = role === 'assistant' ? 'Weave' : 'You';
+        
         const content = typeof payload === 'object' && payload !== null ? (payload.content || '') : payload;
         const retrieval = typeof payload === 'object' && payload !== null ? (payload.retrieval || null) : null;
         const thinkingTrace = typeof payload === 'object' && payload !== null ? (payload.thinking_trace || retrieval?.thinking_trace || null) : null;
-        message.innerHTML = role === 'assistant'
+        
+        const contentHtml = role === 'assistant'
             ? this.renderAssistantHTML(content, retrieval, thinkingTrace)
             : this.escapeHtml(content).replace(/\n/g, '<br>');
+
+        message.innerHTML = `
+            <div class="claude-avatar ${role}">${avatarInitial}</div>
+            <div class="claude-message-body">
+                <div class="claude-message-role">${roleLabel}</div>
+                <div class="claude-message-content">${contentHtml}</div>
+            </div>
+        `;
+        
         this.chatMessages.appendChild(message);
         this.scrollChatToBottom();
     }
@@ -1382,9 +1382,17 @@ class WeaveApp {
         const thinkingTrace = typeof rawPayload === 'object' && rawPayload !== null ? (rawPayload.thinking_trace || retrieval?.thinking_trace || null) : null;
         const includeThinkingTrace = options.includeThinkingTrace !== false;
         const message = document.createElement('div');
-        message.className = 'message assistant';
+        message.className = 'claude-message assistant';
         if (!this.chatMessages) return;
+        contentArea.innerHTML = `
+            <div class="claude-avatar assistant">W</div>
+            <div class="claude-message-body">
+                <div class="claude-message-role">Weave</div>
+                <div class="claude-message-content"></div>
+            </div>
+        `;
         this.chatMessages.appendChild(message);
+        const contentArea = message.querySelector('.claude-message-content');
 
         let i = 0;
         const maxChars = 2600;
@@ -1397,7 +1405,7 @@ Would you like me to continue with more detail?` : content;
 
         while (i < bounded.length) {
             const slice = bounded.slice(0, i + chunkSize);
-            message.innerHTML = this.escapeHtml(slice).replace(/\n/g, '<br>');
+            contentArea.innerHTML = this.escapeHtml(slice).replace(/\n/g, '<br>');
             i += chunkSize;
             this.scrollChatToBottom();
             await sleep(frameDelay);
@@ -1457,22 +1465,18 @@ Would you like me to continue with more detail?` : content;
     appendThinkingPanel() {
         const wrapper = document.createElement("div");
         wrapper.innerHTML = `
-            <div class="thinking-panel live" data-expanded="false">
-                <button class="thinking-live-header" type="button" aria-expanded="false">
-                    <span class="thinking-chevron">▸</span>
-                    <span class="thinking-live-title">Thinking</span>
-                    <span class="thinking-live-stage">Analyzing your question</span>
-                    <span class="thinking-live-elapsed">0.0s</span>
-                </button>
-                <div class="thinking-progress" aria-label="Thinking progress">
-                    <div class="thinking-bar" style="width: 0%"></div>
-                    <span class="thinking-progress-label">0%</span>
-                </div>
-                <div class="thinking-live-content">
-                    <div class="thinking-stage-list"></div>
-                    <div class="thinking-live-actions">
-                        <button class="thinking-copy-trace" type="button">Copy thinking trace</button>
+            <div class="claude-thinking-container claude-thinking-live" data-expanded="false">
+                <div class="claude-thinking-header" type="button" aria-expanded="false">
+                    <div class="claude-thinking-icon thinking">
+                        <span class="material-symbols-outlined" style="font-size: 14px;">psychology</span>
                     </div>
+                    <div class="claude-thinking-title">Thinking...</div>
+                    <div class="claude-thinking-toggle">
+                        <span class="material-symbols-outlined">expand_more</span>
+                    </div>
+                </div>
+                <div class="claude-thinking-content">
+                    <div class="claude-thinking-steps"></div>
                 </div>
             </div>
         `;
@@ -1565,8 +1569,8 @@ Would you like me to continue with more detail?` : content;
             if (header) header.setAttribute('aria-expanded', String(state.expanded));
             this.renderLiveThinkingPanel(panel);
         };
-        panel.querySelector('.thinking-live-header')?.addEventListener('click', toggleExpanded);
-        panel.querySelector('.thinking-copy-trace')?.addEventListener('click', async (event) => {
+        panel.querySelector('.claude-thinking-header')?.addEventListener('click', toggleExpanded);
+        panel.querySelector('.claude-copy-trace')?.addEventListener('click', async (event) => {
             const button = event.currentTarget;
             const state = panel.__thinkingState || {};
             const payload = JSON.stringify({
@@ -1764,28 +1768,28 @@ Would you like me to continue with more detail?` : content;
         const state = panel.__thinkingState || {};
         const now = Date.now();
         const elapsedMs = Math.max(0, (state.completedAt || now) - (state.startedAt || now));
-        const liveProgress = state.completedAt
-            ? 100
-            : Math.min(98, Math.max(Number(state.progress || 0), Number(state.progress || 0) + Math.min(4, elapsedMs / 8000)));
+        
+        const header = panel.querySelector('.claude-thinking-header');
+        const toggle = panel.querySelector('.claude-thinking-toggle');
+        const titleLabel = panel.querySelector('.claude-thinking-title');
+        const list = panel.querySelector('.claude-thinking-steps');
+        const content = panel.querySelector('.claude-thinking-content');
+
+        if (header) header.setAttribute('aria-expanded', String(Boolean(state.expanded)));
+        if (toggle) toggle.classList.toggle('expanded', Boolean(state.expanded));
+        if (content) content.classList.toggle('expanded', Boolean(state.expanded));
+        
         const currentStage = state.stages?.find((item) => !item.endedAt && !['pending', 'queued'].includes(String(item.status || '').toLowerCase()) && item.id !== 'complete')
             || state.stages?.filter((item) => item.endedAt).slice(-1)[0]
             || state.stages?.find((item) => !item.endedAt)
             || { title: state.label || 'Thinking', status: 'in_progress', durationMs: elapsedMs };
 
-        const header = panel.querySelector('.thinking-live-header');
-        const chevron = panel.querySelector('.thinking-chevron');
-        const stageLabel = panel.querySelector('.thinking-live-stage');
-        const elapsed = panel.querySelector('.thinking-live-elapsed');
-        const bar = panel.querySelector('.thinking-bar');
-        const progressLabel = panel.querySelector('.thinking-progress-label');
-        const list = panel.querySelector('.thinking-stage-list');
+        if (titleLabel) {
+            titleLabel.textContent = state.completedAt 
+                ? `Thought for ${this.formatThinkingDuration(elapsedMs)}`
+                : `Thinking: ${currentStage?.title || state.label || 'Analyzing'}`;
+        }
 
-        if (header) header.setAttribute('aria-expanded', String(Boolean(state.expanded)));
-        if (chevron) chevron.textContent = state.expanded ? '▾' : '▸';
-        if (stageLabel) stageLabel.textContent = currentStage?.title || state.label || 'Thinking';
-        if (elapsed) elapsed.textContent = state.completedAt ? `${this.formatThinkingDuration(elapsedMs)} total` : this.formatThinkingDuration(elapsedMs);
-        if (bar) bar.style.width = `${Math.round(liveProgress)}%`;
-        if (progressLabel) progressLabel.textContent = `${Math.round(liveProgress)}%`;
         if (list) {
             const stages = state.stages?.length ? state.stages : [{
                 id: 'query_analysis',
@@ -1797,29 +1801,28 @@ Would you like me to continue with more detail?` : content;
             }];
             list.innerHTML = stages.map((stage, index) => {
                 const rawStatus = String(stage.status || '').toLowerCase();
-                const statusKey = ['completed', 'complete', 'done'].includes(rawStatus)
-                    ? 'complete'
-                    : (['pending', 'queued'].includes(rawStatus) ? 'pending' : (stage.endedAt ? 'complete' : 'in-progress'));
-                const icon = statusKey === 'complete' ? '✓' : (statusKey === 'pending' ? '○' : '⏳');
-                const duration = statusKey === 'pending'
-                    ? 'pending'
+                const isComplete = ['completed', 'complete', 'done'].includes(rawStatus) || !!stage.endedAt;
+                const isPending = ['pending', 'queued'].includes(rawStatus) && !stage.endedAt;
+                
+                const duration = isPending
+                    ? ''
                     : this.formatThinkingDuration(stage.durationMs || ((stage.endedAt || now) - (stage.startedAt || now)));
-                const progress = Math.max(4, Math.min(100, Number(stage.progress || this.getThinkingStageConfig(stage.id).progress || 20)));
+                
                 return `
-                    <div class="thinking-stage-item status-${statusKey}" style="--stage-index:${index};">
-                        <div class="thinking-stage-head">
-                            <span class="thinking-stage-icon">${icon}</span>
-                            <span class="thinking-stage-title">${this.escapeHtml(stage.title || stage.label || stage.id)}</span>
-                            <span class="thinking-stage-time">${this.escapeHtml(duration)}${statusKey === 'in-progress' ? ' ongoing' : ''}</span>
+                    <div class="claude-thinking-step">
+                        <div class="claude-thinking-step-dot"></div>
+                        <div class="claude-thinking-step-text">
+                            ${this.escapeHtml(stage.title || stage.label || stage.id)}
+                            ${duration ? `<span class="claude-thinking-step-time">(${duration})</span>` : ''}
                         </div>
-                        ${this.renderStageMetrics(stage)}
-                        ${statusKey === 'in-progress' ? `<div class="thinking-sub-progress"><span style="width:${progress}%"></span></div>` : ''}
                     </div>
                 `;
             }).join('');
         }
         panel.dataset.expanded = String(Boolean(state.expanded));
-        panel.classList.toggle('complete', Boolean(state.completedAt));
+        if (state.completedAt) {
+            panel.classList.remove('claude-thinking-live');
+        }
     }
 
     renderAnimatedThinkingTrace(thinkingTrace, retrieval = null) {
@@ -3702,8 +3705,8 @@ Would you like me to continue with more detail?` : content;
         const count = Array.isArray(visibleTodos) ? visibleTodos.length : 0;
         this.updateTodaySnapshot(visibleTodos);
         if (count === 0) {
-            this.presenceSummary.textContent = 'No urgent client work found. Refresh priorities when you want a fresh review.';
-            this.presencePrimaryAction.textContent = 'Review today';
+            this.presenceSummary.textContent = 'Your agenda is currently clear. Sync your accounts or refresh to find new priorities.';
+            this.presencePrimaryAction.textContent = 'Review priorities';
             return;
         }
 
@@ -3712,7 +3715,7 @@ Would you like me to continue with more detail?` : content;
         this.presenceSummary.textContent = count === 1
             ? `One priority needs attention: ${title}`
             : `${count} priorities are open. Start with: ${title}`;
-        this.presencePrimaryAction.textContent = 'Review today';
+        this.presencePrimaryAction.textContent = 'Review priorities';
     }
 
     updateTodaySnapshot(visibleTodos = []) {
