@@ -1999,7 +1999,8 @@ async function runSemanticWindowGeneration() {
   }
 }
 
-async function runSuggestionEngineJob() {
+async function runSuggestionEngineJob(options = {}) {
+  const force = options?.force === true;
   if (suggestionJobLock) {
     suggestionRunQueued = true;
     const now = Date.now();
@@ -2012,13 +2013,14 @@ async function runSuggestionEngineJob() {
   const check = await hasNewEventsSince('suggestion');
   const existingActiveSuggestions = mergeSuggestionQueues(store.get('suggestions') || [], [], MAX_PRACTICAL_SUGGESTIONS);
   const remainingCapacity = Math.max(0, MAX_PRACTICAL_SUGGESTIONS - existingActiveSuggestions.length);
-  if (remainingCapacity <= 0) {
+  if (!force && remainingCapacity <= 0 && !check.hasNew) {
     if ((store.get('suggestions') || []).length !== existingActiveSuggestions.length) {
       store.set('suggestions', existingActiveSuggestions);
     }
-    console.log('[SuggestionEngine] Active suggestion pool is full (7/7), skipping hourly top-up');
+    console.log('[SuggestionEngine] Active suggestion pool is full (7/7) and no new events; skipping hourly top-up');
     return;
   }
+  const capacityToGenerate = Math.max(remainingCapacity, 4);
   lastSuggestionHeavyRunAt = Date.now();
   suggestionJobLock = true;
 
@@ -2046,7 +2048,7 @@ async function runSuggestionEngineJob() {
       });
     }
 
-    console.log(`[SuggestionEngine] Running hourly top-up (${existingActiveSuggestions.length}/7 active, capacity=${remainingCapacity}, new_events=${Boolean(check.hasNew)}, provider=${llmConfig.provider})...`);
+    console.log(`[SuggestionEngine] Running hourly top-up (${existingActiveSuggestions.length}/7 active, capacity=${remainingCapacity}, new_events=${Boolean(check.hasNew)}, provider=${llmConfig.provider}, force=${force})...`);
     const { generateTopTodosFromMemoryQuery, generateAndPersistTasksFromLLM } = require('./services/agent/suggestion-engine');
     const proactiveMemory = store.get('proactiveMemory') || { core: '' };
 
@@ -2056,9 +2058,9 @@ async function runSuggestionEngineJob() {
       suggestionStatus: 'running'
     });
     const newSuggestions = await generateTopTodosFromMemoryQuery(llmConfig, {
-      query: `Look through my memory and generate ${remainingCapacity} short actionable todos or actions I need to do right now. Do not duplicate existing suggestions.`,
+      query: `What are the top tasks and things to do right now?`,
       standing_notes: proactiveMemory.core || '',
-      max_suggestions: remainingCapacity,
+      max_suggestions: capacityToGenerate,
       existing_suggestions: existingActiveSuggestions.map((item) => ({
         title: item.title,
         reason: item.reason || item.description || '',
@@ -2081,7 +2083,7 @@ async function runSuggestionEngineJob() {
       .filter((item) => item && item.ai_generated !== false)
       .filter(isActionableSuggestion)
       .sort((a, b) => Number(b.score || b.confidence || 0) - Number(a.score || a.confidence || 0))
-      .slice(0, remainingCapacity);
+      .slice(0, capacityToGenerate);
     const existingSuggestions = store.get('suggestions') || [];
     const outgoingSuggestions = mergeSuggestionQueues(existingSuggestions, latestSuggestions, MAX_PRACTICAL_SUGGESTIONS);
     store.set('suggestions', outgoingSuggestions);
@@ -2326,7 +2328,20 @@ function startMemoryGraphProcessing() {
 
   // Suggestion engine hourly; each run only fills missing slots up to 7.
   if (suggestionEngineTimer) clearInterval(suggestionEngineTimer);
-  suggestionEngineTimer = setInterval(runSuggestionEngineJob, SUGGESTION_REFRESH_INTERVAL_MINUTES * 60 * 1000);
+  // Aligned hourly suggestion engine
+  try {
+    if (suggestionEngineTimer) clearInterval(suggestionEngineTimer);
+    const hourMs = 60 * 60 * 1000;
+    const nextHour = Math.ceil(Date.now() / hourMs) * hourMs;
+    const suggestionDelay = Math.max(1000, nextHour - Date.now());
+    setTimeout(() => {
+      runSuggestionEngineJob().catch((e) => console.warn('[MemoryGraph] Aligned suggestion generation failed:', e?.message || e));
+      try { suggestionEngineTimer = setInterval(runSuggestionEngineJob, hourMs); } catch (_) {}
+    }, suggestionDelay);
+  } catch (e) {
+    console.warn('[MemoryGraph] Failed to schedule aligned suggestion job:', e?.message || e);
+    suggestionEngineTimer = setInterval(runSuggestionEngineJob, SUGGESTION_REFRESH_INTERVAL_MINUTES * 60 * 1000);
+  }
 
   if (relationshipGraphTimer) clearInterval(relationshipGraphTimer);
   relationshipGraphTimer = setInterval(() => {
@@ -2346,9 +2361,7 @@ function startMemoryGraphProcessing() {
   // Avoid heavy graph work during initial UI load; rely on scheduled aligned runs.
 
   // Suggestions can lag behind graph warmup; avoid launch-time battery spikes.
-  setTimeout(() => {
-    runSuggestionEngineJob().catch((e) => console.warn('[MemoryGraph] Initial suggestion generation failed:', e?.message || e));
-  }, 10 * 60 * 1000);
+  runSuggestionEngineJob().catch((e) => console.warn('[MemoryGraph] Initial suggestion generation failed:', e?.message || e));
 }
 
 function scheduleWeeklyInsights() {
@@ -3534,7 +3547,7 @@ oauthApp.get('/oauth2callback', async (req, res) => {
         setTimeout(async () => {
           try {
             await runEpisodeGeneration();
-            await runSuggestionEngineJob();
+            await runSuggestionEngineJob({ force: true });
             console.log('[oauth2callback] Memory graph processing completed');
             if (mainWindow && mainWindow.webContents) {
               mainWindow.webContents.send('memory-graph-update', {
@@ -9423,14 +9436,14 @@ ipcMain.handle('clear-suggestions', async () => {
 // Debug function to manually trigger suggestions
 ipcMain.handle('debug-trigger-suggestions', async () => {
   console.log('[Debug] Manually triggering suggestion engine...');
-  await runSuggestionEngineJob();
+  await runSuggestionEngineJob({ force: true });
   return { success: true, message: 'Suggestions triggered manually' };
 });
 
 ipcMain.handle('trigger-suggestion-refresh', async (_event, payload = {}) => {
   try {
     console.log('[Suggestions] User-triggered refresh requested');
-    await runSuggestionEngineJob();
+    await runSuggestionEngineJob({ force: true });
     const suggestions = store.get('suggestions') || [];
     const persistentTodos = store.get('persistentTodos') || [];
     return {
@@ -10179,7 +10192,7 @@ ipcMain.handle('trigger-memory-graph-job', async (event, jobType) => {
         store.set('lastEpisodeRun', new Date().toISOString());
         return { success: true, message: 'Episode generation triggered' };
       case 'suggestions':
-        await runSuggestionEngineJob();
+        await runSuggestionEngineJob({ force: true });
         store.set('lastSuggestionRun', new Date().toISOString());
         return { success: true, message: 'Suggestion engine triggered' };
       case 'weekly_insights':

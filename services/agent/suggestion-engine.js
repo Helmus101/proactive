@@ -715,7 +715,7 @@ async function generateTopTodosFromMemoryQuery(llmConfig, options = {}) {
   const phase1Prompt = `
   You are an Action-Oriented Planner.
   Your goal is to identify highly actionable, concrete to-dos from the user's memory.
-  First ask memory this question: "What are the top seven specific things to do now?"
+  First, explicitly query memory for the top tasks and things to do right now. Ask memory this question: "What are the top seven specific things to do now?"
   Then return exactly 7 highly specific to-do items as a strict JSON array of plain strings.
 
   Return strict JSON array of strings only:
