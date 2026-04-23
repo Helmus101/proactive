@@ -6860,3 +6860,64 @@ body {
         margin: 0 0 3px;
     }
 }
+
+/* Relationship Intelligence Metrics */
+.relationship-metrics {
+    background: var(--glass-soft);
+    border-radius: var(--radius-item);
+    padding: 12px;
+    border: 1px solid var(--glass-border);
+}
+
+.metric-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.strength-bar {
+    width: 100%;
+    height: 4px;
+    background: var(--separator);
+    border-radius: var(--radius-pill);
+    overflow: hidden;
+}
+
+.strength-bar-fill {
+    height: 100%;
+    background: var(--accent-blue);
+    border-radius: var(--radius-pill);
+    transition: width var(--t-slow);
+}
+
+.relationship-summary {
+    font-size: 13px;
+    line-height: 1.5;
+    background: var(--accent-blue-subtle);
+    border-radius: var(--radius-item);
+    padding: 10px 14px;
+}
+
+.action-btn {
+    width: 100%;
+    padding: 10px;
+    margin-top: 8px;
+    border-radius: var(--radius-item);
+    border: 1px solid var(--glass-border);
+    background: var(--glass-bg);
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all var(--t);
+    text-align: left;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.action-btn:hover {
+    background: var(--accent-blue-subtle);
+    border-color: var(--accent-blue);
+    transform: translateY(-1px);
+}

@@ -92,14 +92,33 @@ async function ensureRelationshipTables() {
     company TEXT,
     role TEXT,
     strength_score REAL DEFAULT 0,
+    warmth_score REAL DEFAULT 0,
+    depth_score REAL DEFAULT 0,
+    network_centrality REAL DEFAULT 0,
     last_interaction_at TEXT,
     interaction_count_30d INTEGER DEFAULT 0,
     relationship_tier TEXT,
     status TEXT DEFAULT 'warm',
+    relationship_summary TEXT,
     metadata TEXT,
     created_at TEXT,
     updated_at TEXT
   )`).catch(() => {});
+
+  // Migration for relationship_contacts
+  const relContactCols = await db.allQuery(`PRAGMA table_info(relationship_contacts)`).catch(() => []);
+  const relContactExisting = new Set((relContactCols || []).map((c) => c?.name).filter(Boolean));
+  const relContactRequired = [
+    ['warmth_score', 'REAL DEFAULT 0'],
+    ['depth_score', 'REAL DEFAULT 0'],
+    ['network_centrality', 'REAL DEFAULT 0'],
+    ['relationship_summary', 'TEXT']
+  ];
+  for (const [name, sqlType] of relContactRequired) {
+    if (!relContactExisting.has(name)) {
+      await db.runQuery(`ALTER TABLE relationship_contacts ADD COLUMN ${name} ${sqlType}`).catch(() => {});
+    }
+  }
   await db.runQuery(`CREATE TABLE IF NOT EXISTS relationship_contact_identifiers (
     id TEXT PRIMARY KEY,
     contact_id TEXT NOT NULL,
@@ -538,24 +557,86 @@ async function rescoreRelationshipContacts() {
   await ensureRelationshipTables();
   const contacts = await db.allQuery(`SELECT * FROM relationship_contacts LIMIT 5000`).catch(() => []);
   const now = Date.now();
+
+  // Pre-calculate network centrality (degree)
+  const centralityRows = await db.allQuery(`
+    SELECT rm1.contact_id, COUNT(DISTINCT rm2.contact_id) as degree
+    FROM relationship_mentions rm1
+    JOIN relationship_mentions rm2 ON rm1.event_id = rm2.event_id
+    WHERE rm1.contact_id != rm2.contact_id AND rm1.event_id IS NOT NULL
+    GROUP BY rm1.contact_id
+  `).catch(() => []);
+  const centralityMap = new Map(centralityRows.map(r => [r.contact_id, r.degree]));
+  const maxDegree = Math.max(1, ...centralityRows.map(r => r.degree), 1);
+
+  // Pre-calculate stats for all contacts to avoid N+1 queries
+  const since30 = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const statsRows = await db.allQuery(`
+    SELECT 
+      contact_id,
+      COUNT(*) AS total_count,
+      AVG(COALESCE(CAST(json_extract(metadata, '$.sentiment_score') AS REAL), 0)) AS sentiment_avg,
+      COUNT(DISTINCT source_app) as app_diversity,
+      MIN(timestamp) as first_interaction,
+      SUM(CASE WHEN datetime(timestamp) >= datetime(?) THEN 1 ELSE 0 END) as count_30d
+    FROM relationship_mentions
+    GROUP BY contact_id
+  `, [since30]).catch(() => []);
+  
+  const statsMap = new Map(statsRows.map(r => [r.contact_id, r]));
+
   for (const contact of contacts || []) {
     const lastMs = Date.parse(contact.last_interaction_at || '') || 0;
     const days = lastMs ? Math.max(0, (now - lastMs) / (24 * 60 * 60 * 1000)) : 365;
-    const since30 = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
-    const countRow = await db.getQuery(
-      `SELECT COUNT(*) AS count, AVG(COALESCE(CAST(json_extract(metadata, '$.sentiment_score') AS REAL), 0)) AS sentiment_avg
-       FROM relationship_mentions
-       WHERE contact_id = ? AND datetime(timestamp) >= datetime(?)`,
-      [contact.id, since30]
-    ).catch(() => ({ count: 0, sentiment_avg: 0 }));
-    const frequency = Math.min(1, Number(countRow?.count || 0) / 8);
+    
+    const stats = statsMap.get(contact.id) || { total_count: 0, sentiment_avg: 0, app_diversity: 0, first_interaction: null, count_30d: 0 };
+
+    const frequency = Math.min(1, Number(stats.count_30d || 0) / 8);
     const recency = Math.exp((-Math.log(2) * days) / 14);
     const tier = String(contact.relationship_tier || 'network').toLowerCase();
     const tierPriority = tier.includes('inner') ? 1 : (tier.includes('network') ? 0.78 : 0.62);
-    const sentiment = Math.max(-1, Math.min(1, Number(countRow?.sentiment_avg || 0)));
+    const sentiment = Math.max(-1, Math.min(1, Number(stats.sentiment_avg || 0)));
     const sentimentScore = (sentiment + 1) / 2;
-    const score = Math.max(0, Math.min(1, (recency * 0.42) + (frequency * 0.28) + (sentimentScore * 0.15) + (tierPriority * 0.15)));
+
+    // Warmth: Current quality/investment
+    const warmth = Math.max(0, Math.min(1, (recency * 0.45) + (frequency * 0.35) + (sentimentScore * 0.2)));
+
+    // Depth: Long-term significance
+    const firstMs = Date.parse(stats.first_interaction || contact.created_at || '') || now;
+    const ageDays = Math.max(1, (now - firstMs) / (24 * 60 * 60 * 1000));
+    const volumeScore = Math.min(1, (stats.total_count || 0) / 50);
+    const diversityScore = Math.min(1, (stats.app_diversity || 0) / 4);
+    const ageScore = Math.min(1, ageDays / 365);
+    const depth = Math.max(0, Math.min(1, (volumeScore * 0.4) + (diversityScore * 0.3) + (ageScore * 0.3)));
+
+    // Network Centrality
+    const degree = centralityMap.get(contact.id) || 0;
+    const centrality = degree / maxDegree;
+
+    // Overall Strength
+    const score = Math.max(0, Math.min(1, (warmth * 0.5) + (depth * 0.3) + (centrality * 0.2)));
+    
     const status = scoreStatus(score, days);
+    
+    // Generate simple summary if missing or if it looks auto-generated
+    let summary = contact.relationship_summary;
+    const isAutoSummary = !summary || summary.endsWith(".") && (summary.includes("relationship") || summary.includes("active") || summary.includes("cooled") || summary.includes("hub"));
+    
+    if (isAutoSummary) {
+      const parts = [];
+      if (depth > 0.7) parts.push("Long-standing relationship");
+      else if (depth > 0.4) parts.push("Developing relationship");
+      
+      if (warmth > 0.7) parts.push("highly active recently");
+      else if (warmth < 0.3) parts.push("has cooled off");
+      
+      if (centrality > 0.6) parts.push("acts as a key network hub");
+      
+      if (parts.length > 0) {
+        summary = parts.join(", ") + ".";
+      }
+    }
+
     const metadata = {
       ...asObj(contact.metadata),
       score_inputs: {
@@ -563,14 +644,30 @@ async function rescoreRelationshipContacts() {
         frequency: Number(frequency.toFixed(4)),
         sentiment: Number(sentiment.toFixed(4)),
         tier_priority: Number(tierPriority.toFixed(4)),
-        days_since_interaction: Number(days.toFixed(2))
+        days_since_interaction: Number(days.toFixed(2)),
+        warmth: Number(warmth.toFixed(4)),
+        depth: Number(depth.toFixed(4)),
+        centrality: Number(centrality.toFixed(4))
       }
     };
+
     await db.runQuery(
       `UPDATE relationship_contacts
-       SET strength_score = ?, interaction_count_30d = ?, status = ?, metadata = ?, updated_at = ?
+       SET strength_score = ?, warmth_score = ?, depth_score = ?, network_centrality = ?, 
+           interaction_count_30d = ?, status = ?, relationship_summary = ?, metadata = ?, updated_at = ?
        WHERE id = ?`,
-      [Number(score.toFixed(4)), Number(countRow?.count || 0), status, JSON.stringify(metadata), nowIso(), contact.id]
+      [
+        Number(score.toFixed(4)), 
+        Number(warmth.toFixed(4)), 
+        Number(depth.toFixed(4)), 
+        Number(centrality.toFixed(4)),
+        Number(stats.count_30d || 0), 
+        status, 
+        summary,
+        JSON.stringify(metadata), 
+        nowIso(), 
+        contact.id
+      ]
     ).catch(() => {});
   }
 }
@@ -667,7 +764,26 @@ async function getRelationshipContactDetail(contactId) {
      LIMIT 20`,
     [contactId]
   ).catch(() => []);
-  return { ...contact, metadata: asObj(contact.metadata), identifiers, mentions };
+  
+  // Find related contacts (Network Intelligence)
+  const relatedContacts = await db.allQuery(`
+    SELECT DISTINCT rc.id, rc.display_name, COUNT(*) as co_occurrence_count
+    FROM relationship_mentions rm1
+    JOIN relationship_mentions rm2 ON rm1.event_id = rm2.event_id
+    JOIN relationship_contacts rc ON rm2.contact_id = rc.id
+    WHERE rm1.contact_id = ? AND rm2.contact_id != ? AND rm1.event_id IS NOT NULL
+    GROUP BY rc.id
+    ORDER BY co_occurrence_count DESC
+    LIMIT 10
+  `, [contactId, contactId]).catch(() => []);
+
+  return { 
+    ...contact, 
+    metadata: asObj(contact.metadata), 
+    identifiers, 
+    mentions,
+    related_contacts: relatedContacts
+  };
 }
 
 async function buildRelationshipDraftContext(contactId, options = {}) {
