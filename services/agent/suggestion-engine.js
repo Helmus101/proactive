@@ -650,7 +650,7 @@ async function generateTopTodosFromMemoryQuery(llmConfig, options = {}) {
   ).trim();
   const layerCounts = await ensureMemoryLayersReady((llmConfig && llmConfig.provider === 'deepseek') ? llmConfig.apiKey : null).catch(() => ({}));
   
-  const [coreRetrieval, branchRetrieval] = await Promise.all([
+  const [coreRetrieval, branchRetrieval, topRelationships] = await Promise.all([
     retrieveCoreToFactsContext(query, 100).catch(() => null),
     buildHybridGraphRetrieval({
       query,
@@ -660,8 +660,19 @@ async function generateTopTodosFromMemoryQuery(llmConfig, options = {}) {
       },
       seedLimit: 20,
       hopLimit: 8
-    }).catch(() => null)
+    }).catch(() => null),
+    db.allQuery(`
+      SELECT display_name, status, strength_score, warmth_score, depth_score, last_interaction_at, relationship_summary
+      FROM relationship_contacts
+      WHERE status IN ('needs_followup', 'cooling', 'decaying') OR (depth_score > 0.6 AND warmth_score < 0.4)
+      ORDER BY depth_score DESC, strength_score DESC
+      LIMIT 10
+    `).catch(() => [])
   ]);
+
+  const relationshipContext = (topRelationships || []).map(r => 
+    `- ${r.display_name}: ${r.status} (${Math.round(r.strength_score*100)}% strength). Depth: ${Math.round(r.depth_score*100)}%, Warmth: ${Math.round(r.warmth_score*100)}%. ${r.relationship_summary || ''}`
+  ).join('\n');
 
   const mergedEvidence = [];
   const seenEvidence = new Set();
@@ -713,32 +724,38 @@ async function generateTopTodosFromMemoryQuery(llmConfig, options = {}) {
 
   const standingNotes = String(options?.standing_notes || '').trim();
   const phase1Prompt = `
-  You are an Action-Oriented Planner.
-  Your goal is to identify highly actionable, concrete to-dos from the user's memory.
-  First, explicitly query memory for the top tasks and things to do right now. Ask memory this question: "What are the top seven specific things to do now?"
-  Then return exactly 7 highly specific to-do items as a strict JSON array of plain strings.
+      You are an Action-Oriented Planner specializing in Relationship Intelligence.
+      Your goal is to identify highly actionable, concrete to-dos from the user's memory, with a strong focus on maintaining and deepening professional and personal relationships.
+      Consider 'Relationship Warmth' (recent investment), 'Relationship Depth' (significance), and 'Network Intelligence' (key connections).
 
-  Return strict JSON array of strings only:
-  ["Action 1", "Action 2", "Action 3", "Action 4", "Action 5", "Action 6", "Action 7"]
+      First, explicitly query memory for the top tasks and relationship follow-ups. Ask memory: "What are the top seven specific things to do now, including important relationship reconnects?"
+      Then return exactly 7 highly specific to-do items as a strict JSON array of plain strings.
 
-  RULES:
-  - Use only STANDING NOTES + MEMORY EVIDENCE + GRAPH EDGES.
-  - Every to-do MUST be concrete and imperative.
-  - Every to-do MUST reference a specific person, file, event, or artifact from the evidence.
-  - Avoid generic advice or "considerations."
+      Return strict JSON array of strings only:
+      ["Action 1", "Action 2", "Action 3", "Action 4", "Action 5", "Action 6", "Action 7"]
 
-  STANDING NOTES:
-  ${standingNotes || 'None'}
+      RULES:
+      - Use only STANDING NOTES + MEMORY EVIDENCE + GRAPH EDGES + RELATIONSHIP CONTEXT.
+      - Every to-do MUST be concrete and imperative.
+      - Every to-do MUST reference a specific person, file, event, or artifact from the evidence.
+      - Prioritize reconnecting with 'cooling' high-depth relationships or thanking 'hubs' who recently helped.
+      - Avoid generic advice or "considerations."
 
-  MEMORY LAYER COUNTS:
-  ${JSON.stringify(layerCounts || {})}
+      STANDING NOTES:
+      ${standingNotes || 'None'}
 
-  MEMORY EVIDENCE:
-  ${evidenceDigest || 'No evidence available.'}
+      RELATIONSHIP CONTEXT (Candidates for reconnecting):
+      ${relationshipContext || 'No cooling relationships found.'}
 
-  GRAPH EDGES:
-  ${edgeDigest || 'No edge traces available.'}
-  `;
+      MEMORY LAYER COUNTS:
+      ${JSON.stringify(layerCounts || {})}
+
+      MEMORY EVIDENCE:
+      ${evidenceDigest || 'No evidence available.'}
+
+      GRAPH EDGES:
+      ${edgeDigest || 'No edge traces available.'}
+      `;
 
   const rawTopFive = await callLLM(phase1Prompt, llmConfig, 0.22, { maxTokens: 450, economy: true, task: "suggestion" }).catch(() => null);
   const topFiveItems = Array.isArray(rawTopFive) ? rawTopFive.filter(i => typeof i === 'string') : [];

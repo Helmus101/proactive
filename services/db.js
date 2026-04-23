@@ -255,10 +255,14 @@ function initDB() {
           company TEXT,
           role TEXT,
           strength_score REAL DEFAULT 0,
+          warmth_score REAL DEFAULT 0,
+          depth_score REAL DEFAULT 0,
+          network_centrality REAL DEFAULT 0,
           last_interaction_at TEXT,
           interaction_count_30d INTEGER DEFAULT 0,
           relationship_tier TEXT,
           status TEXT DEFAULT 'warm',
+          relationship_summary TEXT,
           metadata TEXT,
           created_at TEXT,
           updated_at TEXT
@@ -604,14 +608,34 @@ async function ensureSchemaMigrations() {
           company TEXT,
           role TEXT,
           strength_score REAL DEFAULT 0,
+          warmth_score REAL DEFAULT 0,
+          depth_score REAL DEFAULT 0,
+          network_centrality REAL DEFAULT 0,
           last_interaction_at TEXT,
           interaction_count_30d INTEGER DEFAULT 0,
           relationship_tier TEXT,
           status TEXT DEFAULT 'warm',
+          relationship_summary TEXT,
           metadata TEXT,
           created_at TEXT,
           updated_at TEXT
         )`).catch(() => {});
+
+        // Migration for relationship_contacts
+        const relContactCols = await allStatement(`PRAGMA table_info(relationship_contacts)`).catch(() => []);
+        const relContactExisting = new Set((relContactCols || []).map((c) => c?.name).filter(Boolean));
+        const relContactRequired = [
+          ['warmth_score', 'REAL DEFAULT 0'],
+          ['depth_score', 'REAL DEFAULT 0'],
+          ['network_centrality', 'REAL DEFAULT 0'],
+          ['relationship_summary', 'TEXT']
+        ];
+        for (const [name, sqlType] of relContactRequired) {
+          if (!relContactExisting.has(name)) {
+            await runStatement(`ALTER TABLE relationship_contacts ADD COLUMN ${name} ${sqlType}`).catch(() => {});
+          }
+        }
+
         await runStatement(`CREATE TABLE IF NOT EXISTS relationship_contact_identifiers (
           id TEXT PRIMARY KEY,
           contact_id TEXT NOT NULL,
