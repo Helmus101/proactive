@@ -3693,11 +3693,11 @@ Would you like me to continue with more detail?` : content;
         const hour = new Date().getHours();
         const name = this.userName || 'Willem';
         const visibleCount = this.getVisibleTodos ? this.getVisibleTodos().length : (this.todos || []).length;
-        const period = hour < 12 ? 'Morning' : (hour < 18 ? 'Afternoon' : 'Evening');
+        const period = hour < 12 ? 'Good morning' : (hour < 18 ? 'Good afternoon' : 'Good evening');
         const focusLine = visibleCount === 0
-            ? 'no urgent priorities.'
-            : (visibleCount === 1 ? '1 priority open.' : `${visibleCount} priorities open.`);
-        element.textContent = `${period}, ${name} - ${focusLine}`;
+            ? 'Your workspace is clear'
+            : (visibleCount === 1 ? 'one priority needs attention' : `${visibleCount} priorities need attention`);
+        element.textContent = `${period}, ${name}. ${focusLine}.`;
         this.applyAmbientTone(hour);
         this.updatePresenceSummary(this.getVisibleTodos ? this.getVisibleTodos() : (this.todos || []));
     }
@@ -3707,7 +3707,7 @@ Would you like me to continue with more detail?` : content;
         const count = Array.isArray(visibleTodos) ? visibleTodos.length : 0;
         this.updateTodaySnapshot(visibleTodos);
         if (count === 0) {
-            this.presenceSummary.textContent = 'Your agenda is currently clear. Sync your accounts or refresh to find new priorities.';
+            this.presenceSummary.textContent = 'Your agenda is currently clear. Sync your accounts or refresh to discover new priorities.';
             this.presencePrimaryAction.textContent = 'Review priorities';
             return;
         }
@@ -3715,8 +3715,8 @@ Would you like me to continue with more detail?` : content;
         const top = visibleTodos[0];
         const title = this.truncate(top?.title || 'Start here', 72);
         this.presenceSummary.textContent = count === 1
-            ? `One priority needs attention: ${title}`
-            : `${count} priorities are open. Start with: ${title}`;
+            ? `Active priority: ${title}`
+            : `${count} priorities are active. Next: ${title}`;
         this.presencePrimaryAction.textContent = 'Review priorities';
     }
 
