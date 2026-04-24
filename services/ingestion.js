@@ -4,7 +4,7 @@ const db = require('./db');
 const { generateEmbedding, calculateSentimentScore } = require('./embedding-engine');
 const { upsertRetrievalDoc } = require('./agent/graph-store');
 const cognitiveRouter = require('./agent/cognitive-router');
-const { linkMentionsForEvent } = require('./relationship-graph');
+const { linkMentionsForEvent, extractObservedParticipants } = require('./relationship-graph');
 
 let ingestionInitialized = false;
 let initializingPromise = null;
@@ -477,6 +477,7 @@ function buildCanonicalEventMetadata({
     window_title: meta.window_title || meta.activeWindowTitle || null,
     url: meta.url || meta.webViewLink || meta.link || null,
     domain: meta.domain || null,
+    associated_urls: normalizeMetadataList(meta.associated_urls || meta.browser_context_urls || [], 12),
     entity_labels: entityLabels,
     entity_tags: entityLabels,
     entity_ids: entityIds,
@@ -838,7 +839,7 @@ function isHumanParticipantCandidate(value) {
   return true;
 }
 
-function normalizeEventEnvelope({ id, type, timestamp, source, text, metadata = {}, entities = [] }) {
+function normalizeEventEnvelope({ id, type, timestamp, source, text, metadata = {}, entities = [], observedParticipants = [] }) {
   const meta = metadata && typeof metadata === 'object' ? metadata : {};
   const lowerType = String(type || '').toLowerCase();
   const url = meta.url || meta.webViewLink || meta.link || meta.currentUrl || null;
@@ -862,6 +863,8 @@ function normalizeEventEnvelope({ id, type, timestamp, source, text, metadata = 
   } else {
     participantCandidates.push(...entities.filter((item) => isHumanParticipantCandidate(item)));
   }
+
+  participantCandidates.push(...(observedParticipants || []).map((p) => p.name || p.email).filter(Boolean));
 
   const participants = Array.from(new Set(
     participantCandidates
@@ -1158,6 +1161,9 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
   const safeText = redaction.text;
   const entities = extractEntities(safeText || '');
 
+  const appNameForObs = inferEventApp(source, safeMetadataInput);
+  const observedParticipants = extractObservedParticipants(safeText || rawInputText, safeMetadataInput, type, appNameForObs);
+
   // Calculate sentiment score from text content
   const sentimentScore = calculateSentimentScore(safeText || rawInputText);
 
@@ -1185,7 +1191,8 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
       timestamp: tStr,
       occurred_at: tStr
     },
-    entities
+    entities,
+    observedParticipants
   });
   const canonicalMemoryMetadata = buildCanonicalEventMetadata({
     id,
@@ -1194,7 +1201,7 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
     timestampISO: preliminaryEnvelope.occurred_at || tStr,
     date: preliminaryEnvelope.occurred_date || dStr,
     metadata: safeMetadataInput,
-    entities,
+    entities: Array.from(new Set([...entities, ...observedParticipants.map((p) => p.name)])),
     participants: preliminaryEnvelope.participants || [],
     topics: preliminaryEnvelope.topics || [],
     sentimentScore,
@@ -1206,6 +1213,7 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
   const safeMetadata = {
     ...safeMetadataInput,
     ...canonicalMemoryMetadata,
+    observed_participants: observedParticipants,
     timestamp: (metadata && metadata.timestamp) ? metadata.timestamp : tStr,
     occurred_at: (metadata && metadata.occurred_at) ? metadata.occurred_at : tStr,
     date: (metadata && metadata.date) ? metadata.date : dStr,
@@ -1300,6 +1308,7 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
           `Source: ${envelope.source_type}`,
           `App: ${envelope.app}`,
           envelope.domain ? `Domain: ${envelope.domain}` : '',
+          safeMetadata.associated_urls?.length ? `URLs: ${safeMetadata.associated_urls.join(', ')}` : '',
           envelope.window_title ? `Window: ${envelope.window_title}` : '',
           envelope.title ? `Title: ${envelope.title}` : '',
           safeMetadata.person_labels?.length ? `People: ${safeMetadata.person_labels.join(', ')}` : '',

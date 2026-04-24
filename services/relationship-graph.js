@@ -290,8 +290,8 @@ async function syncSemanticPersonNode(contact = {}, identifiers = [], evidence =
     layer: 'semantic',
     subtype: 'person',
     title,
-    summary: `Relationship contact: ${title}`,
-    canonicalText: `${title}\n${contact.company || ''}\n${contact.role || ''}\n${topics.join(', ')}`.trim(),
+    summary: `Relationship contact: ${title}${contact.company ? ` at ${contact.company}` : ''}${contact.role ? ` (${contact.role})` : ''}. ${contact.relationship_summary || ''}`.trim(),
+    canonicalText: `${title}\n${contact.company || ''}\n${contact.role || ''}\n${topics.join(', ')}\n${contact.relationship_summary || ''}`.trim(),
     confidence: Math.max(0.65, Number(contact.strength_score || 0.65)),
     status: 'active',
     sourceRefs: metadata.source_refs,
@@ -698,14 +698,17 @@ async function linkMentionsForEvent({ eventId, type = '', source = '', text = ''
   const relationshipTopics = extractRelationshipTopics(safeText, metadata);
   const linked = [];
 
+  // 1. Match known contacts
   const known = await loadKnownIdentifiers();
   const textLower = safeText.toLowerCase();
-  const seen = new Set(linked.map((item) => item.id));
+  const seenContactIds = new Set();
+  
   for (const item of known) {
-    if (seen.has(item.contact_id)) continue;
+    if (seenContactIds.has(item.contact_id)) continue;
     const needle = String(item.normalized_value || '').toLowerCase();
     if (needle.length < 4) continue;
     if (!textLower.includes(needle)) continue;
+    
     await linkRelationshipMention({
       contactId: item.contact_id,
       eventId,
@@ -717,7 +720,32 @@ async function linkMentionsForEvent({ eventId, type = '', source = '', text = ''
       mentionType: 'known_contact_mention',
       metadata: { matched_identifier: item.identifier_value, identifier_type: item.identifier_type }
     });
-    seen.add(item.contact_id);
+    
+    seenContactIds.add(item.contact_id);
+    linked.push({ id: item.contact_id });
+  }
+
+  // 2. Discover new participants
+  const observed = extractObservedParticipants(safeText, metadata, type, sourceApp);
+  for (const person of observed) {
+    const contact = await upsertRelationshipContact(
+      {
+        display_name: person.name,
+        email: person.email,
+        company: person.company,
+        role: person.role,
+        metadata: {
+          topics: relationshipTopics,
+          sources: [person.source]
+        }
+      },
+      [],
+      { event_id: eventId, source: person.source, timestamp: ts }
+    );
+    if (contact && !seenContactIds.has(contact.id)) {
+      seenContactIds.add(contact.id);
+      linked.push(contact);
+    }
   }
 
   return linked;

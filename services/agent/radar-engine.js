@@ -56,7 +56,7 @@ function makeRelationshipFallback(contactRows = [], limit = 5) {
     return {
       id: stableId('radar_rel', `${person}|${contact.last_interaction_at || index}`),
       title: person ? `${person} needs a relationship move` : `Relationship move ${index + 1}`,
-      category: 'relationship_intelligence',
+      category: 'Nurture',
       signal_type: 'relationship',
       priority: index < 2 ? 'high' : 'medium',
       why_now: trim(whyNow || 'The relationship graph suggests this tie needs attention.', 220),
@@ -90,7 +90,7 @@ function makeTodoFallback(manualTodos = [], retrieval = null, limit = 5) {
     return existing.map((todo, index) => ({
       id: todo.id || stableId('radar_todo', `${todo.title}|${index}`),
       title: todo.title || `Todo ${index + 1}`,
-      category: 'work',
+      category: 'Task',
       signal_type: 'todo',
       priority: todo.priority || 'medium',
       why_now: trim(todo.description || todo.reason || 'This task is already in your manual to-do list.', 220),
@@ -115,7 +115,7 @@ function makeTodoFallback(manualTodos = [], retrieval = null, limit = 5) {
   return evidence.slice(0, limit).map((item, index) => ({
     id: stableId('radar_todo', `${item.id || item.title}|${index}`),
     title: trim(item.title || item.text || `Todo ${index + 1}`, 72),
-    category: 'work',
+    category: 'Task',
     signal_type: 'todo',
     priority: index < 2 ? 'high' : 'medium',
     why_now: 'This is one of the strongest recent work signals in memory.',
@@ -142,8 +142,16 @@ function normalizeSignal(section, row = {}, index = 0) {
   const evidence = trim(row.evidence || row.supporting_evidence || row.support || '', 240);
   const move = trim(row.move || row.suggested_move || row.action || row.next_step || '', 180);
   const title = trim(row.title || (person ? `${person} needs a move` : `${section} signal ${index + 1}`), 90);
-  const category = section === 'relationship' ? 'relationship_intelligence' : 'work';
-  const primaryLabel = section === 'relationship' ? 'Draft opener' : 'Handle task';
+  
+  let category = row.category || row.type || '';
+  if (!category) {
+    if (section === 'relationship') category = 'Nurture';
+    else if (section === 'todo') category = 'Task';
+    else category = 'Insight';
+  }
+
+  const primaryLabel = section === 'relationship' ? 'Draft opener' : (section === 'todo' ? 'Handle task' : 'View insight');
+
   return {
     id: row.id || stableId(`radar_${section}`, `${title}|${person}|${index}`),
     title,
@@ -164,7 +172,7 @@ function normalizeSignal(section, row = {}, index = 0) {
     primary_action: { label: primaryLabel },
     suggested_actions: section === 'relationship'
       ? [{ label: 'Draft opener' }, { label: 'View relationship' }, { label: 'Snooze' }]
-      : [{ label: 'Handle task' }, { label: 'Mark done' }, { label: 'Snooze' }],
+      : (section === 'todo' ? [{ label: 'Handle task' }, { label: 'Mark done' }, { label: 'Snooze' }] : [{ label: 'View insight' }, { label: 'Snooze' }]),
     epistemic_trace: Array.isArray(row.epistemic_trace) && row.epistemic_trace.length ? row.epistemic_trace : [],
     createdAt: Date.now(),
     ai_generated: true
@@ -215,30 +223,25 @@ async function runSectionLLM({ section, llmConfig, context, relationshipCandidat
   const prompt = `[System]
 You are Weave's radar planner. Return a strict JSON array with up to ${limit} ${section} signals.
 
-For relationship signals, every item must include:
-- title
-- person
-- why_now
-- evidence
-- move
-- priority
-
-For todo signals, every item must include:
-- title
-- why_now
-- evidence
-- move
-- priority
+Every item must include:
+- title: concise headline
+- person: name of person involved (if applicable, else empty string)
+- why_now: 1-2 sentences why this matters now
+- evidence: supporting evidence from memory
+- move: concrete next action
+- priority: high, medium, or low
+- category: one of [Nurture, Life Event, Check-in, Task, Opportunity, Insight]
 
 Rules:
-- Be concrete and grounded.
+- Be concrete and grounded. Use specific names and facts.
 - Do not return generic motivation advice.
-- Relationship items must feel like: person/context, why now, supporting evidence, concrete next move.
-- Todo items must be the strongest productive next steps from current memory.
+- Central signals (Insight/Opportunity) should capture high-level patterns or major openings.
+- Relationship signals (Nurture/Life Event/Check-in) must be specific to a contact.
+- To-Do signals (Task) must be actionable work items.
 - JSON only.
 
 [Query]
-${section === 'relationship' ? 'What are the top relationship moves right now?' : 'What are the top productive to-dos right now?'}
+${section === 'relationship' ? 'What are the top relationship moves right now?' : section === 'todo' ? 'What are the top productive to-dos right now?' : 'What are the most important high-level insights and opportunities right now?'}
 
 [Relationship candidates]
 ${relationshipDigest || 'None'}
@@ -250,7 +253,7 @@ ${manualDigest || 'None'}
 ${evidenceDigest || 'None'}
 `;
 
-  const raw = await callLLM(prompt, llmConfig, 0.18, { maxTokens: 700, economy: true, task: 'suggestion' }).catch(() => null);
+  const raw = await callLLM(prompt, llmConfig, 0.18, { maxTokens: 800, economy: true, task: 'suggestion' }).catch(() => null);
   const parsed = safeJsonParse(raw, []);
   return Array.isArray(parsed) ? parsed.map((row, index) => normalizeSignal(section, row, index)).slice(0, limit) : [];
 }
@@ -267,6 +270,7 @@ For each item return:
 - evidence
 - move
 - priority
+- category
 
 [Signals]
 ${JSON.stringify(signals.map((item) => ({
@@ -275,13 +279,14 @@ ${JSON.stringify(signals.map((item) => ({
     why_now: item.why_now || item.reason || '',
     evidence: item.evidence || '',
     move: item.recommended_action || '',
-    priority: item.priority
+    priority: item.priority,
+    category: item.category
   })))}
 
 [Memory evidence]
 ${(context?.evidence || []).slice(0, 10).map((item, index) => `${index + 1}. ${trim(item.text || item.title || '', 220)}`).join('\n') || 'None'}
 `;
-  const raw = await callLLM(prompt, llmConfig, 0.12, { maxTokens: 700, economy: true, task: 'suggestion' }).catch(() => null);
+  const raw = await callLLM(prompt, llmConfig, 0.12, { maxTokens: 800, economy: true, task: 'suggestion' }).catch(() => null);
   const parsed = safeJsonParse(raw, []);
   if (!Array.isArray(parsed) || !parsed.length) return signals;
   return parsed.map((row, index) => {
@@ -291,87 +296,73 @@ ${(context?.evidence || []).slice(0, 10).map((item, index) => `${index + 1}. ${t
   }).slice(0, signals.length);
 }
 
-async function buildRadarState({ llmConfig = null, manualTodos = [], maxRelationshipSignals = 5, maxTodoSignals = 5 } = {}) {
+async function buildRadarState({ llmConfig = null, manualTodos = [], maxCentralSignals = 3, maxRelationshipSignals = 5, maxTodoSignals = 5 } = {}) {
   const timings = {};
   const relationshipCandidates = await fetchRelationshipCandidates(8);
 
-  const relationshipContext = await retrieveBoundedContext('What are the top relationship moves right now?', {
-    seedLimit: 8,
-    hopLimit: 4,
-    evidenceLimit: 10
-  });
-  timings.relationship_retrieval_ms = relationshipContext.took_ms;
+  const [centralContext, relationshipContext, todoContext] = await Promise.all([
+    retrieveBoundedContext('What are the most important high-level insights and opportunities right now?', { seedLimit: 12, hopLimit: 5, evidenceLimit: 15 }),
+    retrieveBoundedContext('What are the top relationship moves right now?', { seedLimit: 8, hopLimit: 4, evidenceLimit: 10 }),
+    retrieveBoundedContext('What are the top productive to-dos right now?', { seedLimit: 8, hopLimit: 4, evidenceLimit: 10 })
+  ]);
 
-  const todoContext = await retrieveBoundedContext('What are the top productive to-dos right now?', {
-    seedLimit: 8,
-    hopLimit: 4,
-    evidenceLimit: 10
-  });
+  timings.central_retrieval_ms = centralContext.took_ms;
+  timings.relationship_retrieval_ms = relationshipContext.took_ms;
   timings.todo_retrieval_ms = todoContext.took_ms;
 
-  let relationshipSignals = [];
-  let todoSignals = [];
-  let relationshipError = null;
-  let todoError = null;
-
-  try {
-    relationshipSignals = await runSectionLLM({
-      section: 'relationship',
-      llmConfig,
-      context: relationshipContext,
-      relationshipCandidates,
-      manualTodos,
-      limit: maxRelationshipSignals
-    });
-    if (!relationshipSignals.length) {
-      relationshipSignals = makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals);
+  const runSection = async (section, context, limit, fallbackFn) => {
+    try {
+      let signals = await runSectionLLM({
+        section,
+        llmConfig,
+        context,
+        relationshipCandidates,
+        manualTodos,
+        limit
+      });
+      if (!signals.length && fallbackFn) {
+        signals = fallbackFn();
+      }
+      if (signals.length) {
+        signals = await deepenSignals({
+          section,
+          llmConfig,
+          signals,
+          context
+        });
+      }
+      return { signals, error: null };
+    } catch (error) {
+      console.error(`[Radar] Error in ${section} section:`, error);
+      return { signals: fallbackFn ? fallbackFn() : [], error: String(error?.message || error) };
     }
-    relationshipSignals = await deepenSignals({
-      section: 'relationship',
-      llmConfig,
-      signals: relationshipSignals,
-      context: relationshipContext
-    });
-  } catch (error) {
-    relationshipError = String(error?.message || error);
-    relationshipSignals = makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals);
-  }
+  };
 
-  try {
-    todoSignals = await runSectionLLM({
-      section: 'todo',
-      llmConfig,
-      context: todoContext,
-      relationshipCandidates,
-      manualTodos,
-      limit: maxTodoSignals
-    });
-    if (!todoSignals.length) {
-      todoSignals = makeTodoFallback(manualTodos, todoContext.retrieval, maxTodoSignals);
-    }
-    todoSignals = await deepenSignals({
-      section: 'todo',
-      llmConfig,
-      signals: todoSignals,
-      context: todoContext
-    });
-  } catch (error) {
-    todoError = String(error?.message || error);
-    todoSignals = makeTodoFallback(manualTodos, todoContext.retrieval, maxTodoSignals);
-  }
+  const [centralRes, relationshipRes, todoRes] = await Promise.all([
+    runSection('central', centralContext, maxCentralSignals, () => []),
+    runSection('relationship', relationshipContext, maxRelationshipSignals, () => makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals)),
+    runSection('todo', todoContext, maxTodoSignals, () => makeTodoFallback(manualTodos, todoContext.retrieval, maxTodoSignals))
+  ]);
 
-  relationshipSignals = relationshipSignals.map((item) => ({
+  let centralSignals = centralRes.signals.map((item) => ({
+    ...item,
+    signal_type: 'central',
+    epistemic_trace: item.epistemic_trace?.length ? item.epistemic_trace : makeTraceFromEvidence(centralContext.evidence, 2)
+  }));
+  
+  let relationshipSignals = relationshipRes.signals.map((item) => ({
     ...item,
     signal_type: 'relationship',
     epistemic_trace: item.epistemic_trace?.length ? item.epistemic_trace : makeTraceFromEvidence(relationshipContext.evidence, 2)
   }));
-  todoSignals = todoSignals.map((item) => ({
+  
+  let todoSignals = todoRes.signals.map((item) => ({
     ...item,
     signal_type: 'todo',
     epistemic_trace: item.epistemic_trace?.length ? item.epistemic_trace : makeTraceFromEvidence(todoContext.evidence, 2)
   }));
 
-  const allSignals = [...relationshipSignals, ...todoSignals]
+  const allSignals = [...centralSignals, ...relationshipSignals, ...todoSignals]
     .sort((a, b) => {
       const weight = { high: 3, medium: 2, low: 1 };
       const delta = (weight[b.priority] || 0) - (weight[a.priority] || 0);
@@ -382,11 +373,13 @@ async function buildRadarState({ llmConfig = null, manualTodos = [], maxRelation
   return {
     generated_at: nowIso(),
     allSignals,
+    centralSignals,
     relationshipSignals,
     todoSignals,
     sections: {
-      relationship: { status: relationshipError ? 'partial' : 'ready', error: relationshipError, count: relationshipSignals.length },
-      todo: { status: todoError ? 'partial' : 'ready', error: todoError, count: todoSignals.length }
+      central: { status: centralRes.error ? 'partial' : 'ready', error: centralRes.error, count: centralSignals.length },
+      relationship: { status: relationshipRes.error ? 'partial' : 'ready', error: relationshipRes.error, count: relationshipSignals.length },
+      todo: { status: todoRes.error ? 'partial' : 'ready', error: todoRes.error, count: todoSignals.length }
     },
     timings
   };

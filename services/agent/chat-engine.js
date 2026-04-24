@@ -3,6 +3,7 @@ const { ingestRawEvent } = require('../ingestion');
 const { expandAppScopeValues } = require('../app-scope-catalog');
 const { buildRawEvidenceText } = require('../raw-evidence-text');
 const { callLLM } = require('./intelligence-engine');
+const { dispatchTool, TOOL_SCHEMAS } = require('./tool-dispatcher');
 const { buildHybridGraphRetrieval, formatContext, estimateTokensHeuristic } = require('./hybrid-graph-retrieval');
 const { buildRetrievalThought, widenTemporalWindow, inferSurfaceFamilies } = require('./retrieval-thought-system');
 
@@ -12,6 +13,21 @@ function safeJsonParse(value, fallback) {
   } catch (_) {
     return fallback;
   }
+}
+
+function parseToolCalls(text) {
+  const calls = [];
+  const regex = /<tool_call>([\s\S]*?)<\/tool_call>/gi;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    try {
+      const call = JSON.parse(match[1]);
+      if (call && call.tool) {
+        calls.push(call);
+      }
+    } catch (_) {}
+  }
+  return calls;
 }
 
 function uniq(items = [], limit = 12) {
@@ -1775,6 +1791,29 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
         apiKey,
         reflectorFeedback: synthIteration > 1 ? reflection : null
       }));
+      const toolCalls = parseToolCalls(content);
+      if (toolCalls.length > 0) {
+        for (const call of toolCalls) {
+          emitStage("tool_use", "started", { label: `Tool: ${call.tool}`, detail: `Executing tool ${call.tool}...` });
+          try {
+            const toolResult = await dispatchTool(call, options.runtime || {});
+            const success = toolResult.status === "success";
+            emitStage("tool_use", success ? "completed" : "error", {
+              label: `Tool: ${call.tool}`,
+              detail: success ? "Tool executed successfully." : `Tool failed: ${toolResult.error}`
+            });
+            retrieval.evidence.push({
+              id: `tool_${Date.now()}`,
+              layer: "tool_result",
+              text: `Tool ${call.tool} result: ${JSON.stringify(toolResult.output || toolResult.error || "Success")}`
+            });
+          } catch (e) {
+            console.error("[ToolDispatch] Error:", e);
+            emitStage("tool_use", "error", { label: `Tool: ${call.tool}`, detail: e.message });
+          }
+        }
+        if (synthIteration < maxSynthIterations) continue;
+      }
 
       // 6. Reflector Stage (with confidence gating)
       emitStage('reflecting', 'started', { label: 'Critique', detail: 'Reviewing the draft for completeness, accuracy, and hallucination risk.' }, false);
@@ -2175,8 +2214,10 @@ Mode rules:
 Do not claim that a missing dedicated task-manager record means no todos exist if <context_memory> contains actionable suggestions, active suggestions, recent work, emails, calendar items, or open-loop evidence.
 When generating things, always use the retrieved memory/web context as constraints and cite uncertainty plainly. Do not freewheel generic advice when memory is sparse.
 When the answer can be developed, write at least ${policy.minWords} words. Start with the answer, then add related grounded context, adjacent memories, useful implications, or next steps. If there is truly no supporting context, stay shorter and ask one concise follow-up question.
-Do not create contacts, automations, external actions, or UI cards unless the user explicitly asks you to create/save them and the runtime actually supports that action.
-Do not output XML tags or tool instructions.
+Do not create contacts, automations, external actions, or UI cards unless the user explicitly asks you to create/save them.
+When you need to perform an action (create contact, save memory, create automation, etc.), use a tool call.
+Tool call format: <tool_call>{"tool": "tool_name", "input": {"arg1": "val1"}}</tool_call>
+Available tools: ${Object.keys(TOOL_SCHEMAS).join(', ')}.
 Answer strictly from the grounded memory/web context in <context_memory>. If evidence is missing, clearly say what is missing and ask one concise follow-up question.
 If the user asks for strategy, recommendations, prioritization, or interpretation, make a real judgment instead of hedging across every option.
 If the user asks for a draft, make it sound natural and specific to the relationship context rather than polished marketing copy.

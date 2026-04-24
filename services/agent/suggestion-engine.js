@@ -347,11 +347,14 @@ function actionLabelForTitle(title = '') {
 
 function normalizeSuggestionType(value = '', fallbackText = '') {
   const raw = String(value || '').toLowerCase().trim();
-  const valid = ['study', 'relationship', 'work', 'personal', 'creative', 'followup'];
+  const valid = ['study', 'relationship', 'work', 'personal', 'creative', 'followup', 'nurture', 'life_event', 'check_in', 'opportunity', 'task'];
   if (valid.includes(raw)) return raw;
   const hay = `${raw} ${String(fallbackText || '').toLowerCase()}`;
   if (/\bstudy|quiz|exam|class|assignment|homework|lecture|review|flashcard|vocab\b/.test(hay)) return 'study';
-  if (/\brelationship|follow ?up|reply|check-?in|reconnect|birthday|anniversary|friend|mentor|alex|maya|sam|leo\b/.test(hay)) return 'followup';
+  if (/\bnurture|relationship|follow ?up|reply|check-?in|reconnect|birthday|anniversary|friend|mentor|alex|maya|sam|leo\b/.test(hay)) return 'nurture';
+  if (/\blife event|wedding|baby|promotion|new job|moved\b/.test(hay)) return 'life_event';
+  if (/\bcheck-?in\b/.test(hay)) return 'check_in';
+  if (/\bopportunity|opening|lead\b/.test(hay)) return 'opportunity';
   if (/\bwork|project|client|meeting|presentation|proposal|deadline|task|job\b/.test(hay)) return 'work';
   if (/\bpersonal|home|health|fitness|hobby|family|bill|shopping\b/.test(hay)) return 'personal';
   if (/\bcreative|design|writing|art|music|video|ideation|brainstorm\b/.test(hay)) return 'creative';
@@ -767,12 +770,13 @@ async function generateTopTodosFromMemoryQuery(llmConfig, options = {}) {
   ${JSON.stringify(topFiveItems)}
 
   Generate proactive suggestions. Up to 8 candidates.
-  Format JSON array: [{"type": "work|followup|study|personal|creative|relationship", "title": "imperative", "reason": "why now", "description": "", "outcome": "", "evidence": ["id"], "time_anchor": "today|now", "priority": "low|medium|high", "confidence": 0.0, "primary_action": "label", "secondary_action": "", "source_index": 1, "expires_at": "ISO"}]
+  Format JSON array: [{"type": "work|nurture|life_event|check_in|opportunity|task|study|personal|creative", "title": "imperative", "reason": "why now", "description": "", "outcome": "", "evidence": ["id"], "time_anchor": "today|now", "priority": "low|medium|high", "confidence": 0.0, "primary_action": "label", "secondary_action": "", "source_index": 1, "expires_at": "ISO"}]
 
   Rules:
   - Title MUST start with verb + specific entity/time.
   - NEVER start with "Take the next step", "Review", "Update".
   - reason MUST reference evidence.
+  - Use "nurture" for relationship maintenance, "life_event" for major personal updates, "check_in" for quick pings, "opportunity" for new openings, "task" for work.
   `;
 
   const aiRows = await callLLM(phase2Prompt, llmConfig, 0.22, { maxTokens: 500, economy: true, task: "suggestion" }).catch(() => null);
@@ -930,7 +934,7 @@ Rules:
   description (optional),
   reason (one sentence grounded in memory),
   time_anchor (optional, e.g. "now" or "today 10:00"),
-  category (optional: work|followup|study|personal|creative|relationship),
+  category (optional: work|nurture|life_event|check_in|opportunity|task|study|personal|creative),
   priority (optional: low|medium|high).
 - Return strict JSON only.
 

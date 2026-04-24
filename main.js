@@ -2387,14 +2387,15 @@ async function runSuggestionEngineJob(options = {}) {
       buildRadarState({
         llmConfig,
         manualTodos,
+        maxCentralSignals: 3,
         maxRelationshipSignals: 5,
         maxTodoSignals: 5
       }),
-      14000,
-      'buildRadarState'
+      45000,
+      "buildRadarState"
     );
     persistRadarState(radarState);
-    console.log(`[SuggestionEngine] Generated radar state (${radarState.relationshipSignals?.length || 0} relationship, ${radarState.todoSignals?.length || 0} todo)`);
+    console.log(`[SuggestionEngine] Generated radar state (${radarState.centralSignals?.length || 0} central, ${radarState.relationshipSignals?.length || 0} relationship, ${radarState.todoSignals?.length || 0} todo)`);
     store.set('lastSuggestionRun', new Date().toISOString());
     store.set('lastProcessedEventTimestamp:suggestion', check.maxTs);
     debouncedStoreSet('memoryGraphHealth', {
@@ -7700,7 +7701,7 @@ ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
         chat_history: normalizedChatHistory,
         standing_notes: proactiveMemory.core || '',
         historical_summaries: historicalSummaries,
-        search_index: searchIndex
+        search_index: searchIndex, runtime: { executeManagedBrowserAction, observeDesktopState, executeDesktopAction, runOsascript: async (script) => { return new Promise((resolve, reject) => { execFile("/usr/bin/osascript", ["-e", script], (error, stdout) => { if (error) reject(error); else resolve(stdout); }); }); } }
       },
       onStep: (data) => {
         try { event.sender.send('chat-step', data); } catch (_) {}
@@ -9847,7 +9848,7 @@ function startAutomationScheduler() {
               recursion_enabled: true,
               from_automation: true,
               automation_id: automation.id,
-              automation_name: automation.name
+              automation_name: automation.name, runtime: { executeManagedBrowserAction, observeDesktopState, executeDesktopAction, runOsascript: async (script) => { return new Promise((resolve, reject) => { execFile("/usr/bin/osascript", ["-e", script], (error, stdout) => { if (error) reject(error); else resolve(stdout); }); }); } }
             }
           });
 
