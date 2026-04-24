@@ -26,6 +26,7 @@ const fs = require('fs');
 const { execFile } = require('child_process');
 const axios = require('axios');
 const Store = require('electron-store');
+const sqlite3 = (process.env.NODE_ENV === 'production') ? require('sqlite3') : require('sqlite3').verbose();
 const ingestion = require('./services/ingestion');
 const { ingestRawEvent } = ingestion;
 const express = require('express');
@@ -1570,7 +1571,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   const visualDiffPct = Number((fingerprintDiffPercent(lastAcceptedCaptureFingerprint, fingerprint) * 100).toFixed(2));
   const visualChangeSignificant = !lastAcceptedCaptureFingerprint || !fingerprint || visualDiffPct >= (CAPTURE_VISUAL_DIFF_THRESHOLD * 100);
   const isPeriodicScreenshot = /periodic-screenshot/i.test(String(reason || ''));
-  const forceCapture = isPeriodicScreenshot || /manual|reset/i.test(String(reason || ''));
+  const forceCapture = /manual|reset/i.test(String(reason || ''));
 
   if (fingerprint) {
     lastAcceptedCaptureFingerprint = fingerprint;
