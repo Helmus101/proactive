@@ -1,6 +1,12 @@
 'use strict';
 
 class WeaveApp {
+    updateIcons() {
+        if (window.lucide) {
+            window.lucide.createIcons();
+        }
+    }
+
     constructor() {
         this.todos = [];
         this.radarState = { allSignals: [], relationshipSignals: [], todoSignals: [], sections: {} };
@@ -57,12 +63,14 @@ class WeaveApp {
         window.electronAPI.onProactiveSuggestions?.((payload) => {
             this.applyRadarState(payload);
             this.renderSuggestions();
+            this.updateIcons();
         });
         window.electronAPI.onPlannerStep?.((payload) => this.handlePlannerStep(payload));
         window.electronAPI.onMemoryGraphUpdate?.((payload) => this.handleMemoryGraphUpdate(payload));
         window.electronAPI.onVoiceCommandToggle?.((payload) => this.handleVoiceCommandToggle(payload));
         window.electronAPI.onVoiceSessionUpdate?.((payload) => this.handleVoiceSessionUpdate(payload));
         window.electronAPI.onAutomationResult?.((payload) => this.handleAutomationResult(payload));
+        this.updateIcons();
         this.loadInitialData().catch((error) => {
             console.error('Failed to finish deferred startup:', error);
         });
@@ -174,6 +182,7 @@ class WeaveApp {
         }
 
         this.renderSuggestions();
+            this.updateIcons();
         await this.nextFrame();
 
         if (!this.getVisibleTodos().length) {
@@ -262,6 +271,7 @@ class WeaveApp {
                 chip.classList.add('active');
                 this.currentFilter = chip.dataset.filter || 'all';
                 this.renderSuggestions();
+            this.updateIcons();
             });
         });
 
@@ -275,12 +285,14 @@ class WeaveApp {
             this.showExtendedToday = false;
             localStorage.setItem('showExtendedToday', 'false');
             this.renderSuggestions();
+            this.updateIcons();
         });
         this.customizeTodayButton?.addEventListener('click', () => {
             this.showExtendedToday = !this.showExtendedToday;
             localStorage.setItem('showExtendedToday', String(this.showExtendedToday));
             this.showToast(this.showExtendedToday ? 'Expanded radar view' : 'Focused radar view');
             this.renderSuggestions();
+            this.updateIcons();
         });
 
         // Defensive delegation fallback: if cached references are missing or listeners fail,
@@ -306,6 +318,7 @@ class WeaveApp {
                 this.showExtendedToday = !this.showExtendedToday;
                 localStorage.setItem('showExtendedToday', String(this.showExtendedToday));
                 this.renderSuggestions();
+            this.updateIcons();
                 return;
             }
 
@@ -433,6 +446,7 @@ class WeaveApp {
                 if (refreshResult?.radarState || Array.isArray(refreshResult?.suggestions)) {
                     this.applyRadarState(refreshResult.radarState || { allSignals: refreshResult.suggestions || [] });
                     this.renderSuggestions();
+            this.updateIcons();
                     this.setPresenceMode('suggesting');
                     if (!silent) this.showToast('Radar refreshed from relationship memory');
                     return;
@@ -450,6 +464,7 @@ class WeaveApp {
             console.debug('[Renderer] generateSuggestions received', Array.isArray(generated) ? `${generated.length} items` : typeof generated);
             this.applyRadarState({ allSignals: generated || [] });
             this.renderSuggestions();
+            this.updateIcons();
             this.setPresenceMode('suggesting');
         };
 
@@ -457,6 +472,7 @@ class WeaveApp {
             console.error('Failed to generate suggestions:', error);
             this.showToast('Radar refresh failed');
             this.renderSuggestions();
+            this.updateIcons();
             this.setPresenceMode('waiting');
         }).finally(() => {
             this.suggestionRefreshInFlight = null;
@@ -471,6 +487,7 @@ class WeaveApp {
             this.radarState = { allSignals: [], relationshipSignals: [], todoSignals: [], sections: {} };
             this.expandedCards.clear();
             this.renderSuggestions();
+            this.updateIcons();
             this.showToast('Radar reset');
         } catch (error) {
             console.error('Failed to clear all suggestions:', error);
@@ -731,6 +748,7 @@ class WeaveApp {
             this.expandedCards.add(taskId);
         }
         this.renderSuggestions();
+            this.updateIcons();
     }
 
     async completeSuggestion(taskId) {
@@ -747,6 +765,7 @@ class WeaveApp {
         this.expandedCards.delete(taskId);
 
         this.renderSuggestions();
+            this.updateIcons();
 
         if (!this.getVisibleTodos().length) {
             await this.generateSuggestions({ replace: true, silent: true });
@@ -767,6 +786,7 @@ class WeaveApp {
             this.showToast('Remove failed');
         }
         this.renderSuggestions();
+            this.updateIcons();
     }
 
     async snoozeSuggestion(taskId, minutes = 120) {
@@ -782,6 +802,7 @@ class WeaveApp {
             this.showToast('Snooze failed');
         }
         this.renderSuggestions();
+            this.updateIcons();
     }
 
     async findContextForSuggestion(taskId) {
@@ -937,6 +958,7 @@ class WeaveApp {
             await window.electronAPI.completeTask(taskId);
             this.manualTodos = this.manualTodos.filter((todo) => todo.id !== taskId);
             this.renderSuggestions();
+            this.updateIcons();
             this.showToast('Task marked done');
         } catch (error) {
             console.error('Failed to complete regular task:', error);
@@ -984,7 +1006,7 @@ class WeaveApp {
             itemsContainer.innerHTML = `
                 <div class="empty-state" style="text-align: center; padding: 40px 20px;">
                     <div class="empty-icon" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;">
-                        <span class="material-symbols-outlined">group</span>
+                        <i data-lucide="users"></i>
                     </div>
                     <div class="empty-text">No people found</div>
                     <div class="empty-sub" style="font-size: 12px; color: var(--text-tertiary); margin-top: 8px;">People appear here after you sync Apple Contacts. Weave then attaches remembered interactions to those contact nodes over time.</div>
@@ -1628,11 +1650,11 @@ Would you like me to continue with more detail?` : content;
             <div class="claude-thinking-container claude-thinking-live" data-expanded="false">
                 <div class="claude-thinking-header" type="button" aria-expanded="false">
                     <div class="claude-thinking-icon thinking">
-                        <span class="material-symbols-outlined" style="font-size: 14px;">psychology</span>
+                        <i data-lucide="brain" style="font-size: 14px;"></i>
                     </div>
                     <div class="claude-thinking-title">Thinking...</div>
                     <div class="claude-thinking-toggle">
-                        <span class="material-symbols-outlined">expand_more</span>
+                        <i data-lucide="chevron-down"></i>
                     </div>
                 </div>
                 <div class="claude-thinking-content">
@@ -2604,7 +2626,7 @@ Would you like me to continue with more detail?` : content;
             this.chatMessages.innerHTML = `
                 <div class="empty-state chat-empty-state">
                     <div class="empty-icon chat-empty-icon">
-                        <span class="material-symbols-outlined">forum</span>
+                        <i data-lucide="message-square"></i>
                     </div>
                     <div class="empty-text chat-empty-title">Start a new thread</div>
                     <div class="empty-sub chat-empty-sub">Ask for a real read on a relationship, a sharper follow-up, or a briefing before a conversation.</div>
@@ -2632,7 +2654,7 @@ Would you like me to continue with more detail?` : content;
             this.chatMessages.innerHTML = `
                 <div class="empty-state chat-empty-state">
                     <div class="empty-icon chat-empty-icon">
-                        <span class="material-symbols-outlined">forum</span>
+                        <i data-lucide="message-square"></i>
                     </div>
                     <div class="empty-text chat-empty-title">Ask Weave for the honest read</div>
                     <div class="empty-sub chat-empty-sub">Use memory to prep for meetings, pressure-test your instincts, and choose the right next move.</div>
@@ -3693,6 +3715,7 @@ Would you like me to continue with more detail?` : content;
             this.morningBriefs = Array.isArray(briefs) ? briefs : [];
             this.activeBriefId = this.morningBriefs[0]?.id || null;
             this.renderSuggestions();
+            this.updateIcons();
             this.renderMorningBriefList();
             this.showMorningBrief(this.activeBriefId);
         } catch (error) {
@@ -3897,8 +3920,8 @@ Would you like me to continue with more detail?` : content;
         const visibleCount = this.getVisibleTodos ? this.getVisibleTodos().length : (this.todos || []).length;
         const period = hour < 12 ? 'Good morning' : (hour < 18 ? 'Good afternoon' : 'Good evening');
         const focusLine = visibleCount === 0
-            ? 'your radar is clear'
-            : (visibleCount === 1 ? 'one relationship signal needs attention' : `${visibleCount} relationship signals need attention`);
+            ? 'Your radar is quiet today'
+            : (visibleCount === 1 ? 'there is one thing that deserves your attention' : `there are ${visibleCount} signals for you to review`);
         element.textContent = `${period}, ${name}. ${focusLine}.`;
         this.applyAmbientTone(hour);
         this.updatePresenceSummary(this.getVisibleTodos ? this.getVisibleTodos() : (this.todos || []));
@@ -4098,7 +4121,7 @@ Would you like me to continue with more detail?` : content;
         return `
             <div class="empty-state" style="text-align:center; padding:60px 20px;">
                 <div class="empty-icon" style="font-size:48px; opacity:0.3; margin-bottom:16px;">
-                    <span class="material-symbols-outlined">${icon}</span>
+                    <i data-lucide="${icon}"></i>
                 </div>
                 <div class="empty-text" style="font-size:16px; font-weight:500; color:var(--text-secondary); margin-bottom:8px;">${this.escapeHtml(title)}</div>
                 <div class="empty-sub" style="font-size:13px; color:var(--text-tertiary); line-height:1.5;">${this.escapeHtml(subtitle)}</div>

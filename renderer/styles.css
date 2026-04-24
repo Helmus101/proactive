@@ -2,28 +2,32 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
+    --bg-warm: #FDFCF0;
+    --bg-subtle: #FAF9F6;
+    --surface: #FFFFFF;
+    --surface-sunken: #F5F4F0;
     /* Warm Minimalism Design System */
     
     /* Background Gradient */
     --bg-gradient-start: #fdfcf0;
     --bg-gradient-center: #fffaf3;
-    --bg: linear-gradient(135deg, var(--bg-gradient-start) 0%, var(--bg-gradient-center) 50%, var(--bg-gradient-start) 100%);
+    --bg: var(--bg-warm);
     --bg2: #fdfcf0;
     
     /* Glass Surfaces */
-    --glass-bg: rgba(253, 252, 240, 0.78);
-    --glass-strong: rgba(253, 252, 240, 0.92);
-    --glass-soft: rgba(253, 252, 240, 0.68);
-    --glass-border: rgba(233, 154, 44, 0.16);
-    --glass-shadow: 0 12px 34px rgba(67, 42, 10, 0.08);
-    --glass-shadow-hover: 0 18px 46px rgba(67, 42, 10, 0.13);
-    --blur: blur(26px);
+    --glass-bg: #FFFFFF;
+    --glass-strong: #FFFFFF;
+    --glass-soft: #FAF9F6;
+    --glass-border: rgba(0, 0, 0, 0.08);
+    --glass-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+    --glass-shadow-hover: 0 4px 6px rgba(0, 0, 0, 0.08);
+    --blur: none;
     --surface: rgba(253, 252, 240, 0.75);
 
     /* Typography Colors */
-    --text-primary: #2d241a;
-    --text-secondary: #7c6d5e;
-    --text-tertiary: #a69685;
+    --text-primary: #1A1A1A;
+    --text-secondary: #4A4A4A;
+    --text-tertiary: #737373;
 
     /* Color Palette - Now Warm & Human */
     --accent-blue: #e99a2c; /* Replaced Blue with Amber */
@@ -44,9 +48,9 @@
 
     /* Layout */
     --separator: rgba(233, 154, 44, 0.11);
-    --radius-card: 20px;
+    --radius-card: 12px;
     --radius-pill: 999px;
-    --radius-item: 12px;
+    --radius-item: 10px;
     --radius-small: 8px;
     --sidebar-w: 200px;
     --nav-height: 60px;
@@ -61,8 +65,8 @@
     --ease-enter: cubic-bezier(0.34, 1.56, 0.64, 1);
 
     /* Ambient Blobs */
-    --blob-opacity: 0.18;
-    --sidebar-bg: rgba(253, 252, 240, 0.58);
+    --blob-opacity: 0;
+    --sidebar-bg: #FDFCF0;
     --shadow-soft: 0 12px 32px rgba(67, 42, 10, 0.08);
     --shadow-hover: 0 18px 46px rgba(67, 42, 10, 0.14);
 }
@@ -71,7 +75,7 @@
     /* Warm Dark Theme */
     --bg-gradient-start: #1a1814;
     --bg-gradient-center: #24211c;
-    --bg: linear-gradient(135deg, var(--bg-gradient-start) 0%, var(--bg-gradient-center) 50%, var(--bg-gradient-start) 100%);
+    --bg: var(--bg-warm);
     --bg2: #1a1814;
     
     --glass-bg: rgba(26, 24, 20, 0.78);
@@ -103,9 +107,9 @@
     right: 20px;
     width: 38px; height: 38px;
     border-radius: 50%;
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     background: var(--glass-bg);
-    backdrop-filter: var(--blur);
+    /* backdrop-filter: var(--blur); */
     color: var(--text-secondary);
     font-size: 17px;
     cursor: pointer;
@@ -148,8 +152,8 @@ body.compact-mode .suggestion-card {
     padding: 6px 12px;
     border-radius: var(--radius-pill);
     background: var(--glass-bg);
-    backdrop-filter: var(--blur);
-    border: 1px solid var(--glass-border);
+    /* backdrop-filter: var(--blur); */
+    border: 1px solid var(--separator);
     font-size: 11px;
     font-weight: 500;
     color: var(--text-secondary);
@@ -213,7 +217,7 @@ body.compact-mode .suggestion-card {
 /* Enhanced suggestion items */
 .suggestion-item {
     background: var(--glass-soft);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     border-radius: var(--radius-item);
     padding: 12px 16px;
     margin-bottom: 8px;
@@ -365,9 +369,9 @@ body.compact-mode .suggestion-card {
     left: 50%;
     transform: translateX(-50%);
     background: var(--glass-strong);
-    backdrop-filter: var(--blur);
-    -webkit-backdrop-filter: var(--blur);
-    border: 1px solid var(--glass-border);
+    /* backdrop-filter: var(--blur); */
+    -webkit-backdrop-filter: none;
+    border: 1px solid var(--separator);
     border-radius: var(--radius-pill);
     padding: 8px 20px;
     display: flex;
@@ -403,7 +407,7 @@ body.compact-mode .suggestion-card {
     user-select: none;
 }
 
-.nav-pill .material-symbols-outlined {
+.nav-pill i[data-lucide], svg.lucide {
     font-size: 20px;
     transition: all var(--t);
 }
@@ -447,8 +451,8 @@ body.compact-mode .suggestion-card {
     right: 0;
     height: 60px;
     background: var(--glass-soft);
-    backdrop-filter: var(--blur);
-    -webkit-backdrop-filter: var(--blur);
+    /* backdrop-filter: var(--blur); */
+    -webkit-backdrop-filter: none;
     border-bottom: 1px solid var(--glass-border);
     display: flex;
     align-items: center;
@@ -515,7 +519,7 @@ body.compact-mode .suggestion-card {
     height: 32px;
     border-radius: 50%;
     background: var(--glass-bg);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -556,7 +560,7 @@ body.compact-mode .suggestion-card {
     border-radius: 999px;
     font-size: 11px;
     font-weight: 700;
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     color: var(--text-secondary);
     background: var(--glass-bg);
 }
@@ -588,7 +592,7 @@ body.compact-mode .suggestion-card {
     height: 34px;
     min-width: 220px;
     border-radius: 999px;
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     background: var(--glass-bg);
     color: var(--text-primary);
     padding: 0 12px;
@@ -615,7 +619,7 @@ body.compact-mode .suggestion-card {
     align-items: center;
     padding: 6px 16px;
     border-radius: var(--radius-pill);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     background: var(--glass-bg);
     color: var(--text-secondary);
     font-size: 13px;
@@ -623,8 +627,8 @@ body.compact-mode .suggestion-card {
     white-space: nowrap;
     cursor: pointer;
     transition: all var(--t);
-    backdrop-filter: var(--blur);
-    -webkit-backdrop-filter: var(--blur);
+    /* backdrop-filter: var(--blur); */
+    -webkit-backdrop-filter: none;
     pointer-events: auto;
     -webkit-user-select: none;
     user-select: none;
@@ -667,8 +671,8 @@ body.compact-mode .suggestion-card {
     padding: 20px 12px 20px;
     border-right: 1px solid var(--separator);
     background: var(--sidebar-bg);
-    backdrop-filter: var(--blur);
-    -webkit-backdrop-filter: var(--blur);
+    /* backdrop-filter: var(--blur); */
+    -webkit-backdrop-filter: none;
     gap: 32px;
     -webkit-app-region: drag;
 }
@@ -715,7 +719,7 @@ body.compact-mode .suggestion-card {
     text-align: left;
     width: 100%;
 }
-.nav-item .material-symbols-outlined {
+.nav-item i[data-lucide], svg.lucide {
     font-size: 20px;
 }
 .nav-item:hover {
@@ -769,7 +773,7 @@ body.compact-mode .suggestion-card {
     padding: 8px 16px;
     height: 36px;
     border-radius: var(--radius-pill);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     background: var(--glass-bg);
     color: var(--text-secondary);
     cursor: pointer;
@@ -777,7 +781,7 @@ body.compact-mode .suggestion-card {
     align-items: center; 
     gap: 8px;
     transition: all var(--t);
-    backdrop-filter: var(--blur);
+    /* backdrop-filter: var(--blur); */
 }
 .icon-btn:hover {
     background: rgba(233,154,44,0.16);
@@ -787,11 +791,11 @@ body.compact-mode .suggestion-card {
 
 /* ─── LIQUID GLASS CARDS ───────────────────────────────────────── */
 .liquid-card {
-    background: linear-gradient(180deg, var(--glass-strong), var(--glass-soft));
-    border: 1px solid var(--glass-border);
+    background: var(--surface);
+    border: 1px solid var(--separator);
     border-radius: var(--radius-card);
-    backdrop-filter: var(--blur);
-    -webkit-backdrop-filter: var(--blur);
+    /* backdrop-filter: var(--blur); */
+    -webkit-backdrop-filter: none;
     box-shadow: var(--glass-shadow);
     transition: all var(--t);
     overflow: hidden;
@@ -960,7 +964,7 @@ body.compact-mode .suggestion-card {
 .ghost-button {
     padding: 6px 16px;
     border-radius: var(--radius-pill);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     background: transparent;
     color: var(--text-secondary);
     font-size: 12px;
@@ -999,7 +1003,7 @@ body.compact-mode .suggestion-card {
 .pill-btn {
     padding: 10px 16px;
     border-radius: var(--radius-pill);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     background: var(--glass-bg);
     color: var(--text-primary);
     font-size: 12px;
@@ -1207,7 +1211,7 @@ body.compact-mode .suggestion-card {
     padding: 10px 12px;
     border-radius: 10px;
     background: rgba(255,255,255,0.6);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     color: var(--text-primary);
 }
 .reminder-item.expanded .suggestion-details {
@@ -1365,10 +1369,10 @@ body.compact-mode .suggestion-card {
 
 .settings-card {
     background: var(--glass-strong);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     border-radius: var(--radius-card);
-    backdrop-filter: var(--blur);
-    -webkit-backdrop-filter: var(--blur);
+    /* backdrop-filter: var(--blur); */
+    -webkit-backdrop-filter: none;
     box-shadow: var(--glass-shadow);
     overflow: hidden;
     margin-bottom: 12px;
@@ -1416,7 +1420,7 @@ body.compact-mode .suggestion-card {
     width: 44px;
     height: 24px;
     background: var(--glass-soft);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     border-radius: var(--radius-pill);
     cursor: pointer;
     transition: all var(--t);
@@ -1450,7 +1454,7 @@ body.compact-mode .suggestion-card {
 /* ─── AI PERSONALITY SECTION ─────────────────────────────────────── */
 .ai-personality-preview {
     background: var(--glass-bg);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     border-radius: var(--radius-small);
     padding: 12px;
     margin-bottom: 16px;
@@ -1703,14 +1707,14 @@ body.compact-mode .suggestion-card {
     left: 50%;
     transform: translateX(-50%) translateY(10px);
     background: rgba(255,255,255,0.9);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     color: var(--text-primary);
     padding: 10px 20px;
     border-radius: var(--radius-pill);
     font-size: 13px;
     font-weight: 500;
     box-shadow: 0 8px 32px rgba(15,23,42,0.15);
-    backdrop-filter: var(--blur);
+    /* backdrop-filter: var(--blur); */
     opacity: 0;
     pointer-events: none;
     transition: opacity 0.25s, transform 0.25s;
@@ -1745,7 +1749,7 @@ body.compact-mode .suggestion-card {
     height: 600px;
     max-height: 80vh;
     background: var(--surface);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     border-radius: 24px;
     display: flex;
     flex-direction: column;
@@ -1847,10 +1851,10 @@ body.compact-mode .suggestion-card {
 
 .chat-history-panel {
     background: var(--glass-soft);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     border-radius: var(--radius-card);
-    backdrop-filter: var(--blur);
-    -webkit-backdrop-filter: var(--blur);
+    /* backdrop-filter: var(--blur); */
+    -webkit-backdrop-filter: none;
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -1873,7 +1877,7 @@ body.compact-mode .suggestion-card {
 }
 
 .chat-history-item {
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     background: var(--glass-bg);
     color: var(--text-primary);
     border-radius: 12px;
@@ -1969,10 +1973,10 @@ body.compact-mode .suggestion-card {
     align-self: flex-start;
     background: var(--glass-strong);
     color: var(--text-primary);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     border-bottom-left-radius: 4px;
-    backdrop-filter: var(--blur);
-    -webkit-backdrop-filter: var(--blur);
+    /* backdrop-filter: var(--blur); */
+    -webkit-backdrop-filter: none;
 }
 
 .msg-rich { display: flex; flex-direction: column; gap: 8px; }
@@ -1984,7 +1988,7 @@ body.compact-mode .suggestion-card {
 .msg-h4 { font-size: 13px; font-weight: 620; }
 .msg-list { margin: 0; padding-left: 18px; }
 .msg-list li { margin: 3px 0; line-height: 1.5; }
-.msg-table-wrap { overflow-x: auto; border: 1px solid var(--glass-border); border-radius: 10px; }
+.msg-table-wrap { overflow-x: auto; border: 1px solid var(--separator); border-radius: 10px; }
 .msg-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .msg-table th, .msg-table td { padding: 6px 8px; border-bottom: 1px solid var(--separator); text-align: left; }
 .msg-table th { background: rgba(233,154,44,0.12); font-weight: 600; }
@@ -1992,7 +1996,7 @@ body.compact-mode .suggestion-card {
     margin: 0 0 10px;
     padding: 10px 12px;
     border-radius: 12px;
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     background: rgba(255,255,255,0.45);
 }
 .thinking-trace-card summary {
@@ -2586,7 +2590,7 @@ body.compact-mode .suggestion-card {
 .node {
     position: absolute;
     background: var(--glass-bg);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     border-radius: 6px;
     padding: 4px 8px;
     font-size: 11px;
@@ -2595,8 +2599,8 @@ body.compact-mode .suggestion-card {
     min-width: 60px;
     text-align: center;
     transition: all var(--t);
-    backdrop-filter: var(--blur);
-    -webkit-backdrop-filter: var(--blur);
+    /* backdrop-filter: var(--blur); */
+    -webkit-backdrop-filter: none;
 }
 
 .node.active {
@@ -2636,7 +2640,7 @@ body.compact-mode .suggestion-card {
 .reasoning-toggle {
     padding: 4px 12px;
     border-radius: var(--radius-pill);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     background: transparent;
     color: var(--text-secondary);
     font-size: 11px;
@@ -2658,8 +2662,8 @@ body.compact-mode .suggestion-card {
     padding: 16px 0;
     background: var(--glass-soft);
     border-top: 1px solid var(--glass-border);
-    backdrop-filter: var(--blur);
-    -webkit-backdrop-filter: var(--blur);
+    /* backdrop-filter: var(--blur); */
+    -webkit-backdrop-filter: none;
 }
 
 .chat-input-wrapper {
@@ -2672,7 +2676,7 @@ body.compact-mode .suggestion-card {
 .chat-input {
     flex: 1;
     background: var(--glass-bg);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     border-radius: var(--radius-card);
     padding: 12px 16px;
     font-size: 14px;
@@ -2683,8 +2687,8 @@ body.compact-mode .suggestion-card {
     max-height: 120px;
     line-height: 1.4;
     transition: all var(--t);
-    backdrop-filter: var(--blur);
-    -webkit-backdrop-filter: var(--blur);
+    /* backdrop-filter: var(--blur); */
+    -webkit-backdrop-filter: none;
     pointer-events: auto;
 }
 
@@ -2785,7 +2789,7 @@ body.compact-mode .suggestion-card {
 .chat-input-wrap textarea {
     flex: 1;
     background: rgba(255,255,255,0.6);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     border-radius: 12px;
     padding: 10px 14px;
     color: var(--text-primary);
@@ -2818,9 +2822,9 @@ body.compact-mode .suggestion-card {
 }
 
 .chat-sidebar-panel {
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     background: rgba(255,255,255,0.55);
-    backdrop-filter: var(--blur);
+    /* backdrop-filter: var(--blur); */
     border-radius: 24px;
     display: flex;
     flex-direction: column;
@@ -2891,9 +2895,9 @@ body.compact-mode .suggestion-card {
 }
 
 .chat-main-panel {
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     background: linear-gradient(180deg, rgba(255,255,255,0.66), rgba(255,255,255,0.52));
-    backdrop-filter: var(--blur);
+    /* backdrop-filter: var(--blur); */
     border-radius: 28px;
     display: flex;
     flex-direction: column;
@@ -3345,7 +3349,7 @@ body.compact-mode .suggestion-card {
 .modal-body { display: flex; flex-direction: column; gap: 16px; }
 .modal-body input, .modal-body textarea, .modal-body select {
     background: rgba(255,255,255,0.7);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     border-radius: 12px;
     padding: 12px;
     color: var(--text-primary);
@@ -3379,7 +3383,7 @@ body.compact-mode .suggestion-card {
 }
 .history-summary::-webkit-details-marker { display: none; }
 .summary-left { display: flex; align-items: center; gap: 12px; color: var(--text-primary); }
-.summary-left .material-symbols-outlined { color: var(--accent-blue-strong); font-size: 20px; }
+.summary-left i[data-lucide], svg.lucide { color: var(--accent-blue-strong); font-size: 20px; }
 .expand-icon { transition: transform 0.3s; color: var(--text-tertiary); }
 .history-details[open] .expand-icon { transform: rotate(180deg); }
 
@@ -3414,7 +3418,7 @@ body.compact-mode .suggestion-card {
 
 #memory-search-input,
 #memory-filter-type {
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     border-radius: 10px;
     padding: 10px 12px;
     background: var(--glass-soft);
@@ -3518,7 +3522,7 @@ body.compact-mode .suggestion-card {
     padding: 12px;
     background: var(--glass-soft);
     border-radius: var(--radius-item);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     transition: all var(--t);
 }
 
@@ -3567,7 +3571,7 @@ body.compact-mode .suggestion-card {
     padding: 16px;
     background: var(--glass-soft);
     border-radius: var(--radius-item);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     transition: all var(--t);
 }
 
@@ -3820,7 +3824,7 @@ body.compact-mode .suggestion-card {
         height: 36px;
     }
 
-    .nav-pill .material-symbols-outlined {
+    .nav-pill i[data-lucide], svg.lucide {
         font-size: 18px;
     }
 
@@ -3869,7 +3873,7 @@ body.compact-mode .suggestion-card {
 }
 
 .memory-item-card {
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     background: linear-gradient(135deg, var(--glass-soft), var(--glass-bg));
 }
 
@@ -4080,8 +4084,8 @@ body.compact-mode .suggestion-card {
     font-size: 11px;
     font-weight: 600;
     color: var(--text-primary);
-    border: 1px solid var(--glass-border);
-    backdrop-filter: var(--blur);
+    border: 1px solid var(--separator);
+    /* backdrop-filter: var(--blur); */
     white-space: nowrap;
     box-shadow: var(--glass-shadow);
 }
@@ -4114,7 +4118,7 @@ body.compact-mode .suggestion-card {
     border-radius: var(--radius-card);
     overflow: hidden;
     position: relative;
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
 }
 
 .graph-placeholder {
@@ -4168,8 +4172,8 @@ body.compact-mode .suggestion-card {
 
 .library-card {
     background: var(--glass-bg);
-    backdrop-filter: var(--blur);
-    border: 1px solid var(--glass-border);
+    /* backdrop-filter: var(--blur); */
+    border: 1px solid var(--separator);
     border-radius: var(--radius-card);
     padding: 20px;
     transition: all var(--t);
@@ -4307,7 +4311,7 @@ body.compact-mode .suggestion-card {
 .contacts-list-panel {
     width: 280px;
     background: var(--glass-bg);
-    backdrop-filter: var(--blur);
+    /* backdrop-filter: var(--blur); */
     border-right: 1px solid var(--glass-border);
     display: flex;
     flex-direction: column;
@@ -4331,7 +4335,7 @@ body.compact-mode .suggestion-card {
 
 .contacts-search {
     padding: 10px 16px;
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     border-radius: var(--radius-item);
     background: var(--glass-soft);
     color: var(--text-primary);
@@ -4368,7 +4372,7 @@ body.compact-mode .suggestion-card {
     margin-bottom: 6px;
     border-radius: var(--radius-item);
     background: rgba(255, 255, 255, 0.5);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     cursor: pointer;
     transition: all 0.2s;
 }
@@ -4413,14 +4417,14 @@ body.compact-mode .suggestion-card {
 .contact-detail-panel {
     flex: 1;
     background: var(--glass-soft);
-    backdrop-filter: var(--blur);
+    /* backdrop-filter: var(--blur); */
     overflow-y: auto;
     padding: 24px;
 }
 
 .contact-detail {
     background: var(--glass-strong);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     border-radius: var(--radius-card);
     padding: 24px;
 }
@@ -5415,6 +5419,10 @@ button:focus-visible,
 
 /* ─── WEAVE REDESIGN OVERRIDES ─────────────────────────────────── */
 :root {
+    --bg-warm: #FDFCF0;
+    --bg-subtle: #FAF9F6;
+    --surface: #FFFFFF;
+    --surface-sunken: #F5F4F0;
     --reading-max: 560px;
 }
 
@@ -5879,6 +5887,10 @@ body[data-ambient="evening"] .liquid-background {
 
 /* ─── UI STABILITY PASS: active Weave shell ──────────────────────── */
 :root {
+    --bg-warm: #FDFCF0;
+    --bg-subtle: #FAF9F6;
+    --surface: #FFFFFF;
+    --surface-sunken: #F5F4F0;
     --reading-max: 1040px;
     --panel-max: 760px;
 }
@@ -6347,6 +6359,10 @@ body[data-ambient="evening"] .liquid-background {
 
 /* ─── CONSULTANT UX PASS: executive-calm workspace ───────────────── */
 :root {
+    --bg-warm: #FDFCF0;
+    --bg-subtle: #FAF9F6;
+    --surface: #FFFFFF;
+    --surface-sunken: #F5F4F0;
     --consult-bg: #f7f8fa;
     --consult-surface: rgba(255, 255, 255, 0.92);
     --consult-surface-strong: #ffffff;
@@ -6891,7 +6907,7 @@ body {
     background: var(--glass-soft);
     border-radius: var(--radius-item);
     padding: 12px;
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
 }
 
 .metric-item {
@@ -6928,7 +6944,7 @@ body {
     padding: 10px;
     margin-top: 8px;
     border-radius: var(--radius-item);
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     background: var(--glass-bg);
     color: var(--text-primary);
     font-size: 13px;
@@ -7036,7 +7052,7 @@ body {
 .regular-tasks-section {
     margin-top: 18px;
     padding: 18px 20px;
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--separator);
     border-radius: 18px;
     background: rgba(255, 255, 255, 0.58);
 }
@@ -7463,6 +7479,10 @@ body {
 
 /* ─── WEAVE CALM UI RESET ─────────────────────────────────────── */
 :root {
+    --bg-warm: #FDFCF0;
+    --bg-subtle: #FAF9F6;
+    --surface: #FFFFFF;
+    --surface-sunken: #F5F4F0;
     --bg: #fafaf8 !important;
     --bg2: #f4f3ef !important;
     --surface: #ffffff !important;
