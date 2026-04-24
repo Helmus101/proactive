@@ -9,7 +9,7 @@ class WeaveApp {
 
     constructor() {
         this.todos = [];
-        this.radarState = { allSignals: [], relationshipSignals: [], todoSignals: [], sections: {} };
+        this.radarState = { allSignals: [], centralSignals: [], relationshipSignals: [], todoSignals: [], sections: {} };
         this.manualTodos = [];
         this.contacts = [];
         this.selectedContact = null;
@@ -36,6 +36,14 @@ class WeaveApp {
         this.lastPlannerStatusAt = 0;
         this.desktopTimelineEntries = [];
         this.showExtendedToday = localStorage.getItem('showExtendedToday') === 'true';
+        this.dismissedSuggestionIds = new Set((() => {
+            try {
+                const parsed = JSON.parse(localStorage.getItem('dismissedSuggestionIds') || '[]');
+                return Array.isArray(parsed) ? parsed : [];
+            } catch (_) {
+                return [];
+            }
+        })());
         this.showPeopleSection = localStorage.getItem('showPeopleSection') !== 'false';
         this.chatHistoryCollapsed = localStorage.getItem('chatHistoryCollapsed') === 'true';
         this.presenceMode = 'waiting';
@@ -44,6 +52,7 @@ class WeaveApp {
         this.activeChatId = null;
         this.settingsDataLoaded = false;
         this.settingsDataLoading = null;
+        this.lastPerfLogAt = 0;
         this.init();
     }
 
@@ -74,8 +83,8 @@ class WeaveApp {
         this.loadInitialData().catch((error) => {
             console.error('Failed to finish deferred startup:', error);
         });
-        setInterval(() => {
-            if (document.hidden) return;
+        this.chatSyncTimer = setInterval(() => {
+            if (document.hidden || this.activeView !== 'action-view') return;
             this.updateChatSyncStatus();
         }, 60000);
     }
@@ -93,6 +102,7 @@ class WeaveApp {
         this.chatRefreshPrioritiesButton = document.getElementById('chat-refresh-priorities-btn');
         this.chatHistoryList = document.getElementById('chat-history-list');
         this.chatThreadTitle = document.getElementById('chat-thread-title');
+        this.chatCommandBar = document.querySelector('.chat-command-bar');
         this.newChatButton = document.getElementById('new-chat-btn');
         this.previewMessage = document.getElementById('preview-message');
         this.googleStatus = document.getElementById('google-status');
@@ -200,17 +210,26 @@ class WeaveApp {
 
     applyRadarState(payload = {}) {
         const state = payload && !Array.isArray(payload) ? payload : { allSignals: payload || [] };
+        const centralSignals = this.normalizeTodos(state.centralSignals || (state.allSignals || []).filter((item) => String(item.signal_type || '').toLowerCase() === 'central'));
         const relationshipSignals = this.normalizeTodos(state.relationshipSignals || (state.allSignals || []).filter((item) => String(item.signal_type || '').toLowerCase() === 'relationship'));
         const todoSignals = this.normalizeTodos(state.todoSignals || (state.allSignals || []).filter((item) => String(item.signal_type || '').toLowerCase() === 'todo'));
-        const allSignals = this.normalizeTodos(state.allSignals || [...relationshipSignals, ...todoSignals]);
+        const allSignals = this.normalizeTodos(state.allSignals || [...centralSignals, ...relationshipSignals, ...todoSignals])
+            .filter((item) => !this.dismissedSuggestionIds.has(String(item.id || '')));
         this.radarState = {
             generated_at: state.generated_at || null,
             allSignals,
-            relationshipSignals,
-            todoSignals,
+            centralSignals: centralSignals.filter((item) => !this.dismissedSuggestionIds.has(String(item.id || ''))),
+            relationshipSignals: relationshipSignals.filter((item) => !this.dismissedSuggestionIds.has(String(item.id || ''))),
+            todoSignals: todoSignals.filter((item) => !this.dismissedSuggestionIds.has(String(item.id || ''))),
             sections: state.sections || {}
         };
         this.todos = allSignals.filter((todo) => !todo.completed);
+    }
+
+    persistDismissedSuggestionIds() {
+        try {
+            localStorage.setItem('dismissedSuggestionIds', JSON.stringify(Array.from(this.dismissedSuggestionIds).slice(-250)));
+        } catch (_) {}
     }
 
     async loadGreetingContext() {
@@ -398,7 +417,7 @@ class WeaveApp {
 
         if (!this.suggestionAutoTimer) {
             this.suggestionAutoTimer = window.setInterval(() => {
-                if (document.hidden) return;
+                if (document.hidden || this.activeView !== 'presence-view') return;
                 this.generateSuggestions({ replace: false, silent: true }).catch(() => {});
             }, 20 * 60 * 1000);
         }
@@ -441,15 +460,19 @@ class WeaveApp {
                         requested_at: Date.now(),
                         source: this.activeView || 'presence-view'
                     }),
-                    20000,
+                    35000,
                     'triggerSuggestionRefresh'
                 );
                 if (refreshResult?.radarState || Array.isArray(refreshResult?.suggestions)) {
                     this.applyRadarState(refreshResult.radarState || { allSignals: refreshResult.suggestions || [] });
                     this.renderSuggestions();
-            this.updateIcons();
+                    this.updateIcons();
                     this.setPresenceMode('suggesting');
-                    if (!silent) this.showToast('Radar refreshed from relationship memory');
+                    if (!silent) {
+                        const relCount = Number(this.radarState?.relationshipSignals?.length || 0);
+                        const todoCount = Number(this.radarState?.todoSignals?.length || 0);
+                        this.showToast(`Radar refreshed: ${relCount} relationship, ${todoCount} to-do`);
+                    }
                     return;
                 }
             }
@@ -604,7 +627,15 @@ class WeaveApp {
             .slice(0, 7);
     }
 
+    logRendererPerf(label, startedAt, extra = '') {
+        const durationMs = Date.now() - startedAt;
+        if (durationMs < 24 && (Date.now() - this.lastPerfLogAt) < 15000) return;
+        this.lastPerfLogAt = Date.now();
+        console.log(`[RendererPerf] ${label} ${durationMs}ms${extra ? ` ${extra}` : ''}`);
+    }
+
     renderSuggestions() {
+        const renderStartedAt = Date.now();
         if (!this.remindersList) return;
 
         const visibleTodos = this.getVisibleTodos();
@@ -636,15 +667,45 @@ class WeaveApp {
             `;
         };
         const regularTasks = this.renderRegularTodosSection();
+        const renderChatCommandList = () => {
+            if (!this.chatSuggestionsList) return;
+            const chatVisible = this.getVisibleTodos().slice(0, 3);
+            this.chatSuggestionsList.innerHTML = chatVisible.map((todo, idx) => `
+                <button class="chat-command-item" type="button" data-chat-command-id="${this.escapeHtml(todo.id)}">
+                    <span class="chat-command-index">${idx + 1}</span>
+                    <span class="chat-command-body">
+                        <span class="chat-command-title">${this.escapeHtml(todo.title || 'Untitled move')}</span>
+                        <span class="chat-command-meta">${this.escapeHtml(todo.why_now || todo.reason || todo.description || 'Open in chat')}</span>
+                    </span>
+                </button>
+            `).join("");
+            this.chatSuggestionsList.querySelectorAll('[data-chat-command-id]').forEach((button) => {
+                button.addEventListener('click', () => {
+                    const todo = this.todos.find((item) => item.id === button.dataset.chatCommandId);
+                    if (!todo) return;
+                    const prompt = String(todo.signal_type || '').toLowerCase() === 'relationship'
+                        ? `Help me execute this relationship move: ${todo.title}. Why now: ${todo.why_now || todo.reason || ''}`
+                        : `Help me act on this signal: ${todo.title}. Context: ${todo.why_now || todo.reason || ''}`;
+                    if (this.chatInput) {
+                        this.chatInput.value = prompt.trim();
+                        this.chatInput.focus();
+                    }
+                });
+            });
+        };
 
         if (this.currentFilter === 'all') {
+            const centralSignals = (this.radarState.centralSignals || []).filter((todo) => !todo.completed && (!todo.snoozedUntil || Number(todo.snoozedUntil) <= Date.now())).slice(0, this.showExtendedToday ? 4 : 2);
             const relationshipSignals = (this.radarState.relationshipSignals || []).filter((todo) => !todo.completed && (!todo.snoozedUntil || Number(todo.snoozedUntil) <= Date.now())).slice(0, this.showExtendedToday ? 5 : 3);
             const todoSignals = (this.radarState.todoSignals || []).filter((todo) => !todo.completed && (!todo.snoozedUntil || Number(todo.snoozedUntil) <= Date.now())).slice(0, this.showExtendedToday ? 5 : 3);
             this.remindersList.innerHTML = `
-                ${section('Top relationship moves', relationshipSignals, 0)}
-                ${section('Top to-dos', todoSignals, relationshipSignals.length)}
+                ${section('What stands out', centralSignals, 0)}
+                ${section('Top relationship moves', relationshipSignals, centralSignals.length)}
+                ${section('Top to-dos', todoSignals, centralSignals.length + relationshipSignals.length)}
                 ${regularTasks}
             `;
+            renderChatCommandList();
+            this.logRendererPerf('renderSuggestions', renderStartedAt, `signals=${visibleTodos.length}`);
             return;
         }
 
@@ -652,10 +713,8 @@ class WeaveApp {
             ${section(this.currentFilter === 'relationships' ? 'Relationship signals' : 'To-do signals', visibleTodos, 0)}
             ${regularTasks}
         `;
-        if (this.chatSuggestionsList) {
-            const chatVisible = this.getVisibleTodos().slice(0, 6);
-            this.chatSuggestionsList.innerHTML = chatVisible.map((todo, idx) => this.renderSuggestionCard(todo, idx)).join("");
-        }
+        renderChatCommandList();
+        this.logRendererPerf('renderSuggestions', renderStartedAt, `signals=${visibleTodos.length}`);
     }
 
     renderRegularTodosSection() {
@@ -780,6 +839,8 @@ class WeaveApp {
     }
 
     async removeSuggestion(taskId) {
+        this.dismissedSuggestionIds.add(String(taskId));
+        this.persistDismissedSuggestionIds();
         this.todos = this.todos.filter((todo) => todo.id !== taskId);
         this.applyRadarState({ allSignals: this.todos });
         this.expandedCards.delete(taskId);
@@ -1435,6 +1496,12 @@ class WeaveApp {
         this.chatInput?.addEventListener('input', () => {
             this.chatInput.style.height = 'auto';
             this.chatInput.style.height = `${Math.min(this.chatInput.scrollHeight, 120)}px`;
+            this.chatInput.scrollTop = this.chatInput.scrollHeight;
+            try {
+                const end = this.chatInput.value.length;
+                this.chatInput.setSelectionRange(end, end);
+            } catch (_) {}
+            this.updateChatCommandBarVisibility();
             this.updateChatCharacterCounter();
         });
 
@@ -1491,7 +1558,9 @@ class WeaveApp {
         this.updateChatSyncStatus();
         this.chatInput.value = '';
         this.chatInput.style.height = '44px';
+        this.chatInput.scrollTop = 0;
         this.updateChatCharacterCounter();
+        this.updateChatCommandBarVisibility();
 
         const thinkingPanel = this.appendThinkingPanel();
         this.triggerSearchAnimation(true);
@@ -1511,7 +1580,8 @@ class WeaveApp {
             if (window.electronAPI?.offChatStep) window.electronAPI.offChatStep();
             this.triggerSearchAnimation(false);
             this.finalizeThinkingPanel(thinkingPanel, response);
-            await this.typeAssistantResponse(response, { includeThinkingTrace: false });
+            await this.typeAssistantResponse(response, { includeThinkingTrace: true });
+            thinkingPanel?.remove?.();
             this.setPresenceMode('waiting');
         } catch (error) {
             console.error('Chat failed:', error);
@@ -1526,13 +1596,15 @@ class WeaveApp {
                     data_sources: []
                 }
             });
-            await this.typeAssistantResponse('I ran into a problem while preparing that answer.', { includeThinkingTrace: false });
+            await this.typeAssistantResponse('I ran into a problem while preparing that answer.', { includeThinkingTrace: true });
+            thinkingPanel?.remove?.();
             this.setPresenceMode('waiting');
         }
     }
 
     appendChatMessage(role, payload) {
         if (!this.chatMessages) return;
+        const shouldStick = this.shouldAutoScrollChat();
 
         const emptyState = this.chatMessages.querySelector('.empty-state, .claude-empty-state');
         if (emptyState) emptyState.remove();
@@ -1560,10 +1632,11 @@ class WeaveApp {
         `;
         
         this.chatMessages.appendChild(message);
-        this.scrollChatToBottom();
+        this.scrollChatToBottom({ force: shouldStick });
     }
 
     async typeAssistantResponse(rawPayload, options = {}) {
+        const renderStartedAt = Date.now();
         const content = this.formatAssistantOutput(typeof rawPayload === 'object' && rawPayload !== null ? rawPayload.content : rawPayload);
         const retrieval = typeof rawPayload === 'object' && rawPayload !== null ? (rawPayload.retrieval || null) : null;
         const thinkingTrace = typeof rawPayload === 'object' && rawPayload !== null ? (rawPayload.thinking_trace || retrieval?.thinking_trace || null) : null;
@@ -1571,6 +1644,7 @@ class WeaveApp {
         const message = document.createElement('div');
         message.className = 'claude-message assistant';
         if (!this.chatMessages) return;
+        const shouldStick = this.shouldAutoScrollChat();
         message.innerHTML = `
             <div class="claude-avatar assistant">W</div>
             <div class="claude-message-body">
@@ -1618,9 +1692,10 @@ Would you like me to continue with more detail?` : content;
             });
         }
 
-        this.scrollChatToBottom();
+        this.scrollChatToBottom({ force: shouldStick });
         this.pushMessageToActiveChat('assistant', bounded, retrieval, thinkingTrace);
         this.renderChatHistory();
+        this.logRendererPerf('typeAssistantResponse', renderStartedAt, `chars=${bounded.length}`);
     }
 
     renderUICard(block) {
@@ -1775,9 +1850,9 @@ Would you like me to continue with more detail?` : content;
             }
         });
         panel.__thinkingTimer = setInterval(() => {
-            if (document.hidden) return;
+            if (document.hidden || this.activeView !== 'action-view' || !panel.isConnected) return;
             this.renderLiveThinkingPanel(panel);
-        }, 250);
+        }, 1000);
         this.chatMessages.appendChild(panel);
         this.renderLiveThinkingPanel(panel);
         this.scrollChatToBottom();
@@ -2103,9 +2178,9 @@ Would you like me to continue with more detail?` : content;
             : `<div class="thinking-stage-detail">${this.escapeHtml(summary)}</div>`;
 
         return `
-            <div class="thinking-panel thinking-trace-live complete" data-expanded="false">
-                <button class="thinking-live-header" type="button" aria-expanded="false" data-thinking-trace-toggle>
-                    <span class="thinking-chevron">▸</span>
+            <div class="thinking-panel thinking-trace-live complete" data-expanded="true">
+                <button class="thinking-live-header" type="button" aria-expanded="true" data-thinking-trace-toggle>
+                    <span class="thinking-chevron">▾</span>
                     <span class="thinking-live-title">Thinking</span>
                     <span class="thinking-live-stage">${this.escapeHtml(summary)}</span>
                     <span class="thinking-live-elapsed">${this.escapeHtml(this.formatThinkingDuration(totalMs))} total</span>
@@ -2233,9 +2308,28 @@ Would you like me to continue with more detail?` : content;
         return text || 'No response.';
     }
 
-    scrollChatToBottom() {
+    shouldAutoScrollChat(threshold = 96) {
+        if (!this.chatMessages) return false;
+        const distance = this.chatMessages.scrollHeight - this.chatMessages.scrollTop - this.chatMessages.clientHeight;
+        return distance <= threshold;
+    }
+
+    scrollChatToBottom(options = {}) {
         if (!this.chatMessages) return;
-        this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
+        const force = options === true || options?.force === true;
+        if (!force && !this.shouldAutoScrollChat()) return;
+        requestAnimationFrame(() => {
+            if (!this.chatMessages) return;
+            this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
+        });
+    }
+
+    updateChatCommandBarVisibility() {
+        if (!this.chatCommandBar) return;
+        const activeChat = this.getActiveChat();
+        const hasStartedConversation = Boolean(activeChat?.messages?.some((item) => item?.role === 'user' && String(item.content || '').trim()));
+        const hasDraft = Boolean(this.chatInput?.value?.trim());
+        this.chatCommandBar.classList.toggle('hidden', hasStartedConversation || hasDraft);
     }
 
     formatInlineMarkdown(raw) {
@@ -2611,7 +2705,7 @@ Would you like me to continue with more detail?` : content;
         const sorted = [...(this.chatSessions || [])].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
         if (!sorted.length) {
             this.chatHistoryList.innerHTML = `
-                <div class="chat-history-empty">No relationship threads yet</div>
+                <div class="chat-history-empty">No saved context threads yet</div>
             `;
             return;
         }
@@ -2646,8 +2740,8 @@ Would you like me to continue with more detail?` : content;
                     <div class="empty-icon chat-empty-icon">
                         <i data-lucide="message-square"></i>
                     </div>
-                    <div class="empty-text chat-empty-title">Start a new thread</div>
-                    <div class="empty-sub chat-empty-sub">Ask for a real read on a relationship, a sharper follow-up, or a briefing before a conversation.</div>
+                    <div class="empty-text chat-empty-title">Start with a decision</div>
+                    <div class="empty-sub chat-empty-sub">Ask for the highest-leverage move, a meeting brief, or a message draft. The chat should do the thinking for you.</div>
                     <div class="chat-starter-grid">
                         ${prompts.map((p, idx) => `<button class="pill-btn" data-starter-prompt="${idx}" type="button">${this.escapeHtml(p)}</button>`).join('')}
                     </div>
@@ -2659,9 +2753,11 @@ Would you like me to continue with more detail?` : content;
                     const prompt = prompts[idx];
                     if (!prompt) return;
                     this.chatInput.value = prompt;
+                    this.updateChatCommandBarVisibility();
                     this.sendChatMessage();
                 });
             });
+            this.updateChatCommandBarVisibility();
             return;
         }
         if (this.chatThreadTitle) this.chatThreadTitle.textContent = chat.title || 'Current relationship thread';
@@ -2687,15 +2783,18 @@ Would you like me to continue with more detail?` : content;
                     const prompt = prompts[idx];
                     if (!prompt) return;
                     this.chatInput.value = prompt;
+                    this.updateChatCommandBarVisibility();
                     this.sendChatMessage();
                 });
             });
+            this.updateChatCommandBarVisibility();
             return;
         }
 
         chat.messages.forEach((message) => {
             this.appendChatMessage(message.role, message);
         });
+        this.updateChatCommandBarVisibility();
         this.scrollChatToBottom();
     }
 
@@ -4010,6 +4109,7 @@ Would you like me to continue with more detail?` : content;
         let index = initial;
         if (this.todayWhisperTimer) clearInterval(this.todayWhisperTimer);
         this.todayWhisperTimer = window.setInterval(() => {
+            if (this.activeView !== 'presence-view' || document.hidden) return;
             index = (index + 1) % prompts.length;
             el.classList.add('is-fading');
             window.setTimeout(() => {
@@ -4031,7 +4131,7 @@ Would you like me to continue with more detail?` : content;
         this.chatInput.placeholder = prompts[index];
         if (this.chatPromptTimer) clearInterval(this.chatPromptTimer);
         this.chatPromptTimer = window.setInterval(() => {
-            if (!this.chatInput || this.chatInput.value.trim()) return;
+            if (!this.chatInput || this.chatInput.value.trim() || this.activeView !== 'action-view' || document.hidden) return;
             index = (index + 1) % prompts.length;
             this.chatInput.classList.add('placeholder-fade');
             window.setTimeout(() => {

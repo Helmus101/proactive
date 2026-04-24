@@ -234,7 +234,7 @@
                 <div class="chat-panel">
                     <aside class="chat-history-panel">
                         <div class="chat-history-header">
-                            <div class="settings-label">Relationship threads</div>
+                            <div class="settings-label">Context</div>
                             <div style="display:flex; gap:8px; align-items:center;">
                                 <button class="ghost-button" id="chat-refresh-priorities-btn" type="button">Refresh radar</button>
                                 <button class="ghost-button" id="new-chat-btn">New thread</button>
@@ -245,7 +245,7 @@
                     <div class="chat-main">
                         <div class="chat-main-header">
                             <div class="chat-title-wrap">
-                                <div class="settings-label" id="chat-thread-title">Current work thread</div>
+                                <div class="settings-label" id="chat-thread-title">Relationship command center</div>
                                 <button class="ghost-button" id="toggle-chat-history-btn" type="button">Show threads</button>
                             </div>
                             <div style="display: flex; align-items: center; gap: 16px;">
@@ -261,16 +261,23 @@
                                 </div>
                             </div>
                         </div>
+                        <div class="chat-command-bar">
+                            <div class="chat-command-copy">
+                                <div class="chat-command-kicker">Today’s moves</div>
+                                <div class="chat-command-sub">Start with one high-leverage action. Everything else can wait.</div>
+                            </div>
+                            <div id="chat-suggestions-list" class="chat-command-list"></div>
+                        </div>
                         <div class="chat-container">
                             <div class="chat-messages claude-chat-messages" id="chat-messages">
                                 <div class="claude-empty-state">
                                     <div class="claude-empty-kicker">Weave</div>
-                                    <h2 class="claude-empty-title">Ask about the people around your work</h2>
-                                    <p class="claude-empty-sub">Weave should feel like a calm, sharp partner. Ask for a judgment, a briefing, a reconnect note, or the real context behind a relationship.</p>
+                                    <h2 class="claude-empty-title">Ask for the next relationship move</h2>
+                                    <p class="claude-empty-sub">Use chat as the main surface. Ask who matters now, what changed, what to say, or how to prepare before a conversation.</p>
                                     <div class="chat-starter-grid" aria-hidden="true">
-                                        <span class="pill-btn">Who is going cold?</span>
-                                        <span class="pill-btn">Who should I reach out to this week?</span>
-                                        <span class="pill-btn">Brief me on Sarah before our call</span>
+                                        <span class="pill-btn">Who should I reconnect with today?</span>
+                                        <span class="pill-btn">What are my highest-leverage relationship moves?</span>
+                                        <span class="pill-btn">Draft a message to Sarah</span>
                                     </div>
                                 </div>
                             </div>
@@ -278,7 +285,7 @@
                                 <div class="claude-composer">
                                     <textarea 
                                         id="chat-input" 
-                                        placeholder="Ask for a real judgment, a meeting brief, or the right next move with someone"
+                                        placeholder="Ask or act… Who needs attention, what changed, or draft the right message."
                                         rows="1"
                                     ></textarea>
                                     <div class="claude-composer-footer">
@@ -291,12 +298,6 @@
                             </div>
                         </div>
                     </div>
-                    <aside class="chat-suggestions-panel">
-                        <div class="chat-history-header">
-                            <div class="settings-label">Next moves</div>
-                        </div>
-                        <div id="chat-suggestions-list" class="chat-history-list"></div>
-                    </aside>
                 </div>
             </section>
 

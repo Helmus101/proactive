@@ -122,6 +122,34 @@ let browserHistoryCache = {
   fetchedAt: 0,
   urls: []
 };
+let browserHistoryRefreshPromise = null;
+let browserHistoryRefreshMeta = {
+  lastAttemptAt: 0,
+  lastSuccessAt: 0,
+  lastError: null,
+  lastErrorAt: 0
+};
+
+const SCREENSHOT_BROWSER_HISTORY_MAX_AGE_MS = 2 * 60 * 1000;
+const BACKGROUND_BROWSER_HISTORY_MAX_AGE_MS = 10 * 60 * 1000;
+const BROWSER_HISTORY_REFRESH_MIN_GAP_MS = 5 * 60 * 1000;
+const BROWSER_HISTORY_REFRESH_TIMEOUT_MS = 12000;
+
+function updateMemoryGraphHealth(patch = {}) {
+  debouncedStoreSet('memoryGraphHealth', {
+    ...(store.get('memoryGraphHealth') || {}),
+    ...patch
+  });
+}
+
+function emitMemoryGraphUpdate(payload = {}) {
+  if (mainWindow && mainWindow.webContents) {
+    mainWindow.webContents.send('memory-graph-update', {
+      ...payload,
+      timestamp: payload.timestamp || Date.now()
+    });
+  }
+}
 
 function isBrowserAppName(appName = '') {
   return KNOWN_BROWSER_APPS.has(String(appName || '').trim().toLowerCase());
@@ -179,7 +207,22 @@ function flattenStoredBrowserHistory() {
   return deduped.sort((a, b) => b.timestamp - a.timestamp);
 }
 
-async function getRecentBrowserHistorySnapshot({ maxAgeMs = 2 * 60 * 1000 } = {}) {
+function updateBrowserHistoryCache(rows = [], source = 'background') {
+  const normalized = (rows || []).map(normalizeBrowserHistoryItem).filter(Boolean);
+  if (!normalized.length) return browserHistoryCache.urls;
+  browserHistoryCache = {
+    fetchedAt: Date.now(),
+    urls: normalized
+  };
+  updateMemoryGraphHealth({
+    browserHistoryCacheSize: normalized.length,
+    browserHistoryCacheSource: source,
+    browserHistoryFetchedAt: new Date(browserHistoryCache.fetchedAt).toISOString()
+  });
+  return normalized;
+}
+
+function getCachedBrowserHistory({ maxAgeMs = SCREENSHOT_BROWSER_HISTORY_MAX_AGE_MS } = {}) {
   const now = Date.now();
   if (browserHistoryCache.urls.length && (now - browserHistoryCache.fetchedAt) < maxAgeMs) {
     return browserHistoryCache.urls;
@@ -187,21 +230,87 @@ async function getRecentBrowserHistorySnapshot({ maxAgeMs = 2 * 60 * 1000 } = {}
 
   const stored = flattenStoredBrowserHistory();
   if (stored.length) {
-    browserHistoryCache = { fetchedAt: now, urls: stored };
-  }
-
-  try {
-    const fresh = await getBrowserHistory();
-    const normalized = (fresh || []).map(normalizeBrowserHistoryItem).filter(Boolean);
-    if (normalized.length) {
-      browserHistoryCache = { fetchedAt: now, urls: normalized };
-      return normalized;
-    }
-  } catch (error) {
-    console.warn('[BrowserHistory] Failed to refresh recent history:', error?.message || error);
+    updateBrowserHistoryCache(stored, 'stored_snapshot');
   }
 
   return browserHistoryCache.urls;
+}
+
+async function refreshBrowserHistory(options = {}) {
+  const force = options?.force === true;
+  const reason = String(options?.reason || 'background');
+  const timeoutMs = Math.max(2000, Number(options?.timeoutMs || BROWSER_HISTORY_REFRESH_TIMEOUT_MS));
+  const minGapMs = Math.max(1000, Number(options?.minGapMs || BROWSER_HISTORY_REFRESH_MIN_GAP_MS));
+  const maxAgeMs = Math.max(1000, Number(options?.maxAgeMs || BACKGROUND_BROWSER_HISTORY_MAX_AGE_MS));
+  const now = Date.now();
+
+  if (!force && browserHistoryCache.urls.length && (now - browserHistoryCache.fetchedAt) < maxAgeMs) {
+    console.log(`[BrowserHistory] Serving cached history for ${reason}; age=${Math.round((now - browserHistoryCache.fetchedAt) / 1000)}s`);
+    return browserHistoryCache.urls;
+  }
+
+  if (!force && browserHistoryRefreshPromise) {
+    console.log(`[BrowserHistory] Reusing in-flight refresh for ${reason}`);
+    return browserHistoryRefreshPromise;
+  }
+
+  if (!force && browserHistoryRefreshMeta.lastAttemptAt && (now - browserHistoryRefreshMeta.lastAttemptAt) < minGapMs) {
+    console.log(`[BrowserHistory] Skipping refresh for ${reason}; min gap not reached`);
+    return browserHistoryCache.urls;
+  }
+
+  browserHistoryRefreshMeta.lastAttemptAt = now;
+  updateMemoryGraphHealth({
+    browserHistoryRefreshStatus: 'running',
+    browserHistoryRefreshReason: reason,
+    browserHistoryRefreshStartedAt: new Date(now).toISOString()
+  });
+
+  browserHistoryRefreshPromise = (async () => {
+    const startedAt = Date.now();
+    try {
+      const fresh = await withTimeout(getBrowserHistory(), timeoutMs, 'refreshBrowserHistory');
+      const normalized = updateBrowserHistoryCache(fresh, reason);
+      browserHistoryRefreshMeta.lastSuccessAt = Date.now();
+      browserHistoryRefreshMeta.lastError = null;
+      browserHistoryRefreshMeta.lastErrorAt = 0;
+      const durationMs = Date.now() - startedAt;
+      console.log(`[BrowserHistory] Refreshed ${normalized.length} URLs for ${reason} in ${durationMs}ms`);
+      updateMemoryGraphHealth({
+        browserHistoryRefreshStatus: 'idle',
+        browserHistoryRefreshDurationMs: durationMs,
+        browserHistoryLastRefreshAt: new Date(browserHistoryRefreshMeta.lastSuccessAt).toISOString()
+      });
+      emitMemoryGraphUpdate({
+        type: 'job_status',
+        job: 'browser_history_refresh',
+        status: 'completed',
+        duration_ms: durationMs,
+        count: normalized.length
+      });
+      return normalized;
+    } catch (error) {
+      browserHistoryRefreshMeta.lastError = error?.message || String(error);
+      browserHistoryRefreshMeta.lastErrorAt = Date.now();
+      console.warn(`[BrowserHistory] Failed refresh for ${reason}:`, browserHistoryRefreshMeta.lastError);
+      updateMemoryGraphHealth({
+        browserHistoryRefreshStatus: 'error',
+        browserHistoryRefreshError: browserHistoryRefreshMeta.lastError,
+        browserHistoryRefreshErrorAt: new Date(browserHistoryRefreshMeta.lastErrorAt).toISOString()
+      });
+      emitMemoryGraphUpdate({
+        type: 'job_status',
+        job: 'browser_history_refresh',
+        status: 'error',
+        error: browserHistoryRefreshMeta.lastError
+      });
+      return browserHistoryCache.urls;
+    } finally {
+      browserHistoryRefreshPromise = null;
+    }
+  })();
+
+  return browserHistoryRefreshPromise;
 }
 
 function scoreHistoryItemForScreenshot(item = {}, screenshotTs, appName = '', windowTitle = '') {
@@ -223,7 +332,7 @@ function scoreHistoryItemForScreenshot(item = {}, screenshotTs, appName = '', wi
 }
 
 async function findAssociatedUrlsForScreenshot({ timestamp, appName = '', windowTitle = '', limit = 5 } = {}) {
-  const history = await getRecentBrowserHistorySnapshot();
+  const history = getCachedBrowserHistory({ maxAgeMs: SCREENSHOT_BROWSER_HISTORY_MAX_AGE_MS });
   if (!Array.isArray(history) || !history.length) return [];
 
   return history
@@ -323,6 +432,7 @@ function getStoredRadarState() {
   if (state && typeof state === 'object') return state;
   const suggestions = Array.isArray(store.get('suggestions')) ? store.get('suggestions') : [];
   const persistentTodos = Array.isArray(store.get('persistentTodos')) ? store.get('persistentTodos') : [];
+  const centralSignals = suggestions.filter((item) => String(item.signal_type || '').toLowerCase() === 'central');
   const relationshipSignals = suggestions.filter((item) => String(item.signal_type || '').toLowerCase() === 'relationship' || looksRelationshipSuggestion(item));
   const todoSignals = [
     ...suggestions.filter((item) => String(item.signal_type || '').toLowerCase() === 'todo'),
@@ -334,10 +444,12 @@ function getStoredRadarState() {
   ];
   return {
     generated_at: new Date().toISOString(),
-    allSignals: [...relationshipSignals, ...todoSignals],
+    allSignals: [...centralSignals, ...relationshipSignals, ...todoSignals],
+    centralSignals,
     relationshipSignals,
     todoSignals,
     sections: {
+      central: { status: 'ready', count: centralSignals.length },
       relationship: { status: 'ready', count: relationshipSignals.length },
       todo: { status: 'ready', count: todoSignals.length }
     }
@@ -348,6 +460,7 @@ function persistRadarState(radarState = {}) {
   const clean = {
     generated_at: radarState.generated_at || new Date().toISOString(),
     allSignals: Array.isArray(radarState.allSignals) ? radarState.allSignals : [],
+    centralSignals: Array.isArray(radarState.centralSignals) ? radarState.centralSignals : [],
     relationshipSignals: Array.isArray(radarState.relationshipSignals) ? radarState.relationshipSignals : [],
     todoSignals: Array.isArray(radarState.todoSignals) ? radarState.todoSignals : [],
     sections: radarState.sections || {}
@@ -491,6 +604,11 @@ const CAPTURE_VISUAL_DIFF_THRESHOLD = Number(process.env.CAPTURE_VISUAL_DIFF_THR
 const STARTUP_HEAVY_JOB_DELAY_MS = Math.max(5 * 60 * 1000, Number(process.env.STARTUP_HEAVY_JOB_DELAY_MS || 10 * 60 * 1000));
 const STARTUP_INITIAL_SYNC_DELAY_MS = Math.max(10 * 60 * 1000, Number(process.env.STARTUP_INITIAL_SYNC_DELAY_MS || 20 * 60 * 1000));
 const GSUITE_SYNC_INTERVAL_MS = Math.max(15 * 60 * 1000, Number(process.env.GSUITE_SYNC_INTERVAL_MS || 15 * 60 * 1000));
+const HEAVY_JOB_RETRY_COOLDOWN_MS = 60 * 1000;
+const STARTUP_SOURCE_WARMUP_DELAY_MS = STARTUP_HEAVY_JOB_DELAY_MS;
+const STARTUP_MEMORY_GRAPH_DELAY_MS = STARTUP_HEAVY_JOB_DELAY_MS + (90 * 1000);
+const STARTUP_AUTOMATION_DELAY_MS = STARTUP_HEAVY_JOB_DELAY_MS + (3 * 60 * 1000);
+const STARTUP_RECURSIVE_DELAY_MS = STARTUP_HEAVY_JOB_DELAY_MS + (4 * 60 * 1000);
 let lastLowPowerOCRAt = 0;
 let lastEpisodeHeavyRunAt = 0;
 let lastSuggestionHeavyRunAt = 0;
@@ -507,6 +625,11 @@ const appInteractionState = {
   focused: false,
   minimized: false,
   lastInteractionAt: 0
+};
+const heavyJobState = {
+  activeJob: null,
+  startedAt: 0,
+  perJobLastSkipAt: {}
 };
 
 function getPerformanceMode() {
@@ -544,6 +667,67 @@ function shouldDeferBackgroundWork(label = 'background') {
   const defer = idleTime < 180 || appBusy;
   if (defer) console.log(`[${label}] Deferring heavy work until idle; idle=${idleTime}s`);
   return defer;
+}
+
+function beginHeavyJob(jobName, options = {}) {
+  const name = String(jobName || 'heavy_job');
+  const now = Date.now();
+  if (heavyJobState.activeJob && heavyJobState.activeJob !== name) {
+    const lastSkipAt = Number(heavyJobState.perJobLastSkipAt[name] || 0);
+    if ((now - lastSkipAt) > HEAVY_JOB_RETRY_COOLDOWN_MS) {
+      console.log(`[${name}] Skipping because ${heavyJobState.activeJob} is already running`);
+      heavyJobState.perJobLastSkipAt[name] = now;
+    }
+    updateMemoryGraphHealth({
+      heavyJobActive: heavyJobState.activeJob,
+      lastHeavyJobSkipped: name,
+      lastHeavyJobSkippedAt: new Date(now).toISOString()
+    });
+    emitMemoryGraphUpdate({
+      type: 'job_status',
+      job: name,
+      status: 'skipped',
+      reason: 'busy',
+      blocked_by: heavyJobState.activeJob
+    });
+    return false;
+  }
+  heavyJobState.activeJob = name;
+  heavyJobState.startedAt = now;
+  updateMemoryGraphHealth({
+    heavyJobActive: name,
+    heavyJobStartedAt: new Date(now).toISOString()
+  });
+  emitMemoryGraphUpdate({
+    type: 'job_status',
+    job: name,
+    status: 'running',
+    source: options?.source || 'background'
+  });
+  return true;
+}
+
+function endHeavyJob(jobName, meta = {}) {
+  const name = String(jobName || '');
+  const now = Date.now();
+  if (heavyJobState.activeJob === name) {
+    const durationMs = Math.max(0, now - Number(heavyJobState.startedAt || now));
+    heavyJobState.activeJob = null;
+    heavyJobState.startedAt = 0;
+    updateMemoryGraphHealth({
+      heavyJobActive: null,
+      lastHeavyJobCompleted: name,
+      lastHeavyJobCompletedAt: new Date(now).toISOString(),
+      lastHeavyJobDurationMs: durationMs
+    });
+    emitMemoryGraphUpdate({
+      type: 'job_status',
+      job: name,
+      status: meta?.status || 'completed',
+      duration_ms: durationMs,
+      error: meta?.error || null
+    });
+  }
 }
 
 function looksRelationshipSuggestion(item = {}) {
@@ -1433,6 +1617,7 @@ function getFrontmostWindowContext() {
 }
 
 async function captureDesktopSensorSnapshot(reason = 'scheduled') {
+  const captureStartedAt = Date.now();
   if (screenshotsPausedForDisplayOff) {
     return {
       skipped: true,
@@ -1456,6 +1641,8 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   sensorCaptureInProgress = true;
   sensorCaptureStartedAt = Date.now();
   let captureLockReleased = false;
+  let urlAssociationDurationMs = 0;
+  let eventPersistenceDurationMs = 0;
   const timestamp = Date.now();
   const filename = `ocr_capture_${timestamp}_${crypto.randomBytes(4).toString('hex')}.png`;
   const sensorStorageDir = await ensureSensorStorageDir();
@@ -1651,12 +1838,14 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   if (isReducedLoadMode()) lastLowPowerOCRAt = Date.now();
 
   try {
+    const urlAssociationStartedAt = Date.now();
     const associatedUrls = await findAssociatedUrlsForScreenshot({
       timestamp,
       appName: event.activeApp,
       windowTitle: event.activeWindowTitle,
       limit: 5
     });
+    urlAssociationDurationMs = Date.now() - urlAssociationStartedAt;
     if (associatedUrls.length) {
       event.associatedUrls = associatedUrls;
       event.primaryUrl = associatedUrls[0].url;
@@ -1699,7 +1888,9 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   const { maxEvents } = getSensorSettings();
   const nextEvents = [event, ...existing].slice(0, Math.max(50, Number(maxEvents || DEFAULT_SENSOR_SETTINGS.maxEvents)));
 
+  const persistStartedAt = Date.now();
   debouncedStoreSet('sensorEvents', nextEvents);
+  eventPersistenceDurationMs = Date.now() - persistStartedAt;
 
   if (isPeriodicScreenshot) {
     // The 30s screenshot cadence must not be blocked by DB/vector ingestion.
@@ -1770,15 +1961,18 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
 
     console.log(`[OCRIngestion] Saved to memory | app=${event.activeApp} | ${ocrSummary}`);
 
-    debouncedStoreSet('memoryGraphHealth', {
-      ...(store.get('memoryGraphHealth') || {}),
+    updateMemoryGraphHealth({
       lastDesktopCaptureAt: new Date().toISOString(),
       desktopCaptureStatus: 'idle',
       lastDesktopCaptureSource: event.textCaptureSource || 'none',
       lastDesktopCaptureApp: event.activeApp || '',
       lastOCRStatus: event.ocrStatus,
-      lastOCRConfidence: event.ocrConfidence
+      lastOCRConfidence: event.ocrConfidence,
+      lastCaptureDurationMs: Date.now() - captureStartedAt,
+      lastUrlAssociationDurationMs: urlAssociationDurationMs,
+      lastEventPersistenceDurationMs: eventPersistenceDurationMs
     });
+    console.log(`[SensorCaptureTiming] total=${Date.now() - captureStartedAt}ms ocr=${ocrDuration}ms urls=${urlAssociationDurationMs}ms persist=${eventPersistenceDurationMs}ms app=${event.activeApp || 'unknown'}`);
 
     // Throttle expensive background suggestion generation to avoid UI slowdown.
     const triggerInterval = isReducedLoadMode()
@@ -1796,11 +1990,11 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   } catch (e) {
     console.error('[captureDesktopSensorSnapshot] L1 ingestion failed:', e.message || e);
     console.error('[captureDesktopSensorSnapshot] Failed to ingest OCR capture from:', event.activeApp || 'unknown app');
-    debouncedStoreSet('memoryGraphHealth', {
-      ...(store.get('memoryGraphHealth') || {}),
+    updateMemoryGraphHealth({
       desktopCaptureStatus: 'error',
       lastDesktopCaptureError: e?.message || String(e),
-      lastDesktopCaptureErrorAt: new Date().toISOString()
+      lastDesktopCaptureErrorAt: new Date().toISOString(),
+      lastCaptureDurationMs: Date.now() - captureStartedAt
     });
   }
 
@@ -2024,7 +2218,10 @@ function scheduleDailyTasks() {
     try {
       // Update user patterns based on today's activity
       const userProfile = store.get('userProfile') || {};
-      const browsingHistory = await getBrowserHistory();
+      const browsingHistory = await refreshBrowserHistory({
+        reason: 'pattern_update',
+        maxAgeMs: BACKGROUND_BROWSER_HISTORY_MAX_AGE_MS
+      });
 
       // Analyze patterns and update profile
       await updateUserPatterns(userProfile, browsingHistory);
@@ -2063,10 +2260,13 @@ async function runMinutelySync() {
     console.log('GSuite sync already running; skipping this cycle');
     return;
   }
+  if (!beginHeavyJob('gsuite_sync')) {
+    return;
+  }
   global.__gsuite_sync_lock = true;
   try {
-    debouncedStoreSet('memoryGraphHealth', {
-      ...(store.get('memoryGraphHealth') || {}),
+    const startedAt = Date.now();
+    updateMemoryGraphHealth({
       lastSyncAttemptAt: new Date().toISOString(),
       syncStatus: 'running'
     });
@@ -2183,7 +2383,10 @@ async function runMinutelySync() {
         }
       }
 
-      const browserHistory = await getBrowserHistory();
+      const browserHistory = await refreshBrowserHistory({
+        reason: 'minutely_sync',
+        maxAgeMs: BACKGROUND_BROWSER_HISTORY_MAX_AGE_MS
+      });
       const lastHistory = store.get('lastHistorySync') || 0;
       const recentHistory = browserHistory.filter(h => (h.timestamp || h.last_visit_time || Date.now()) > lastHistory);
 
@@ -2219,10 +2422,14 @@ async function runMinutelySync() {
       if (ingestedCount > 0) {
         runRelationshipGraphUpdate({ backfill: false }).catch((e) => console.warn('[runMinutelySync] Relationship graph update failed:', e?.message || e));
       }
+      updateMemoryGraphHealth({
+        syncStatus: 'idle',
+        lastSyncRunAt: new Date().toISOString(),
+        syncDurationMs: Date.now() - startedAt
+      });
     } catch (gErr) {
       console.warn('[runMinutelySync] L1 ingestion failed:', gErr.message || gErr);
-      debouncedStoreSet('memoryGraphHealth', {
-        ...(store.get('memoryGraphHealth') || {}),
+      updateMemoryGraphHealth({
         syncStatus: 'error',
         lastSyncError: gErr?.message || String(gErr),
         lastSyncErrorAt: new Date().toISOString()
@@ -2230,6 +2437,7 @@ async function runMinutelySync() {
     }
   } finally {
     global.__gsuite_sync_lock = false;
+    endHeavyJob('gsuite_sync');
   }
 }
 
@@ -2245,9 +2453,11 @@ function startMinutelySyncLoop() {
 }
 
 function startSourceWarmup() {
-  setTimeout(() => {
-    runMinutelySync().catch((e) => console.warn('[Warmup] Minutely sync failed:', e?.message || e));
-  }, STARTUP_HEAVY_JOB_DELAY_MS);
+  refreshBrowserHistory({
+    reason: 'startup_warmup',
+    maxAgeMs: BACKGROUND_BROWSER_HISTORY_MAX_AGE_MS
+  }).catch((e) => console.warn('[Warmup] Browser history warmup failed:', e?.message || e));
+  runMinutelySync().catch((e) => console.warn('[Warmup] Minutely sync failed:', e?.message || e));
 }
 
 // ── Memory Graph Processing Functions ───────────────────────────────
@@ -2274,25 +2484,31 @@ async function runRelationshipGraphUpdate(options = {}) {
   if (!options?.force && shouldDeferBackgroundWork(options?.backfill ? 'RelationshipGraphBackfill' : 'RelationshipGraph')) {
     return { contacts: 0, deferred: true };
   }
+  const jobName = options?.backfill ? 'relationship_graph_backfill' : 'relationship_graph';
+  if (!beginHeavyJob(jobName, { source: options?.force ? 'manual' : 'background' })) {
+    return { contacts: 0, deferred: true, blocked_by: heavyJobState.activeJob };
+  }
   try {
+    const startedAt = Date.now();
     const result = await runRelationshipGraphJob(options);
-    debouncedStoreSet('memoryGraphHealth', {
-      ...(store.get('memoryGraphHealth') || {}),
+    updateMemoryGraphHealth({
       lastRelationshipGraphRunAt: new Date().toISOString(),
       relationshipContactCount: result.contacts,
-      relationshipGraphStatus: 'idle'
+      relationshipGraphStatus: 'idle',
+      relationshipGraphDurationMs: Date.now() - startedAt
     });
     console.log(`[RelationshipGraph] Updated ${result.contacts} contacts${options.backfill ? ' (backfill)' : ''}`);
     return result;
   } catch (error) {
-    debouncedStoreSet('memoryGraphHealth', {
-      ...(store.get('memoryGraphHealth') || {}),
+    updateMemoryGraphHealth({
       relationshipGraphStatus: 'error',
       lastRelationshipGraphError: error?.message || String(error),
       lastRelationshipGraphErrorAt: new Date().toISOString()
     });
     console.warn('[RelationshipGraph] Update failed:', error?.message || error);
     return { contacts: 0, error: error?.message || String(error) };
+  } finally {
+    endHeavyJob(jobName);
   }
 }
 
@@ -2311,14 +2527,17 @@ async function runEpisodeGeneration() {
     console.log('[EpisodeJob] Skipping to reduce system load / active use');
     return;
   }
+  if (!beginHeavyJob('episode_generation')) {
+    return;
+  }
   lastEpisodeHeavyRunAt = Date.now();
   episodeJobLock = true;
 
   try {
+    const startedAt = Date.now();
     console.log('[EpisodeJob] Running 15-minute episode generation...');
 
-    debouncedStoreSet('memoryGraphHealth', {
-      ...(store.get('memoryGraphHealth') || {}),
+    updateMemoryGraphHealth({
       lastEpisodeAttemptAt: new Date().toISOString(),
       episodeStatus: 'running'
     });
@@ -2326,31 +2545,28 @@ async function runEpisodeGeneration() {
     console.log(`[EpisodeJob] Generated ${newEpisodeIds.length} new episodes`);
     store.set('lastEpisodeRun', new Date().toISOString());
     store.set('lastProcessedEventTimestamp:episode', check.maxTs);
-    debouncedStoreSet('memoryGraphHealth', {
-      ...(store.get('memoryGraphHealth') || {}),
+    updateMemoryGraphHealth({
       lastEpisodeRunAt: new Date().toISOString(),
       lastEpisodeCount: newEpisodeIds.length,
-      episodeStatus: 'idle'
+      episodeStatus: 'idle',
+      episodeDurationMs: Date.now() - startedAt
     });
 
     // Send status to UI
-    if (mainWindow && mainWindow.webContents) {
-      mainWindow.webContents.send('memory-graph-update', {
-        type: 'episodes_generated',
-        count: newEpisodeIds.length,
-        timestamp: Date.now()
-      });
-    }
+    emitMemoryGraphUpdate({
+      type: 'episodes_generated',
+      count: newEpisodeIds.length
+    });
   } catch (error) {
     console.error('[EpisodeJob] Error:', error.message || error);
-    debouncedStoreSet('memoryGraphHealth', {
-      ...(store.get('memoryGraphHealth') || {}),
+    updateMemoryGraphHealth({
       episodeStatus: 'error',
       lastEpisodeError: error?.message || String(error),
       lastEpisodeErrorAt: new Date().toISOString()
     });
   } finally {
     episodeJobLock = false;
+    endHeavyJob('episode_generation');
   }
 }
 
@@ -2366,27 +2582,38 @@ async function runSemanticWindowGeneration() {
       console.log('[SemanticWindow] Skipping to reduce system load');
       return;
     }
+    if (!beginHeavyJob('semantic_window')) return;
+    const startedAt = Date.now();
     console.log('[SemanticWindow] Running 15-minute semantic summary...');
     const result = await runSemanticSummaryWindow(15 * 60 * 1000, process.env.DEEPSEEK_API_KEY || null);
     store.set('lastProcessedEventTimestamp:semantic', check.maxTs);
+    updateMemoryGraphHealth({
+      semanticWindowStatus: 'idle',
+      semanticWindowDurationMs: Date.now() - startedAt,
+      lastSemanticWindowRunAt: new Date().toISOString()
+    });
     const semIds = Array.isArray(result) ? result.filter(Boolean) : (result ? [result] : []);
     if (semIds.length) {
       console.log('[SemanticWindow] Created semantic nodes:', semIds.join(', '));
-      if (mainWindow && mainWindow.webContents) {
-        for (const id of semIds) {
-          mainWindow.webContents.send('memory-graph-update', {
-            type: 'semantic_window_generated',
-            id,
-            count: semIds.length,
-            timestamp: Date.now()
-          });
-        }
+      for (const id of semIds) {
+        emitMemoryGraphUpdate({
+          type: 'semantic_window_generated',
+          id,
+          count: semIds.length
+        });
       }
     } else {
       console.log('[SemanticWindow] No events to summarize in this window');
     }
   } catch (e) {
     console.error('[SemanticWindow] Error:', e?.message || e);
+    updateMemoryGraphHealth({
+      semanticWindowStatus: 'error',
+      lastSemanticWindowError: e?.message || String(e),
+      lastSemanticWindowErrorAt: new Date().toISOString()
+    });
+  } finally {
+    endHeavyJob('semantic_window');
   }
 }
 
@@ -2408,10 +2635,15 @@ async function runSuggestionEngineJob(options = {}) {
     console.log('[SuggestionEngine] No new events; keeping current radar state');
     return;
   }
+  if (!beginHeavyJob('radar_generation', { source: force ? 'manual' : 'background' })) {
+    suggestionRunQueued = true;
+    return { deferred: true, blocked_by: heavyJobState.activeJob };
+  }
   lastSuggestionHeavyRunAt = Date.now();
   suggestionJobLock = true;
 
   try {
+    const startedAt = Date.now();
     const llmConfig = getSuggestionLLMConfig();
     if (!llmConfig) {
       console.warn('[SuggestionEngine] No active LLM configuration; skipping radar generation');
@@ -2425,7 +2657,8 @@ async function runSuggestionEngineJob(options = {}) {
     const episodeCount = Number(episodeCountRow?.count || 0);
     const lastEpisodeRunMs = Date.parse(String(store.get('lastEpisodeRun') || '')) || 0;
     const episodeGraphStale = !lastEpisodeRunMs || (Date.now() - lastEpisodeRunMs) > (45 * 60 * 1000);
-    if (!episodeJobLock && (episodeCount === 0 || episodeGraphStale)) {
+    const shouldWarmEpisodes = episodeCount === 0 || (!force && episodeGraphStale);
+    if (!episodeJobLock && shouldWarmEpisodes) {
       console.log('[SuggestionEngine] Refreshing episode graph before suggestion generation...');
       await runEpisodeGeneration().catch((err) => {
         console.warn('[SuggestionEngine] Episode refresh failed before suggestion run:', err?.message || err);
@@ -2435,8 +2668,7 @@ async function runSuggestionEngineJob(options = {}) {
     console.log(`[SuggestionEngine] Running radar planner (new_events=${Boolean(check.hasNew)}, provider=${llmConfig.provider}, force=${force})...`);
     const manualTodos = (store.get('persistentTodos') || []).filter((todo) => !todo?.completed);
 
-    debouncedStoreSet('memoryGraphHealth', {
-      ...(store.get('memoryGraphHealth') || {}),
+    updateMemoryGraphHealth({
       lastSuggestionAttemptAt: new Date().toISOString(),
       suggestionStatus: 'running'
     });
@@ -2454,26 +2686,28 @@ async function runSuggestionEngineJob(options = {}) {
     console.log(`[SuggestionEngine] Generated radar state (${radarState.relationshipSignals?.length || 0} relationship, ${radarState.todoSignals?.length || 0} todo)`);
     store.set('lastSuggestionRun', new Date().toISOString());
     store.set('lastProcessedEventTimestamp:suggestion', check.maxTs);
-    debouncedStoreSet('memoryGraphHealth', {
-      ...(store.get('memoryGraphHealth') || {}),
+    updateMemoryGraphHealth({
       lastSuggestionRunAt: new Date().toISOString(),
       lastSuggestionCount: radarState.allSignals?.length || 0,
-      suggestionStatus: 'idle'
+      suggestionStatus: 'idle',
+      suggestionDurationMs: Date.now() - startedAt
     });
     if (mainWindow && mainWindow.webContents) {
       mainWindow.webContents.send('proactive-suggestions', radarState);
     }
     console.log(`[SuggestionEngine] Published ${radarState.allSignals?.length || 0} radar signals`);
+    return radarState;
   } catch (error) {
     console.error('[SuggestionEngine] Error:', error.message || error);
-    debouncedStoreSet('memoryGraphHealth', {
-      ...(store.get('memoryGraphHealth') || {}),
+    updateMemoryGraphHealth({
       suggestionStatus: 'error',
       lastSuggestionError: error?.message || String(error),
       lastSuggestionErrorAt: new Date().toISOString()
     });
+    throw error;
   } finally {
     suggestionJobLock = false;
+    endHeavyJob('radar_generation');
     if (suggestionRunQueued) {
       suggestionRunQueued = false;
       setTimeout(() => {
@@ -2485,6 +2719,7 @@ async function runSuggestionEngineJob(options = {}) {
 
 async function runWeeklyInsightJobScheduled() {
   try {
+    if (!beginHeavyJob('weekly_insight')) return;
     const apiKey = process.env.DEEPSEEK_API_KEY;
     if (!apiKey) {
       console.warn('[WeeklyInsight] No DeepSeek API key, skipping weekly insights');
@@ -2511,12 +2746,15 @@ async function runWeeklyInsightJobScheduled() {
     }
   } catch (error) {
     console.error('[WeeklyInsight] Error:', error.message || error);
+  } finally {
+    endHeavyJob('weekly_insight');
   }
 }
 
 async function runDailyInsightsScheduled() {
   try {
     if (shouldDeferBackgroundWork('DailyInsight')) return;
+    if (!beginHeavyJob('daily_insight')) return;
     const apiKey = process.env.DEEPSEEK_API_KEY;
     if (!apiKey) {
       console.warn('[DailyInsight] No DeepSeek API key, skipping daily insights');
@@ -2536,6 +2774,8 @@ async function runDailyInsightsScheduled() {
     }
   } catch (e) {
     console.error('[DailyInsight] Error:', e?.message || e);
+  } finally {
+    endHeavyJob('daily_insight');
   }
 }
 
@@ -2543,6 +2783,7 @@ async function runDailyInsightsScheduled() {
 async function runHourlySemanticPulseJob() {
   try {
     if (shouldDeferBackgroundWork('SemanticPulse')) return;
+    if (!beginHeavyJob('semantic_pulse')) return;
     const apiKey = process.env.DEEPSEEK_API_KEY;
     if (!apiKey) {
       console.warn('[SemanticPulse] No DeepSeek API key, skipping hourly pulse');
@@ -2561,11 +2802,14 @@ async function runHourlySemanticPulseJob() {
     }
   } catch (e) {
     console.error('[SemanticPulse] Error:', e?.message || e);
+  } finally {
+    endHeavyJob('semantic_pulse');
   }
 }
 
 async function runLivingCoreJobScheduled() {
   try {
+    if (!beginHeavyJob('living_core')) return;
     const apiKey = process.env.DEEPSEEK_API_KEY;
     if (!apiKey) {
       console.warn("[LivingCore] No DeepSeek API key, skipping Living Core synthesis");
@@ -2585,6 +2829,8 @@ async function runLivingCoreJobScheduled() {
     }
   } catch (e) {
     console.error("[LivingCore] Error:", e?.message || e);
+  } finally {
+    endHeavyJob('living_core');
   }
 }
 
@@ -2762,7 +3008,7 @@ function stopMemoryGraphProcessing() {
 async function updateUserPatterns(userProfile, browsingHistory) {
   const today = new Date().toDateString();
   const todayHistory = browsingHistory.filter(item =>
-    new Date(item.last_visit_time).toDateString() === today
+    new Date(item.timestamp || item.last_visit_time || Date.now()).toDateString() === today
   );
 
   // Analyze most visited domains
@@ -3709,14 +3955,14 @@ class ProactiveSuggestionEngine {
     const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
 
     // Get browser history (filtered to last 7 days)
-    const browserHistory = await getBrowserHistory();
+    const browserHistory = await refreshBrowserHistory({ reason: 'proactive_collect_signals', force: true });
     const recentBrowserHistory = browserHistory.filter(visit =>
-      visit.last_visit_time > sevenDaysAgo
+      (visit.timestamp || visit.last_visit_time || 0) > sevenDaysAgo
     ).map(visit => ({
       domain: this.extractDomain(visit.url),
       path: this.extractPath(visit.url),
       page_title: visit.title,
-      timestamp: visit.last_visit_time,
+      timestamp: visit.timestamp || visit.last_visit_time,
       duration: visit.visit_duration || 0,
       device_type: 'desktop'
     }));
@@ -4831,7 +5077,7 @@ function getProductivityScore(url) {
 async function getExtensionData() {
   try {
     console.log('Getting real browser history...');
-    const browserHistory = await getBrowserHistory();
+    const browserHistory = await refreshBrowserHistory({ reason: 'get_extension_data' });
 
     // Convert browser history to extension data format
     const urls = browserHistory.map(item => ({
@@ -5269,7 +5515,7 @@ async function generateDailySummary() {
     const proactiveResult = await engine.generateProactiveSuggestions();
 
     // Get real browser history
-    const browserHistory = await getBrowserHistory();
+    const browserHistory = await refreshBrowserHistory({ reason: 'generate_proactive_todos', force: true });
     console.log(`Retrieved ${browserHistory.length} URLs from browser history`);
 
     // Get Google data
@@ -5278,7 +5524,7 @@ async function generateDailySummary() {
 
     // Prepare data for AI analysis
     const urlLines = browserHistory.slice(0, 100).map(item =>
-      `${item.url} | ${item.title} | ${new Date(item.last_visit_time).toLocaleString()}`
+      `${item.url} | ${item.title} | ${new Date(item.timestamp || item.last_visit_time || Date.now()).toLocaleString()}`
     ).join('\n');
 
     const emailLines = (googleData.gmail || []).slice(0, 20).map(email =>
@@ -5674,7 +5920,7 @@ async function processSyncResult(result) {
 ipcMain.handle('run-initial-sync', async (event) => {
   try {
     const googleData    = store.get('googleData') || await getGoogleData();
-    const browserHistory = await getBrowserHistory();
+    const browserHistory = await refreshBrowserHistory({ reason: 'manual_initial_sync', force: true });
 
     const sendProgress = (progress) => {
       if (mainWindow && mainWindow.webContents) {
@@ -9676,13 +9922,15 @@ ipcMain.handle('get-suggestions', async () => {
 ipcMain.handle('save-suggestions', async (event, suggestions) => {
   try {
     const current = getStoredRadarState();
-    const relationshipSignals = (Array.isArray(suggestions) ? suggestions : []).filter((item) => String(item.signal_type || '').toLowerCase() !== 'todo');
+    const centralSignals = (Array.isArray(suggestions) ? suggestions : []).filter((item) => String(item.signal_type || '').toLowerCase() === 'central');
+    const relationshipSignals = (Array.isArray(suggestions) ? suggestions : []).filter((item) => String(item.signal_type || '').toLowerCase() === 'relationship');
     const todoSignals = (Array.isArray(suggestions) ? suggestions : []).filter((item) => String(item.signal_type || "").toLowerCase() === "todo");
     persistRadarState({
       ...current,
+      centralSignals,
       relationshipSignals,
       todoSignals,
-      allSignals: [...relationshipSignals, ...todoSignals],
+      allSignals: [...centralSignals, ...relationshipSignals, ...todoSignals],
       generated_at: new Date().toISOString()
     });
     return true;
@@ -9706,16 +9954,20 @@ ipcMain.handle('debug-trigger-suggestions', async () => {
 ipcMain.handle('trigger-suggestion-refresh', async (_event, payload = {}) => {
   try {
     console.log('[Radar] User-triggered refresh requested');
-    await runSuggestionEngineJob({ force: true });
+    const refreshResult = await runSuggestionEngineJob({ force: true }).catch((error) => ({
+      success: false,
+      error: error?.message || String(error)
+    }));
     const radarState = getStoredRadarState();
     const persistentTodos = store.get('persistentTodos') || [];
     return {
-      success: true,
+      success: !refreshResult?.error,
       radarState,
       suggestions: Array.isArray(radarState?.allSignals) ? radarState.allSignals : [],
       persistentTodos: Array.isArray(persistentTodos) ? persistentTodos.slice(0, 25) : [],
       source: 'chat-backed-radar',
-      payload
+      payload,
+      refresh: refreshResult
     };
   } catch (error) {
     console.error('[Radar] User-triggered refresh failed:', error);
@@ -10121,6 +10373,7 @@ ipcMain.handle('get-memory-graph-status', async () => {
     const status = {
       episodeJobLocked: episodeJobLock,
       suggestionJobLocked: suggestionJobLock,
+      heavyJobActive: heavyJobState.activeJob,
       processingActive: Boolean(episodeGenerationTimer || suggestionEngineTimer || minutelySyncTimer || minutelySyncInterval || sensorCaptureTimer),
       processorTimersActive: Boolean(episodeGenerationTimer || suggestionEngineTimer),
       lastEpisodeRun: store.get('lastEpisodeRun') || null,
@@ -11134,16 +11387,16 @@ app.whenReady().then(async () => {
   // Initialize daily task scheduling
   scheduleDailyTasks();
   startSensorCaptureLoop();
-  setTimeout(() => startSourceWarmup(), STARTUP_HEAVY_JOB_DELAY_MS);
+  setTimeout(() => startSourceWarmup(), STARTUP_SOURCE_WARMUP_DELAY_MS);
   setTimeout(() => startPeriodicScreenshotCapture(), Math.max(15000, getPeriodicScreenshotWakeDelayMs()));
 
   // Initialize memory graph processing
-  setTimeout(() => startMemoryGraphProcessing(), STARTUP_HEAVY_JOB_DELAY_MS);
+  setTimeout(() => startMemoryGraphProcessing(), STARTUP_MEMORY_GRAPH_DELAY_MS);
 
   // Start user-defined automation scheduler
-  setTimeout(() => startAutomationScheduler(), STARTUP_HEAVY_JOB_DELAY_MS);
+  setTimeout(() => startAutomationScheduler(), STARTUP_AUTOMATION_DELAY_MS);
   if (recursiveImprovementEnabled()) {
-    setTimeout(() => startRecursiveImprovementLoop(), STARTUP_HEAVY_JOB_DELAY_MS + 60 * 1000);
+    setTimeout(() => startRecursiveImprovementLoop(), STARTUP_RECURSIVE_DELAY_MS);
   }
 
   // ── Auto-trigger initial sync on first launch ──────────────────────────
@@ -11156,7 +11409,7 @@ app.whenReady().then(async () => {
           mainWindow.webContents.send('initial-sync-started');
         }
         const googleData     = store.get('googleData') || await getGoogleData();
-        const browserHistory = await getBrowserHistory();
+        const browserHistory = await refreshBrowserHistory({ reason: 'startup_initial_sync', force: true });
 
         const result = await runInitialSync({
           userId:         'local',

@@ -84,6 +84,36 @@ function makeRelationshipFallback(contactRows = [], limit = 5) {
   });
 }
 
+function makeRelationshipEvidenceFallback(retrieval = null, limit = 5) {
+  const evidence = Array.isArray(retrieval?.evidence) ? retrieval.evidence : [];
+  return evidence.slice(0, limit).map((item, index) => {
+    const baseTitle = trim(item.title || item.text || `Relationship move ${index + 1}`, 72);
+    const move = `Follow up on ${baseTitle.toLowerCase()} with a specific personal reference from recent context`;
+    return {
+      id: stableId('radar_rel_evidence', `${item.id || item.title || index}`),
+      title: baseTitle,
+      category: 'relationship_intelligence',
+      signal_type: 'relationship',
+      priority: index < 2 ? 'high' : 'medium',
+      why_now: 'This surfaced from recent memory as a relationship-relevant thread worth acting on now.',
+      evidence: trim(item.text || item.title || '', 220),
+      move,
+      person: '',
+      recommended_action: move,
+      primary_action: { label: 'Draft opener' },
+      suggested_actions: [{ label: 'Draft opener' }, { label: 'View relationship' }, { label: 'Snooze' }],
+      display: {
+        person: '',
+        headline: baseTitle,
+        summary: trim(item.text || item.title || '', 180)
+      },
+      epistemic_trace: makeTraceFromEvidence([item], 1),
+      createdAt: Date.now(),
+      ai_generated: true
+    };
+  });
+}
+
 function makeTodoFallback(manualTodos = [], retrieval = null, limit = 5) {
   const existing = (manualTodos || []).filter((todo) => todo && !todo.completed).slice(0, limit);
   if (existing.length) {
@@ -372,15 +402,27 @@ async function buildRadarState({ llmConfig = null, manualTodos = [], maxCentralS
         if (!signals.length) {
           signals = makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals);
         }
+        if (!signals.length) {
+          signals = makeRelationshipEvidenceFallback(relationshipContext.retrieval, maxRelationshipSignals);
+        }
         signals = await deepenSignals({
           section: 'relationship',
           llmConfig,
           signals,
           context: relationshipContext
         });
+        if (!signals.length) {
+          signals = makeRelationshipEvidenceFallback(relationshipContext.retrieval, maxRelationshipSignals);
+        }
         return { section: 'relationship', signals, error: null };
       } catch (error) {
-        return { section: 'relationship', signals: makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals), error: String(error?.message || error) };
+        return {
+          section: 'relationship',
+          signals: makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals).length
+            ? makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals)
+            : makeRelationshipEvidenceFallback(relationshipContext.retrieval, maxRelationshipSignals),
+          error: String(error?.message || error)
+        };
       }
     })(),
     (async () => {
@@ -402,6 +444,9 @@ async function buildRadarState({ llmConfig = null, manualTodos = [], maxCentralS
           signals,
           context: todoContext
         });
+        if (!signals.length) {
+          signals = makeTodoFallback(manualTodos, todoContext.retrieval, maxTodoSignals);
+        }
         return { section: 'todo', signals, error: null };
       } catch (error) {
         return { section: 'todo', signals: makeTodoFallback(manualTodos, todoContext.retrieval, maxTodoSignals), error: String(error?.message || error) };
