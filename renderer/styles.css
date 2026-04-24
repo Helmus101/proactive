@@ -8064,12 +8064,12 @@ body {
 }
 
 .claude-composer {
-    padding: 14px !important;
+    padding: 8px 14px 6px !important;
 }
 
 .claude-composer textarea,
 #chat-input {
-    min-height: 72px !important;
+    min-height: 44px !important;
     line-height: 1.5 !important;
 }
 

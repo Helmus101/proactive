@@ -1741,12 +1741,12 @@ Would you like me to continue with more detail?` : content;
             label: 'Analyzing your question',
             startedAt,
             completedAt: null,
-            expanded: false,
+            expanded: true,
             stages: initialStages,
             stageMap: new Map(initialStages.map((stage) => [stage.id, stage])),
             trace: []
         };
-        panel.dataset.expanded = 'false';
+        panel.dataset.expanded = 'true';
         const toggleExpanded = () => {
             const state = panel.__thinkingState;
             state.expanded = !state.expanded;
