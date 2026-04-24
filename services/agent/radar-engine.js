@@ -42,9 +42,21 @@ function makeTraceFromEvidence(evidence = [], limit = 3) {
   })).filter((item) => item.text);
 }
 
-function makeRelationshipFallback(contactRows = [], limit = 5) {
-  return (contactRows || []).slice(0, limit).map((contact, index) => {
-    const person = String(contact.display_name || '').trim();
+function makeRelationshipFallback(contactRows = [], limit = 5, existingSignals = []) {
+  const existingPersons = new Set(
+    existingSignals
+      .map(s => String(s.person || s.display?.person || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+
+  return (contactRows || [])
+    .filter(contact => {
+      const person = String(contact.display_name || '').trim();
+      return !existingPersons.has(person.toLowerCase());
+    })
+    .slice(0, limit)
+    .map((contact, index) => {
+      const person = String(contact.display_name || '').trim();
     const whyNow = [
       contact.status ? `${contact.status.replace(/_/g, ' ')} relationship` : '',
       contact.last_interaction_at ? `last interaction ${contact.last_interaction_at.slice(0, 10)}` : '',
@@ -84,10 +96,21 @@ function makeRelationshipFallback(contactRows = [], limit = 5) {
   });
 }
 
-function makeRelationshipEvidenceFallback(retrieval = null, limit = 5) {
+function makeRelationshipEvidenceFallback(retrieval = null, limit = 5, existingSignals = []) {
+  const existingTitles = new Set(
+    existingSignals
+      .map(s => String(s.title || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
   const evidence = Array.isArray(retrieval?.evidence) ? retrieval.evidence : [];
-  return evidence.slice(0, limit).map((item, index) => {
-    const baseTitle = trim(item.title || item.text || `Relationship move ${index + 1}`, 72);
+  return evidence
+    .filter(item => {
+      const title = String(item.title || item.text || '').trim().toLowerCase();
+      return title && !existingTitles.has(title);
+    })
+    .slice(0, limit)
+    .map((item, index) => {
+      const baseTitle = trim(item.title || item.text || `Relationship move ${index + 1}`, 72);
     const move = `Follow up on ${baseTitle.toLowerCase()} with a specific personal reference from recent context`;
     return {
       id: stableId('radar_rel_evidence', `${item.id || item.title || index}`),
@@ -114,8 +137,21 @@ function makeRelationshipEvidenceFallback(retrieval = null, limit = 5) {
   });
 }
 
-function makeTodoFallback(manualTodos = [], retrieval = null, limit = 5) {
-  const existing = (manualTodos || []).filter((todo) => todo && !todo.completed).slice(0, limit);
+function makeTodoFallback(manualTodos = [], retrieval = null, limit = 5, existingSignals = []) {
+  const existingTitles = new Set(
+    existingSignals
+      .map(s => String(s.title || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+
+  const existing = (manualTodos || [])
+    .filter((todo) => {
+      if (!todo || todo.completed) return false;
+      const title = String(todo.title || '').trim().toLowerCase();
+      return !existingTitles.has(title);
+    })
+    .slice(0, limit);
+
   if (existing.length) {
     return existing.map((todo, index) => ({
       id: todo.id || stableId('radar_todo', `${todo.title}|${index}`),
@@ -142,7 +178,13 @@ function makeTodoFallback(manualTodos = [], retrieval = null, limit = 5) {
   }
 
   const evidence = Array.isArray(retrieval?.evidence) ? retrieval.evidence : [];
-  return evidence.slice(0, limit).map((item, index) => ({
+  return evidence
+    .filter(item => {
+      const title = String(item.title || item.text || '').trim().toLowerCase();
+      return title && !existingTitles.has(title);
+    })
+    .slice(0, limit)
+    .map((item, index) => ({
     id: stableId('radar_todo', `${item.id || item.title}|${index}`),
     title: trim(item.title || item.text || `Todo ${index + 1}`, 72),
     category: 'work',
@@ -185,6 +227,7 @@ function normalizeSignal(section, row = {}, index = 0) {
   return {
     id: row.id || stableId(`radar_${section}`, `${title}|${person}|${index}`),
     title,
+    person,
     category,
     signal_type: section,
     priority: String(row.priority || (index < 2 ? 'high' : 'medium')).toLowerCase(),
@@ -241,7 +284,7 @@ async function fetchRelationshipCandidates(limit = 8) {
   return rows || [];
 }
 
-async function runSectionLLM({ section, llmConfig, context, relationshipCandidates = [], manualTodos = [], limit = 5 }) {
+async function runSectionLLM({ section, llmConfig, context, relationshipCandidates = [], manualTodos = [], limit = 5, existingSignals = [] }) {
   const evidenceDigest = (context?.evidence || []).slice(0, 10).map((item, index) => (
     `${index + 1}. [${item.layer || item.type || 'memory'}] ${trim(item.text || item.title || '', 220)}`
   )).join('\n');
@@ -250,6 +293,9 @@ async function runSectionLLM({ section, llmConfig, context, relationshipCandidat
   )).join('\n');
   const manualDigest = (manualTodos || []).filter((todo) => todo && !todo.completed).slice(0, 8).map((todo) => (
     `- ${trim(todo.title || '', 90)}${todo.description ? `: ${trim(todo.description, 140)}` : ''}`
+  )).join('\n');
+  const existingDigest = (existingSignals || []).map((s) => (
+    `- ${s.title}${s.person ? ` (with ${s.person})` : ''}`
   )).join('\n');
 
   const sectionQuery = {
@@ -276,6 +322,8 @@ Rules:
 - Relationship items (Nurture, Life Event, Check-in) must feel like: person/context, why now, supporting evidence, concrete next move.
 - Todo items (Task, Opportunity) must be the strongest productive next steps from current memory.
 - Central items (Insight, Opportunity) should capture high-level patterns or strategic shifts.
+- DO NOT repeat or duplicate any of these existing signals:
+${existingDigest || 'None'}
 - JSON only.
 
 [Query]
@@ -339,9 +387,13 @@ ${(context?.evidence || []).slice(0, 10).map((item, index) => `${index + 1}. ${t
   }).slice(0, signals.length);
 }
 
-async function buildRadarState({ llmConfig = null, manualTodos = [], maxCentralSignals = 3, maxRelationshipSignals = 5, maxTodoSignals = 5 } = {}) {
+async function buildRadarState({ llmConfig = null, manualTodos = [], maxCentralSignals = 5, maxRelationshipSignals = 5, maxTodoSignals = 5, existingState = null } = {}) {
   const timings = {};
   const relationshipCandidates = await fetchRelationshipCandidates(8);
+
+  const existingCentral = (existingState?.centralSignals || []).slice(0, 10);
+  const existingRelationship = (existingState?.relationshipSignals || []).slice(0, 10);
+  const existingTodo = (existingState?.todoSignals || []).slice(0, 10);
 
   const [centralContext, relationshipContext, todoContext] = await Promise.all([
     retrieveBoundedContext('What are the top high-level insights or patterns from recent activity?', {
@@ -374,7 +426,8 @@ async function buildRadarState({ llmConfig = null, manualTodos = [], maxCentralS
           context: centralContext,
           relationshipCandidates,
           manualTodos,
-          limit: maxCentralSignals
+          limit: maxCentralSignals,
+          existingSignals: existingCentral
         });
         if (signals.length) {
           signals = await deepenSignals({
@@ -397,13 +450,14 @@ async function buildRadarState({ llmConfig = null, manualTodos = [], maxCentralS
           context: relationshipContext,
           relationshipCandidates,
           manualTodos,
-          limit: maxRelationshipSignals
+          limit: maxRelationshipSignals,
+          existingSignals: existingRelationship
         });
         if (!signals.length) {
-          signals = makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals);
+          signals = makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals, existingRelationship);
         }
         if (!signals.length) {
-          signals = makeRelationshipEvidenceFallback(relationshipContext.retrieval, maxRelationshipSignals);
+          signals = makeRelationshipEvidenceFallback(relationshipContext.retrieval, maxRelationshipSignals, existingRelationship);
         }
         signals = await deepenSignals({
           section: 'relationship',
@@ -412,15 +466,15 @@ async function buildRadarState({ llmConfig = null, manualTodos = [], maxCentralS
           context: relationshipContext
         });
         if (!signals.length) {
-          signals = makeRelationshipEvidenceFallback(relationshipContext.retrieval, maxRelationshipSignals);
+          signals = makeRelationshipEvidenceFallback(relationshipContext.retrieval, maxRelationshipSignals, existingRelationship);
         }
         return { section: 'relationship', signals, error: null };
       } catch (error) {
         return {
           section: 'relationship',
-          signals: makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals).length
-            ? makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals)
-            : makeRelationshipEvidenceFallback(relationshipContext.retrieval, maxRelationshipSignals),
+          signals: makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals, existingRelationship).length
+            ? makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals, existingRelationship)
+            : makeRelationshipEvidenceFallback(relationshipContext.retrieval, maxRelationshipSignals, existingRelationship),
           error: String(error?.message || error)
         };
       }
@@ -433,10 +487,11 @@ async function buildRadarState({ llmConfig = null, manualTodos = [], maxCentralS
           context: todoContext,
           relationshipCandidates,
           manualTodos,
-          limit: maxTodoSignals
+          limit: maxTodoSignals,
+          existingSignals: existingTodo
         });
         if (!signals.length) {
-          signals = makeTodoFallback(manualTodos, todoContext.retrieval, maxTodoSignals);
+          signals = makeTodoFallback(manualTodos, todoContext.retrieval, maxTodoSignals, existingTodo);
         }
         signals = await deepenSignals({
           section: 'todo',
@@ -445,11 +500,11 @@ async function buildRadarState({ llmConfig = null, manualTodos = [], maxCentralS
           context: todoContext
         });
         if (!signals.length) {
-          signals = makeTodoFallback(manualTodos, todoContext.retrieval, maxTodoSignals);
+          signals = makeTodoFallback(manualTodos, todoContext.retrieval, maxTodoSignals, existingTodo);
         }
         return { section: 'todo', signals, error: null };
       } catch (error) {
-        return { section: 'todo', signals: makeTodoFallback(manualTodos, todoContext.retrieval, maxTodoSignals), error: String(error?.message || error) };
+        return { section: 'todo', signals: makeTodoFallback(manualTodos, todoContext.retrieval, maxTodoSignals, existingTodo), error: String(error?.message || error) };
       }
     })()
   ]);
