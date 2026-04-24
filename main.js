@@ -21,6 +21,7 @@ if (process.stderr && typeof process.stderr.on === 'function') {
 const { app, BrowserWindow, ipcMain, session, desktopCapturer, systemPreferences, screen, globalShortcut, powerMonitor, nativeImage } = require('electron');
 const crypto = require('crypto');
 const path = require('path');
+const os = require('os');
 const fs = require('fs');
 const { execFile } = require('child_process');
 const axios = require('axios');
@@ -9675,10 +9676,7 @@ ipcMain.handle('save-suggestions', async (event, suggestions) => {
   try {
     const current = getStoredRadarState();
     const relationshipSignals = (Array.isArray(suggestions) ? suggestions : []).filter((item) => String(item.signal_type || '').toLowerCase() !== 'todo');
-    const todoSignals = uniqById([
-      ...(current.todoSignals || []).filter((item) => !item?.completed),
-      ...(Array.isArray(suggestions) ? suggestions : []).filter((item) => String(item.signal_type || '').toLowerCase() === 'todo')
-    ]);
+    const todoSignals = (Array.isArray(suggestions) ? suggestions : []).filter((item) => String(item.signal_type || "").toLowerCase() === "todo");
     persistRadarState({
       ...current,
       relationshipSignals,

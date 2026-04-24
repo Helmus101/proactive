@@ -137,6 +137,7 @@ class WeaveApp {
         this.toggleChatHistoryButton = document.getElementById('toggle-chat-history-btn');
         this.chatView = document.getElementById('action-view');
         this.chatSyncStatus = document.getElementById('chat-sync-status');
+        this.chatSuggestionsList = document.getElementById("chat-suggestions-list");
         this.contactsSort = document.getElementById('contacts-sort');
         this.suggestionProviderSelect = document.getElementById('suggestion-llm-provider');
         this.suggestionModelInput = document.getElementById('suggestion-llm-model');
@@ -651,6 +652,10 @@ class WeaveApp {
             ${section(this.currentFilter === 'relationships' ? 'Relationship signals' : 'To-do signals', visibleTodos, 0)}
             ${regularTasks}
         `;
+        if (this.chatSuggestionsList) {
+            const chatVisible = this.getVisibleTodos().slice(0, 6);
+            this.chatSuggestionsList.innerHTML = chatVisible.map((todo, idx) => this.renderSuggestionCard(todo, idx)).join("");
+        }
     }
 
     renderRegularTodosSection() {
