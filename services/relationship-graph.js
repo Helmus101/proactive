@@ -58,6 +58,10 @@ function stableId(prefix, value) {
   return `${prefix}_${crypto.createHash('sha1').update(String(value || '')).digest('hex').slice(0, 18)}`;
 }
 
+function escapeRegExp(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function trim(value = '', max = 220) {
   const text = normalizeText(value);
   return text.length > max ? `${text.slice(0, Math.max(0, max - 1)).trim()}…` : text;
@@ -99,7 +103,6 @@ function isLikelyPersonName(value = '') {
   if (/\b(App|Chrome|Safari|Calendar|Gmail|Google|LinkedIn|Messages|Slack|Team|School|University|College|Inc|LLC|Ltd|Labs|Studio|Support|Settings|Terminal|Code)\b/.test(text)) return false;
   return true;
 }
-
 function chooseBetterDisplayName(existingName = '', incomingName = '') {
   const existing = normalizeName(existingName || '');
   const incoming = normalizeName(incomingName || '');
@@ -692,7 +695,7 @@ function extractRelationshipTopics(text = '', metadata = {}) {
   return uniqNormalized(discovered, 12);
 }
 
-async function linkMentionsForEvent({ eventId, type = '', source = '', text = '', metadata = {}, envelope = {} } = {}) {
+async function linkMentionsForEvent({ eventId, type = '', source = '', text = '', metadata = {}, envelope = {}, cachedKnown = null } = {}) {
   await ensureRelationshipTables();
   const ts = envelope.occurred_at || metadata.occurred_at || metadata.timestamp || nowIso();
   const sourceApp = envelope.app || metadata.app || metadata.activeApp || source || '';
@@ -737,30 +740,62 @@ async function linkMentionsForEvent({ eventId, type = '', source = '', text = ''
   }
 
   // 2. Scan for other known contacts mentioned in text
-  const known = await loadKnownIdentifiers();
-  const textLower = safeText.toLowerCase();
+  const known = cachedKnown || await loadKnownIdentifiers();
   const seen = new Set(linked.map((item) => item.id));
+  const identifierMap = new Map();
+  const regexParts = [];
+
   for (const item of known) {
     if (seen.has(item.contact_id)) continue;
     const needle = String(item.normalized_value || '').toLowerCase();
     if (needle.length < 4) continue;
-    if (!textLower.includes(needle)) continue;
-    const contactMention = await linkRelationshipMention({
-      contactId: item.contact_id,
-      eventId,
-      retrievalDocId: `event:${eventId}`,
-      timestamp: ts,
-      sourceApp,
-      snippet: bestSnippetAround(safeText, item.identifier_value),
-      confidence: item.identifier_type === 'email' ? 0.95 : 0.82,
-      mentionType: 'known_contact_mention',
-      metadata: { matched_identifier: item.identifier_value, identifier_type: item.identifier_type }
-    });
-    if (contactMention) {
-      const contactRow = await db.getQuery(`SELECT * FROM relationship_contacts WHERE id = ?`, [item.contact_id]);
-      if (contactRow) linked.push(contactRow);
+
+    if (!identifierMap.has(needle)) {
+      identifierMap.set(needle, item);
     }
-    seen.add(item.contact_id);
+  }
+
+  const sortedNeedles = Array.from(identifierMap.keys()).sort((a, b) => b.length - a.length);
+  for (const needle of sortedNeedles) {
+    const item = identifierMap.get(needle);
+    const escaped = escapeRegExp(needle);
+    if (item.identifier_type === 'email' || needle.includes('@')) {
+      regexParts.push(escaped);
+    } else {
+      regexParts.push(`\\b${escaped}\\b`);
+    }
+  }
+
+  if (regexParts.length > 0) {
+    // Process in chunks to avoid regex engine limits
+    const CHUNK_SIZE = 400;
+    for (let i = 0; i < regexParts.length; i += CHUNK_SIZE) {
+      const chunk = regexParts.slice(i, i + CHUNK_SIZE);
+      const combinedRegex = new RegExp(chunk.join('|'), 'gi');
+      let match;
+      while ((match = combinedRegex.exec(safeText)) !== null) {
+        const matchedValue = match[0].toLowerCase();
+        const item = identifierMap.get(matchedValue);
+        if (item && !seen.has(item.contact_id)) {
+          const contactMention = await linkRelationshipMention({
+            contactId: item.contact_id,
+            eventId,
+            retrievalDocId: `event:${eventId}`,
+            timestamp: ts,
+            sourceApp,
+            snippet: bestSnippetAround(safeText, item.identifier_value),
+            confidence: item.identifier_type === 'email' ? 0.95 : 0.82,
+            mentionType: 'known_contact_mention',
+            metadata: { matched_identifier: item.identifier_value, identifier_type: item.identifier_type }
+          });
+          if (contactMention) {
+            const contactRow = await db.getQuery(`SELECT * FROM relationship_contacts WHERE id = ?`, [item.contact_id]);
+            if (contactRow) linked.push(contactRow);
+          }
+          seen.add(item.contact_id);
+        }
+      }
+    }
   }
 
   return linked;
@@ -911,16 +946,26 @@ async function backfillRelationshipContacts() {
      ORDER BY datetime(COALESCE(occurred_at, timestamp)) DESC
      LIMIT 2500`
   ).catch(() => []);
-  for (const row of rows || []) {
-    const metadata = { ...asObj(row.metadata), participants: asList(row.participants) };
-    await linkMentionsForEvent({
-      eventId: row.id,
-      type: row.type,
-      source: row.source,
-      text: row.text,
-      metadata,
-      envelope: { app: row.app, title: row.title, occurred_at: row.occurred_at || row.timestamp }
-    }).catch(() => {});
+
+  const known = await loadKnownIdentifiers();
+  const batchSize = 50;
+
+  for (let i = 0; i < (rows || []).length; i += batchSize) {
+    const batch = rows.slice(i, i + batchSize);
+    for (const row of batch) {
+      const metadata = { ...asObj(row.metadata), participants: asList(row.participants) };
+      await linkMentionsForEvent({
+        eventId: row.id,
+        type: row.type,
+        source: row.source,
+        text: row.text,
+        metadata,
+        envelope: { app: row.app, title: row.title, occurred_at: row.occurred_at || row.timestamp },
+        cachedKnown: known
+      }).catch(() => {});
+    }
+    // Yield to main thread between batches
+    await new Promise(resolve => setImmediate(resolve));
   }
 }
 
