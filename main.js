@@ -355,6 +355,61 @@ function persistRadarState(radarState = {}) {
   return clean;
 }
 
+async function persistDailyBriefSemanticNode(summary = {}) {
+  const date = String(summary?.date || '').slice(0, 10);
+  if (!date) return null;
+  const id = `sem_daily_brief_${date.replace(/[^0-9]/g, '')}`;
+  const now = new Date().toISOString();
+  const sourceRefs = Array.from(new Set((summary?.events || []).map((item) => item?.id).filter(Boolean))).slice(0, 96);
+  const title = `Daily brief ${date}`;
+  const narrative = String(summary?.narrative || '').trim();
+  const accomplishments = Array.isArray(summary?.suggestions)
+    ? summary.suggestions.map((item) => item?.title || item?.task || item?.description).filter(Boolean).slice(0, 8)
+    : [];
+  const metadata = {
+    date,
+    generated_at: summary?.generated_at || now,
+    counts: summary?.counts || {},
+    accomplishments,
+    source_refs: sourceRefs,
+    latest_activity_at: summary?.generated_at || now
+  };
+
+  await db.runQuery(
+    `INSERT OR REPLACE INTO memory_nodes
+     (id, layer, subtype, title, summary, canonical_text, confidence, status, source_refs, metadata, graph_version, created_at, updated_at, embedding, anchor_date, anchor_at)
+     VALUES (?, 'semantic', 'daily_brief', ?, ?, ?, ?, ?, ?, ?, ?,
+             COALESCE((SELECT created_at FROM memory_nodes WHERE id = ?), ?), ?,
+             COALESCE((SELECT embedding FROM memory_nodes WHERE id = ?), '[]'), ?, ?)`,
+    [
+      id,
+      title,
+      narrative || 'Daily work summary',
+      [
+        title,
+        narrative ? `Narrative: ${narrative}` : '',
+        accomplishments.length ? `Accomplishments: ${accomplishments.join('; ')}` : '',
+        Object.keys(metadata.counts || {}).length ? `Counts: ${Object.entries(metadata.counts).map(([key, value]) => `${key}=${value}`).join(', ')}` : ''
+      ].filter(Boolean).join('\n'),
+      0.84,
+      'active',
+      JSON.stringify(sourceRefs),
+      JSON.stringify(metadata),
+      'daily_brief_v1',
+      id,
+      now,
+      now,
+      id,
+      date,
+      `${date}T20:00:00.000Z`
+    ]
+  ).catch((error) => {
+    console.warn('[daily-brief-node] Failed to persist semantic daily brief:', error?.message || error);
+  });
+
+  return { id, title };
+}
+
 function uniqById(items = []) {
   const out = [];
   const seen = new Set();
@@ -5455,6 +5510,7 @@ async function generateDailySummary() {
       generated_at:    new Date().toISOString()
     };
     store.set('historicalSummaries', historicalSummaries);
+    await persistDailyBriefSemanticNode(historicalSummaries[today]);
 
     // Update search index with today's data
     const newIndex = rebuildInvertedIndex(historicalSummaries);

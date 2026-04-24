@@ -1672,7 +1672,7 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
 
   const poolMap = new Map(pool.map(n => [n.id, n]));
 
-  const effectiveHopLimit = Math.min(3, Math.max(1, hopLimit || DEFAULT_HOP_LIMIT));
+  const effectiveHopLimit = Math.min(4, Math.max(1, hopLimit || DEFAULT_HOP_LIMIT));
 
   while (queue.length && expanded.length < maxExpanded) {
     const current = queue.shift();
@@ -1781,7 +1781,7 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
 
     neighbors
       .sort((a, b) => b.sort_score - a.sort_score)
-      .slice(0, 12)
+      .slice(0, 16)
       .forEach((item) => {
         if (seen.has(item.id)) return;
         seen.add(item.id);
@@ -2032,7 +2032,7 @@ async function buildHybridGraphRetrieval({
   const isChatMode = String(options.mode || retrievalPlan.mode || 'chat') === 'chat';
   const strictFunnel = economyMode || isChatMode;
   const perQueryVectorLimit = strictFunnel ? 8 : 16;
-  const primarySeedLimit = strictFunnel ? 4 : (economyMode ? 5 : 7);
+  const primarySeedLimit = strictFunnel ? 6 : (economyMode ? 5 : 8);
   const coreDownLimit = strictFunnel ? 18 : (economyMode ? 24 : 36);
   const coreToRawLimit = strictFunnel ? 12 : (economyMode ? 20 : 32);
   const recencyLimit = strictFunnel ? 8 : 14;
@@ -2047,10 +2047,10 @@ async function buildHybridGraphRetrieval({
   const wantsRawEvidence = retrievalPlan.summary_vs_raw === 'raw'
     || normalizeFilterList(retrievalPlan.filters?.data_source || retrievalPlan.metadata_filters?.data_source).some((item) => /raw|ocr|event|email_api|calendar_api|browser_history/.test(item))
     || normalizeFilterList(retrievalPlan.filters?.source_types || retrievalPlan.source_scope).some((item) => /communication|screen|capture|desktop|calendar|event|message|email/.test(item));
-  const rerankEvidenceCap = isChatMode ? (wantsRawEvidence ? 28 : 16) : (strictFunnel ? 30 : 50);
-  const packedEvidenceCap = isChatMode ? (wantsRawEvidence ? 10 : 5) : (strictFunnel ? 90 : 150);
-  const drilldownCap = isChatMode ? 32 : (strictFunnel ? 80 : 140);
-  const graphExpansionCap = isChatMode ? 24 : (strictFunnel ? 50 : (economyMode ? 70 : MAX_EXPANDED));
+  const rerankEvidenceCap = isChatMode ? (wantsRawEvidence ? 40 : 24) : (strictFunnel ? 30 : 50);
+  const packedEvidenceCap = isChatMode ? (wantsRawEvidence ? 14 : 8) : (strictFunnel ? 90 : 150);
+  const drilldownCap = isChatMode ? 48 : (strictFunnel ? 80 : 140);
+  const graphExpansionCap = isChatMode ? 36 : (strictFunnel ? 50 : (economyMode ? 70 : MAX_EXPANDED));
 
   const nodeRows = await loadMemoryNodeCandidates(retrievalPlan.filters);
   emit('candidates_loaded', 'completed', { count: nodeRows.length });

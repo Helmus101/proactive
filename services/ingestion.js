@@ -1099,6 +1099,170 @@ async function upsertIngestionSemanticNodes({ envelope = {}, entities = [], even
   }
 }
 
+function uniqStrings(items = [], limit = 64) {
+  return Array.from(new Set((items || []).filter(Boolean).map((item) => String(item).trim()).filter(Boolean))).slice(0, limit);
+}
+
+async function upsertSemanticMemoryNode({
+  id,
+  subtype = 'fact',
+  title = '',
+  summary = '',
+  canonicalText = '',
+  confidence = 0.72,
+  status = 'active',
+  sourceRefs = [],
+  metadata = {},
+  anchorAt = null,
+  graphVersion = 'memory_enrichment_v1'
+} = {}) {
+  if (!id || !title) return null;
+  const now = new Date().toISOString();
+  const normalizedAnchor = normalizeEventTimestamp(anchorAt || now);
+  const existing = await db.getQuery(
+    `SELECT id, source_refs, metadata, created_at FROM memory_nodes WHERE id = ? LIMIT 1`,
+    [id]
+  ).catch(() => null);
+  const existingSourceRefs = existing ? (() => {
+    try { return JSON.parse(existing.source_refs || '[]'); } catch (_) { return []; }
+  })() : [];
+  const existingMeta = existing ? (() => {
+    try { return JSON.parse(existing.metadata || '{}'); } catch (_) { return {}; }
+  })() : {};
+  const mergedSourceRefs = uniqStrings([...(existingSourceRefs || []), ...(sourceRefs || [])], 96);
+  const mergedMetadata = {
+    ...existingMeta,
+    ...metadata,
+    source_refs: mergedSourceRefs,
+    latest_activity_at: metadata.latest_activity_at || normalizedAnchor.iso
+  };
+
+  await db.runQuery(
+    `INSERT OR REPLACE INTO memory_nodes
+     (id, layer, subtype, title, summary, canonical_text, confidence, status, source_refs, metadata, graph_version, created_at, updated_at, embedding, anchor_date, anchor_at)
+     VALUES (?, 'semantic', ?, ?, ?, ?, ?, ?, ?, ?, ?,
+             COALESCE((SELECT created_at FROM memory_nodes WHERE id = ?), ?), ?,
+             COALESCE((SELECT embedding FROM memory_nodes WHERE id = ?), '[]'), ?, ?)`,
+    [
+      id,
+      subtype,
+      title,
+      summary,
+      canonicalText || `${title}\n${summary}`.trim(),
+      confidence,
+      status,
+      JSON.stringify(mergedSourceRefs),
+      JSON.stringify(mergedMetadata),
+      graphVersion,
+      id,
+      existing?.created_at || now,
+      now,
+      id,
+      normalizedAnchor.date,
+      normalizedAnchor.iso
+    ]
+  ).catch(() => {});
+
+  await upsertRetrievalDoc({
+    docId: `node:${id}`,
+    sourceType: 'node',
+    nodeId: id,
+    timestamp: normalizedAnchor.iso,
+    text: canonicalText || `${title}\n${summary}`.trim(),
+    metadata: {
+      layer: 'semantic',
+      subtype,
+      title,
+      source_refs: mergedSourceRefs,
+      ...mergedMetadata
+    }
+  }).catch(() => {});
+
+  return { id, source_refs: mergedSourceRefs, metadata: mergedMetadata };
+}
+
+async function upsertCurrentTaskNode({ envelope = {}, eventId = '', metadata = {} } = {}) {
+  const activitySummary = String(metadata.activity_summary || '').trim();
+  const compactText = String(metadata.compact_capture_text || '').trim();
+  const windowTitle = String(envelope.window_title || metadata.window_title || '').trim();
+  const app = String(envelope.app || metadata.app || metadata.source_app || '').trim();
+  const contentType = String(metadata.content_type || '').trim();
+  const activityType = String(metadata.activity_type || '').trim();
+  const title = activitySummary || compactText.split('\n')[0] || windowTitle;
+  if (!title) return null;
+
+  return upsertSemanticMemoryNode({
+    id: 'sem_current_task_active',
+    subtype: 'current_task',
+    title: 'Current task',
+    summary: title.slice(0, 220),
+    canonicalText: [
+      'Current task snapshot',
+      activitySummary ? `Activity: ${activitySummary}` : '',
+      app ? `App: ${app}` : '',
+      windowTitle ? `Window: ${windowTitle}` : '',
+      compactText
+    ].filter(Boolean).join('\n'),
+    confidence: 0.8,
+    status: 'active',
+    sourceRefs: [eventId],
+    anchorAt: envelope.occurred_at || metadata.occurred_at || metadata.timestamp || null,
+    graphVersion: 'current_task_v1',
+    metadata: {
+      app,
+      window_title: windowTitle,
+      content_type: contentType,
+      activity_type: activityType,
+      current_status: 'active',
+      task_label: title.slice(0, 220),
+      latest_activity_at: envelope.occurred_at || metadata.occurred_at || metadata.timestamp || new Date().toISOString()
+    }
+  });
+}
+
+async function upsertCalendarEventNode({ envelope = {}, eventId = '', metadata = {} } = {}) {
+  const title = String(envelope.title || metadata.title || '').trim();
+  if (!title) return null;
+  const attendees = uniqStrings([
+    ...(Array.isArray(envelope.participants) ? envelope.participants : []),
+    ...(Array.isArray(metadata.attendees) ? metadata.attendees.map((item) => item?.email || item?.displayName || item) : []),
+    metadata.organizer
+  ], 24);
+  const start = metadata.start_time || metadata.start || metadata.dateTime || envelope.occurred_at || metadata.occurred_at || null;
+  const end = metadata.end_time || metadata.end || null;
+  const location = String(metadata.location || '').trim();
+  const dateKey = normalizeEventTimestamp(start || envelope.occurred_at || Date.now()).date;
+  return upsertSemanticMemoryNode({
+    id: `sem_calendar_${crypto.createHash('sha1').update(String(eventId || `${title}|${dateKey}`)).digest('hex').slice(0, 18)}`,
+    subtype: 'calendar_event',
+    title,
+    summary: [start ? `Scheduled ${start}` : '', attendees.length ? `${attendees.length} attendee${attendees.length === 1 ? '' : 's'}` : '', location].filter(Boolean).join(' • '),
+    canonicalText: [
+      title,
+      start ? `Starts: ${start}` : '',
+      end ? `Ends: ${end}` : '',
+      location ? `Location: ${location}` : '',
+      attendees.length ? `Attendees: ${attendees.join(', ')}` : '',
+      String(metadata.description || '').trim()
+    ].filter(Boolean).join('\n'),
+    confidence: 0.86,
+    status: 'scheduled',
+    sourceRefs: [eventId],
+    anchorAt: start || envelope.occurred_at || null,
+    graphVersion: 'calendar_event_v1',
+    metadata: {
+      event_id: eventId || null,
+      start_time: start || null,
+      end_time: end || null,
+      location: location || null,
+      attendees,
+      app: envelope.app || metadata.app || 'Calendar',
+      source_type_group: 'calendar',
+      latest_activity_at: start || envelope.occurred_at || new Date().toISOString()
+    }
+  });
+}
+
 /**
  * Standardize an external payload into the universal L1 format and store in SQLite
  */
@@ -1344,6 +1508,22 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
         entities,
         eventId: id
       });
+    }
+
+    if (safeMetadata.data_source === 'screenshot_ocr' || /\bscreen|desktop|capture|sensor\b/i.test(`${type || ''} ${source || ''}`)) {
+      await upsertCurrentTaskNode({
+        envelope,
+        eventId: id,
+        metadata: safeMetadata
+      }).catch(() => {});
+    }
+
+    if ((envelope.type_group || safeMetadata.source_type_group) === 'calendar' || /\bcalendar\b/i.test(String(type || ''))) {
+      await upsertCalendarEventNode({
+        envelope,
+        eventId: id,
+        metadata: safeMetadata
+      }).catch(() => {});
     }
 
     try {

@@ -1595,14 +1595,14 @@ Would you like me to continue with more detail?` : content;
 
         // Final pass: render concise rich text (no markdown headings).
         const uiBlocks = typeof rawPayload === 'object' && rawPayload !== null ? (rawPayload.ui_blocks || []) : [];
-        message.innerHTML = this.renderAssistantHTML(bounded, retrieval, includeThinkingTrace ? thinkingTrace : null);
+        contentArea.innerHTML = this.renderAssistantHTML(bounded, retrieval, includeThinkingTrace ? thinkingTrace : null);
 
         // Append interactive action cards if present
         if (uiBlocks.length > 0) {
             const blocksContainer = document.createElement('div');
             blocksContainer.className = 'ui-blocks-container';
             blocksContainer.innerHTML = uiBlocks.map((block) => this.renderUICard(block)).join('');
-            message.appendChild(blocksContainer);
+            message.querySelector('.claude-message-body')?.appendChild(blocksContainer);
             blocksContainer.querySelectorAll('[data-action]').forEach((btn) => {
                 btn.addEventListener('click', () => {
                     try {
@@ -2245,17 +2245,26 @@ Would you like me to continue with more detail?` : content;
         const lines = cleaned.split('\n');
         const blocks = [];
         let i = 0;
+        let paragraphBuffer = [];
 
         const isTableSep = (line) => /^\s*\|?[\s:-]+\|[\s|:-]*$/.test(line);
+        const flushParagraphBuffer = () => {
+            if (!paragraphBuffer.length) return;
+            const text = paragraphBuffer.join(' ').trim();
+            if (text) blocks.push(`<p class="msg-p">${this.formatInlineMarkdown(text)}</p>`);
+            paragraphBuffer = [];
+        };
 
         while (i < lines.length) {
             const line = lines[i].trim();
             if (!line) {
+                flushParagraphBuffer();
                 i += 1;
                 continue;
             }
 
             if (/^```/.test(line)) {
+                flushParagraphBuffer();
                 const info = line.replace(/^```/, '').trim() || 'text';
                 i += 1;
                 const codeLines = [];
@@ -2279,26 +2288,29 @@ Would you like me to continue with more detail?` : content;
             }
 
             if (/^\s*[-*]\s+/.test(line)) {
+                flushParagraphBuffer();
                 const items = [];
                 while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
                     items.push(lines[i].replace(/^\s*[-*]\s+/, '').trim());
                     i += 1;
                 }
-                blocks.push(`<ul>${items.map((it) => `<li>${this.formatInlineMarkdown(it)}</li>`).join('')}</ul>`);
+                blocks.push(`<ul class="msg-list">${items.map((it) => `<li>${this.formatInlineMarkdown(it)}</li>`).join('')}</ul>`);
                 continue;
             }
 
             if (/^\s*\d+\.\s+/.test(line)) {
+                flushParagraphBuffer();
                 const items = [];
                 while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
                     items.push(lines[i].replace(/^\s*\d+\.\s+/, '').trim());
                     i += 1;
                 }
-                blocks.push(`<ol>${items.map((it) => `<li>${this.formatInlineMarkdown(it)}</li>`).join('')}</ol>`);
+                blocks.push(`<ol class="msg-list">${items.map((it) => `<li>${this.formatInlineMarkdown(it)}</li>`).join('')}</ol>`);
                 continue;
             }
 
             if (line.includes('|') && (i + 1 < lines.length) && isTableSep(lines[i + 1])) {
+                flushParagraphBuffer();
                 const header = line.split('|').map((s) => s.trim()).filter(Boolean);
                 i += 2; // skip header + separator
                 const rows = [];
@@ -2313,9 +2325,10 @@ Would you like me to continue with more detail?` : content;
                 continue;
             }
 
-            blocks.push(`<p class="msg-p">${this.formatInlineMarkdown(line)}</p>`);
+            paragraphBuffer.push(line);
             i += 1;
         }
+        flushParagraphBuffer();
 
         const traceHtml = this.renderAnimatedThinkingTrace(thinkingTrace || retrieval?.thinking_trace || null, retrieval);
         return `${traceHtml}<div class="msg-rich">${blocks.join('')}</div>`;

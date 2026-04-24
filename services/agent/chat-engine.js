@@ -1225,12 +1225,12 @@ async function executeParallelRetrieval(baseQuery, baseThought, options, onProgr
     ...((baseThought.semantic_queries || []).map((item) => String(item || '').trim())),
     ...((baseThought.message_queries || []).map((item) => String(item || '').trim()))
   ].filter(Boolean);
-  const maxParallelQueries = options?.economy ? 2 : 2;
+  const maxParallelQueries = options?.economy ? 2 : 3;
   const queries = Array.from(new Set(bundle)).slice(0, maxParallelQueries);
 
   // Detect when a query requires deep context (e.g., long-term relationship, patterns)
-  const requiresDeepContext = /\b(relationship|pattern|over the last|long-term|habit|habitual|recurring|years?|months?)\b/i.test(baseQuery);
-  const recursionDepth = (requiresDeepContext && !options.passiveOnly) ? 1 : 0;
+  const requiresDeepContext = /\b(relationship|relationships|pattern|patterns|over the last|long-term|habit|habitual|recurring|years?|months?|context|history|why|how does this connect|across|theme|trend|brief me|deep dive|go deeper)\b/i.test(baseQuery);
+  const recursionDepth = (requiresDeepContext && !options.passiveOnly) ? (options?.economy ? 1 : 2) : 0;
 
   // Parallel multi-agent dispatch
   const results = await Promise.allSettled(queries.map((q) => buildHybridGraphRetrieval({
@@ -1239,8 +1239,8 @@ async function executeParallelRetrieval(baseQuery, baseThought, options, onProgr
       ...options,
       retrieval_thought: { ...baseThought, semantic_queries: [q] }
     },
-    seedLimit: Math.max(3, Math.floor(8 / Math.max(1, queries.length))),
-    hopLimit: requiresDeepContext ? 3 : 2,
+    seedLimit: requiresDeepContext ? 8 : Math.max(4, Math.floor(12 / Math.max(1, queries.length))),
+    hopLimit: requiresDeepContext ? 4 : 3,
     recursionDepth,
     passiveOnly: options.passiveOnly || false,
     onProgress

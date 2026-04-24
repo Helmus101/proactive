@@ -1982,6 +1982,8 @@ body.compact-mode .suggestion-card {
 .msg-rich { display: flex; flex-direction: column; gap: 8px; }
 .msg-rich.compact { gap: 6px; }
 .msg-p { margin: 0; line-height: 1.55; }
+.msg-rich a { color: var(--accent-blue-strong); text-decoration: none; }
+.msg-rich a:hover { text-decoration: underline; }
 .msg-h2, .msg-h3, .msg-h4 { margin: 0; line-height: 1.25; color: var(--text-primary); }
 .msg-h2 { font-size: 16px; font-weight: 700; }
 .msg-h3 { font-size: 14px; font-weight: 650; }
@@ -8019,6 +8021,7 @@ body {
 .claude-message-content {
     padding: 18px 20px !important;
     line-height: 1.55 !important;
+    overflow-wrap: anywhere;
 }
 
 .claude-message.user .claude-message-content {
