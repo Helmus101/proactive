@@ -4,9 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Weave</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300..700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
     <link rel="stylesheet" href="styles.css">
 </head>
@@ -39,14 +36,21 @@
 
     <!-- Bottom Navigation -->
     <nav class="bottom-nav">
-        <button class="nav-pill active" id="nav-presence" data-view="presence-view" title="Home" aria-label="Home">
+        <button class="nav-pill active" id="nav-presence" data-view="presence-view" title="Radar" aria-label="Radar">
             <span class="material-symbols-outlined">home</span>
+            <span class="nav-pill-label">Radar</span>
+        </button>
+        <button class="nav-pill" id="nav-contacts" data-view="contacts-view" title="People" aria-label="People">
+            <span class="material-symbols-outlined">group</span>
+            <span class="nav-pill-label">People</span>
         </button>
         <button class="nav-pill" id="nav-action" data-view="action-view" title="Assistant" aria-label="Assistant">
             <span class="material-symbols-outlined">forum</span>
+            <span class="nav-pill-label">Assistant</span>
         </button>
         <button class="nav-pill" id="nav-settings" data-view="settings-view" title="Settings" aria-label="Settings">
             <span class="material-symbols-outlined">settings</span>
+            <span class="nav-pill-label">Settings</span>
         </button>
     </nav>
 
@@ -57,46 +61,43 @@
             <section id="presence-view" class="view active">
 
                 <div class="presence-layer" aria-live="polite">
-                    <div id="presence-state" class="presence-state">Home</div>
-                    <p id="presence-summary" class="presence-summary">Your work summary</p>
-                    <div class="today-snapshot" aria-label="Home status">
+                    <div id="presence-state" class="presence-state">Relationship radar</div>
+                    <p id="presence-summary" class="presence-summary">Who needs attention, why now, and what move to make next.</p>
+                    <div class="today-snapshot" aria-label="Relationship radar status">
                         <div class="today-snapshot-item">
                             <span id="today-open-count">0</span>
-                            <small>Active priorities</small>
+                            <small>All signals</small>
                         </div>
                         <div class="today-snapshot-item">
                             <span id="today-client-count">0</span>
-                            <small>Client items</small>
+                            <small>Relationship signals</small>
                         </div>
                         <div class="today-snapshot-item">
                             <span id="today-delivery-count">0</span>
-                            <small>Delivery</small>
+                            <small>To-do signals</small>
                         </div>
                     </div>
-                    <button id="presence-primary-action" class="presence-primary-action" type="button">Review priorities</button>
+                    <button id="presence-primary-action" class="presence-primary-action" type="button">Refresh radar</button>
                 </div>
 
                 <!-- Context Chips -->
                 <div class="context-chips">
-                    <button class="context-chip active" data-filter="all">All</button>
-                    <button class="context-chip" data-filter="client">Client work</button>
-                    <button class="context-chip" data-filter="delivery">Delivery</button>
-                    <button class="context-chip" data-filter="followups">Follow-ups</button>
+                    <button class="context-chip active" data-filter="all">All signals</button>
+                    <button class="context-chip" data-filter="relationships">Relationship signals</button>
+                    <button class="context-chip" data-filter="todos">To-do signals</button>
                 </div>
 
                 <div class="today-controls">
                     <button id="today-whisper-prompt" class="today-whisper-prompt" type="button" aria-label="Conversation starter">
-                        Ask about a client, project, or next step
+                        Ask who matters this week, what is cooling, or how to prepare for a conversation
                     </button>
                     <div class="today-controls-subtle">
-                        <button id="manual-generate-suggestions-btn" class="ghost-button" type="button">Refresh priorities</button>
-                        <button id="customize-today-btn" class="ghost-button" type="button">Customize today</button>
-                        <button id="clear-all-suggestions-btn" class="ghost-button" type="button">Clear priorities</button>
+                        <button id="manual-generate-suggestions-btn" class="ghost-button" type="button">Refresh radar</button>
+                        <button id="customize-today-btn" class="ghost-button" type="button">Expand radar</button>
                         <select id="focus-mode-select" class="ghost-select" aria-label="Choose conversation focus">
-                            <option value="all">All</option>
-                            <option value="client">Client work</option>
-                            <option value="delivery">Delivery</option>
-                            <option value="followups">Follow-ups</option>
+                            <option value="all">All signals</option>
+                            <option value="relationships">Relationship signals</option>
+                            <option value="todos">To-do signals</option>
                         </select>
                     </div>
                 </div>
@@ -107,8 +108,8 @@
                         <div class="empty-icon" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;">
                             <span class="material-symbols-outlined">lightbulb</span>
                         </div>
-                        <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">No urgent client work found</div>
-                        <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">Sync Google, refresh priorities, or ask Weave what needs attention.</div>
+                        <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">No relationship signals surfaced yet</div>
+                        <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">Sync Google, refresh the radar, or ask Weave who needs attention.</div>
                     </div>
                 </div>
 
@@ -116,31 +117,16 @@
                 <div id="execute-confirm-modal" class="modal-overlay hidden">
                     <div class="modal-content glass-card" style="max-width:520px;">
                         <div class="modal-header">
-                            <h3 id="confirm-modal-title">Run Priority</h3>
+                            <h3 id="confirm-modal-title">Run Next Move</h3>
                             <button class="close-modal" id="confirm-close-btn">✕</button>
                         </div>
                         <div class="modal-body" id="confirm-modal-body" style="font-size:13px; color:var(--text-primary);">
-                            <p id="confirm-modal-text">Review before running this automation for your client work.</p>
+                            <p id="confirm-modal-text">Review before running this relationship action.</p>
                         </div>
                         <div class="modal-footer" style="display:flex; gap:8px; justify-content:flex-end;">
                             <button class="pill-btn" id="confirm-cancel-btn">Cancel</button>
                             <button class="pill-btn pill-btn-primary" id="confirm-run-btn">Run</button>
                         </div>
-                    </div>
-                </div>
-
-                <div id="morning-brief-modal" class="modal-overlay hidden">
-                    <div class="modal-content morning-brief-doc-shell">
-                        <div class="morning-brief-doc-toolbar">
-                            <div class="morning-brief-doc-toolbar-left">
-                                <h3 class="morning-brief-doc-title">Morning Brief</h3>
-                                <div id="morning-brief-list" class="morning-brief-doc-nav"></div>
-                            </div>
-                            <button class="close-modal morning-brief-doc-close" id="morning-brief-close-btn">Close</button>
-                        </div>
-                        <section class="morning-brief-doc-panel">
-                            <article id="morning-brief-content" class="morning-brief-doc-content"></article>
-                        </section>
                     </div>
                 </div>
 
@@ -151,18 +137,27 @@
                 <div class="contacts-container">
                     <div class="contacts-list-panel">
                         <div class="contacts-header">
-                            <h2>Contacts</h2>
+                            <h2>People</h2>
                             <button class="icon-btn" id="sync-contacts-btn" title="Sync Contacts">
                                 <span class="material-symbols-outlined">sync</span>
                             </button>
                         </div>
-                        <input type="search" id="contacts-search" class="contacts-search" placeholder="Search contacts..." />
+                        <div class="contacts-controls">
+                            <input type="search" id="contacts-search" class="contacts-search" placeholder="Search people, companies, or roles..." />
+                            <select id="contacts-sort" class="ghost-select contacts-sort" aria-label="Choose people sort">
+                                <option value="cooling">Cooling first</option>
+                                <option value="strongest">Strongest ties</option>
+                                <option value="recent">Recently active</option>
+                                <option value="bridges">Bridge nodes</option>
+                                <option value="new">Newest</option>
+                            </select>
+                        </div>
                         <div id="contacts-items" class="contacts-items">
                             <div class="empty-state" style="text-align: center; padding: 40px 20px;">
                                 <div class="empty-icon" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;">
                                     <span class="material-symbols-outlined">group</span>
                                 </div>
-                                <div class="empty-text">No contacts found</div>
+                                <div class="empty-text">No people found</div>
                             </div>
                         </div>
                     </div>
@@ -170,7 +165,7 @@
                     <div class="contact-detail-panel">
                         <div id="contact-detail" class="contact-detail-empty">
                             <div style="text-align: center; padding: 60px 20px; color: var(--text-tertiary);">
-                                Select a contact to view details and suggested actions
+                                Select a person to inspect relationship context, network signals, and the recommended next move
                             </div>
                         </div>
                     </div>
@@ -205,25 +200,21 @@
                         </div>
                     </div>
 
-                    <div class="settings-card" style="margin-top: 24px;">
-                        <div class="settings-row" style="align-items: flex-start; gap: 16px;">
-                            <div style="flex: 1; min-width: 0;">
-                                <div class="settings-label">Daily OCR export</div>
-                                <div class="settings-description">Review and copy the work-context text captured today.</div>
-                                <div id="daily-ocr-meta" class="history-row-meta" style="margin-top: 10px;">Loading today's OCR…</div>
+                    <div class="settings-group-heading">
+                        <h2>People</h2>
+                        <p>Apple Contacts is the source of truth for people in Weave.</p>
+                    </div>
+                    <div class="settings-card" style="margin-top: 16px;">
+                        <div class="settings-row" style="align-items: flex-start;">
+                            <div>
+                                <div class="settings-label">Apple Contacts sync</div>
+                                <div class="settings-description">Import Apple Contacts as people in Weave. Messages, meetings, and notes can then be attached to those contact nodes over time.</div>
+                                <div id="apple-contacts-sync-status" class="history-row-meta" style="margin-top: 10px;">Not synced in this session.</div>
                             </div>
-                            <div class="settings-control" style="display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end;">
-                                <button id="refresh-daily-ocr-btn" class="pill-btn" type="button">Refresh</button>
-                                <button id="copy-daily-ocr-btn" class="pill-btn pill-btn-primary" type="button">Copy Today's OCR</button>
+                            <div class="settings-control">
+                                <button id="sync-apple-contacts-btn" class="pill-btn pill-btn-primary" type="button">Sync Apple Contacts</button>
                             </div>
                         </div>
-                        <textarea
-                            id="daily-ocr-text"
-                            class="chat-input"
-                            readonly
-                            placeholder="Today's frontmost-window OCR will appear here."
-                            style="margin-top: 16px; min-height: 220px; resize: vertical; white-space: pre-wrap;"
-                        ></textarea>
                     </div>
 
                     <div class="settings-group-heading">
@@ -249,9 +240,9 @@
                 <div class="chat-panel">
                     <aside class="chat-history-panel">
                         <div class="chat-history-header">
-                            <div class="settings-label">Assistant threads</div>
+                            <div class="settings-label">Relationship threads</div>
                             <div style="display:flex; gap:8px; align-items:center;">
-                                <button class="ghost-button" id="chat-refresh-priorities-btn" type="button">Refresh priorities</button>
+                                <button class="ghost-button" id="chat-refresh-priorities-btn" type="button">Refresh radar</button>
                                 <button class="ghost-button" id="new-chat-btn">New thread</button>
                             </div>
                         </div>
@@ -272,23 +263,28 @@
                                 </div>
                                 <div id="chat-sync-status" class="sync-status-mini chat-sync-quiet" aria-label="Work memory status">
                                     <span class="sync-dot"></span>
-                                    <span class="sync-text">Work memory updated</span>
+                                    <span class="sync-text">Relationship memory updated</span>
                                 </div>
                             </div>
                         </div>
                         <div class="chat-container">
                             <div class="chat-messages claude-chat-messages" id="chat-messages">
                                 <div class="claude-empty-state">
-                                    <div class="claude-empty-kicker">ASSISTANT</div>
-                                    <h2 class="claude-empty-title">Ask about your work</h2>
-                                    <p class="claude-empty-sub">Ask Weave about client history, open work, meetings, or follow-ups.</p>
+                                    <div class="claude-empty-kicker">Weave</div>
+                                    <h2 class="claude-empty-title">Ask about the people around your work</h2>
+                                    <p class="claude-empty-sub">Weave should feel like a calm, sharp partner. Ask for a judgment, a briefing, a reconnect note, or the real context behind a relationship.</p>
+                                    <div class="chat-starter-grid" aria-hidden="true">
+                                        <span class="pill-btn">Who is going cold?</span>
+                                        <span class="pill-btn">Who should I reach out to this week?</span>
+                                        <span class="pill-btn">Brief me on Sarah before our call</span>
+                                    </div>
                                 </div>
                             </div>
                             <div class="claude-chat-input-wrap">
                                 <div class="claude-composer">
                                     <textarea 
                                         id="chat-input" 
-                                        placeholder="Ask about a client, project, meeting, or next step"
+                                        placeholder="Ask for a real judgment, a meeting brief, or the right next move with someone"
                                         rows="1"
                                     ></textarea>
                                     <div class="claude-composer-footer">
@@ -315,17 +311,17 @@
             <div id="add-task-modal" class="modal-overlay hidden">
                 <div class="modal-content glass-card">
                     <div class="modal-header">
-                        <h3>Add Priority</h3>
+                        <h3>Add Relationship Signal</h3>
                         <button class="close-modal" id="close-modal-btn">✕</button>
                     </div>
                     <div class="modal-body">
-                        <input type="text" id="task-title-input" placeholder="What client work needs attention?">
+                        <input type="text" id="task-title-input" placeholder="Which person, intro, or follow-up needs attention?">
                         <textarea id="task-desc-input" placeholder="Add details or context (optional)"></textarea>
                 <div class="modal-options">
                     <select id="task-priority-select">
-                        <option value="low">Low Priority</option>
-                        <option value="medium" selected>Medium Priority</option>
-                        <option value="high">High Priority</option>
+                        <option value="low">Low urgency</option>
+                        <option value="medium" selected>Medium urgency</option>
+                        <option value="high">High urgency</option>
                     </select>
                     <div class="toggle-wrap">
                         <input type="checkbox" id="task-ai-toggle">
@@ -335,7 +331,7 @@
             </div>
                     <div class="modal-footer">
                         <button class="pill-btn" id="cancel-task-btn">Cancel</button>
-                        <button class="pill-btn pill-btn-primary" id="save-task-btn">Add priority</button>
+                        <button class="pill-btn pill-btn-primary" id="save-task-btn">Add signal</button>
                     </div>
             </div>
         </div>

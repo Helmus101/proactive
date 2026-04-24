@@ -28,14 +28,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onPuppeteerWaiting: (callback) => ipcRenderer.on('puppeteer-waiting', (_e, payload) => callback(payload)),
 
   // Suggestions store
+  getRadarState: () => ipcRenderer.invoke('get-radar-state'),
   getSuggestions: () => ipcRenderer.invoke('get-suggestions'),
   saveSuggestions: (suggestions) => ipcRenderer.invoke('save-suggestions', suggestions),
-  clearSuggestions: () => ipcRenderer.invoke('clear-suggestions'),
   triggerSuggestionRefresh: (payload = {}) => ipcRenderer.invoke('trigger-suggestion-refresh', payload),
   runSuggestionEngine: (payload) => ipcRenderer.invoke('run-suggestion-engine', payload),
   logAutomation: (record) => ipcRenderer.invoke('log-automation', record),
-  getMorningBriefs: () => ipcRenderer.invoke('get-morning-briefs'),
-  generateMorningBrief: (opts) => ipcRenderer.invoke('generate-morning-brief', opts || {}),
 
   // Todos
   getPersistentTodos: () => ipcRenderer.invoke('get-persistent-todos'),
@@ -106,7 +104,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveSuggestionLLMSettings: (payload) => ipcRenderer.invoke('save-suggestion-llm-settings', payload || {}),
   getRelationshipContacts: (payload = {}) => ipcRenderer.invoke('get-relationship-contacts', payload),
   getRelationshipContactDetail: (contactId) => ipcRenderer.invoke('get-relationship-contact-detail', contactId),
+  updatePersonProfile: (payload = {}) => ipcRenderer.invoke('update-person-profile', payload),
   generateRelationshipDraft: (payload = {}) => ipcRenderer.invoke('generate-relationship-draft', payload),
+  syncAppleContacts: (payload = {}) => ipcRenderer.invoke('sync-apple-contacts', payload),
 
   // Chat sessions: allow renderer to push sessions to main for long-term memory ingestion
   saveChatSessionsToMemory: (sessions) => ipcRenderer.invoke('save-chat-sessions-to-memory', sessions),
@@ -140,7 +140,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onPlannerStep:        (cb) => ipcRenderer.on('planner-step',         (_e, data) => cb(data)),
   onMemoryGraphUpdate:  (cb) => ipcRenderer.on('memory-graph-update',  (_e, data) => cb(data)),
   onProactiveSuggestions: (cb) => ipcRenderer.on('proactive-suggestions', (_e, suggestions) => cb(suggestions)),
-  onMorningBriefUpdated: (cb) => ipcRenderer.on('morning-brief-updated', (_e, brief) => cb(brief)),
   onVoiceCommandToggle: (cb) => ipcRenderer.on('voice-command-toggle', (_e, payload) => cb(payload)),
   onVoiceSessionUpdate: (cb) => ipcRenderer.on('voice-session-update', (_e, payload) => cb(payload)),
   removeAllListeners:   (channel) => ipcRenderer.removeAllListeners(channel),

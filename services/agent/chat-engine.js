@@ -883,18 +883,18 @@ async function buildActionableTodoEvidence({ query = '', apiKey = null, options 
   let suggestions = [];
   if (apiKey) {
     try {
-      const { generateTopTodosFromMemoryQuery } = require('./suggestion-engine');
-      suggestions = await generateTopTodosFromMemoryQuery({
-        provider: 'deepseek',
-        apiKey,
-        model: 'deepseek-chat'
-      }, {
-        query: 'Look through my memory and generate top 7 todos or actions I need to do right now.',
-        standing_notes: options?.standing_notes || options?.core_memory || '',
-        study_context: options?.study_context || null
+      const { buildRadarState } = require('./radar-engine');
+      const radar = await buildRadarState({
+        llmConfig: {
+          provider: 'deepseek',
+          apiKey,
+          model: 'deepseek-chat'
+        },
+        manualTodos: []
       });
+      suggestions = Array.isArray(radar?.allSignals) ? radar.allSignals : [];
     } catch (error) {
-      console.warn('[ChatTasks] Failed to generate top todos:', error?.message || error);
+      console.warn('[ChatTasks] Failed to generate radar-backed task evidence:', error?.message || error);
     }
   }
   if (!Array.isArray(suggestions) || !suggestions.length) {
@@ -2158,7 +2158,13 @@ async function runSynthesizerStage({ query, retrieval, chatHistory, standingNote
   })();
 
   const prompt = `[System]
-Weave assistant. Conversational, grounded, direct, concise. No invented facts.
+You are Weave, a relationship-intelligence copilot. Your tone is warm, capable, calm, and direct.
+Behave like a thoughtful operator with strong judgment, not a generic chatbot and not a yes-man.
+Tell the user when their framing is weak, when evidence is thin, or when a recommendation has tradeoffs.
+Use plain ASCII punctuation only. No invented facts. No hype. No therapy language. No urgency theater.
+If evidence is incomplete, say so clearly and separate what is known from what is inferred.
+Prefer specific names, dates, and supporting details from grounded context over generic advice.
+When useful, give a short answer first, then the reasoning, then the best next move.
 Answer mode: ${policy.answerMode}.
 
 Mode rules:
@@ -2172,6 +2178,9 @@ When the answer can be developed, write at least ${policy.minWords} words. Start
 Do not create contacts, automations, external actions, or UI cards unless the user explicitly asks you to create/save them and the runtime actually supports that action.
 Do not output XML tags or tool instructions.
 Answer strictly from the grounded memory/web context in <context_memory>. If evidence is missing, clearly say what is missing and ask one concise follow-up question.
+If the user asks for strategy, recommendations, prioritization, or interpretation, make a real judgment instead of hedging across every option.
+If the user asks for a draft, make it sound natural and specific to the relationship context rather than polished marketing copy.
+If the request is complex, you may open with one short orienting sentence before the main answer, but do not add filler acknowledgments.
 
 [Grounded Context]
 ${contextMemoryXml}

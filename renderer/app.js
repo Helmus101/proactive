@@ -3,6 +3,8 @@
 class WeaveApp {
     constructor() {
         this.todos = [];
+        this.radarState = { allSignals: [], relationshipSignals: [], todoSignals: [], sections: {} };
+        this.manualTodos = [];
         this.contacts = [];
         this.selectedContact = null;
         this.currentFilter = 'all';
@@ -15,8 +17,6 @@ class WeaveApp {
         this.suggestionRefreshInFlight = null;
         this.lastReasoning = null;
         this.memorySearchResults = [];
-        this.morningBriefs = [];
-        this.activeBriefId = null;
         this.voiceControlEnabled = true;
         this.voiceSession = null;
         this.voiceRecorder = null;
@@ -34,6 +34,8 @@ class WeaveApp {
         this.chatHistoryCollapsed = localStorage.getItem('chatHistoryCollapsed') === 'true';
         this.presenceMode = 'waiting';
         this.contactsLoaded = false;
+        this.chatSessions = [];
+        this.activeChatId = null;
         this.settingsDataLoaded = false;
         this.settingsDataLoading = null;
         this.init();
@@ -48,30 +50,22 @@ class WeaveApp {
         this.setupMicroInteractions();
         this.setupNavigation();
         this.setupSuggestions();
-        await this.setupChat();
+        this.setupChat();
         this.setupContactsView();
         this.setupSettings();
         this.setupLibrary();
-        window.electronAPI.onProactiveSuggestions?.((suggestions) => {
-            const normalized = this.normalizeTodos(suggestions || []);
-            this.todos = normalized.filter((todo) => !todo.completed);
-            window.electronAPI.savePersistentTodos(this.todos).catch(() => {});
+        window.electronAPI.onProactiveSuggestions?.((payload) => {
+            this.applyRadarState(payload);
             this.renderSuggestions();
-        });
-        window.electronAPI.onMorningBriefUpdated?.((brief) => {
-            if (!brief) return;
-            this.morningBriefs = [brief, ...(this.morningBriefs || []).filter((b) => b.id !== brief.id)].slice(0, 60);
-            if (!this.activeBriefId) this.activeBriefId = brief.id;
-            this.renderSuggestions();
-            this.renderMorningBriefList();
-            this.showMorningBrief(this.activeBriefId);
         });
         window.electronAPI.onPlannerStep?.((payload) => this.handlePlannerStep(payload));
         window.electronAPI.onMemoryGraphUpdate?.((payload) => this.handleMemoryGraphUpdate(payload));
         window.electronAPI.onVoiceCommandToggle?.((payload) => this.handleVoiceCommandToggle(payload));
         window.electronAPI.onVoiceSessionUpdate?.((payload) => this.handleVoiceSessionUpdate(payload));
         window.electronAPI.onAutomationResult?.((payload) => this.handleAutomationResult(payload));
-        await this.loadInitialData();
+        this.loadInitialData().catch((error) => {
+            console.error('Failed to finish deferred startup:', error);
+        });
         setInterval(() => {
             if (document.hidden) return;
             this.updateChatSyncStatus();
@@ -103,6 +97,8 @@ class WeaveApp {
         this.dailyOcrText = document.getElementById('daily-ocr-text');
         this.copyDailyOcrButton = document.getElementById('copy-daily-ocr-btn');
         this.refreshDailyOcrButton = document.getElementById('refresh-daily-ocr-btn');
+        this.appleContactsSyncButton = document.getElementById('sync-apple-contacts-btn');
+        this.appleContactsSyncStatus = document.getElementById('apple-contacts-sync-status');
         this.desktopTestStatus = document.getElementById('desktop-test-status');
         this.desktopPromptStatus = document.getElementById('desktop-prompt-status');
         this.desktopPromptInput = document.getElementById('desktop-prompt-input');
@@ -120,11 +116,7 @@ class WeaveApp {
         this.memoryResults = document.getElementById('memory-explorer-results');
         this.memorySearchInput = document.getElementById('memory-search-input');
         this.memoryFilterType = document.getElementById('memory-filter-type');
-        this.morningBriefModal = document.getElementById('morning-brief-modal');
-        this.morningBriefList = document.getElementById('morning-brief-list');
-        this.morningBriefContent = document.getElementById('morning-brief-content');
         this.manualGenerateSuggestionsButton = document.getElementById('manual-generate-suggestions-btn');
-        this.clearAllSuggestionsButton = document.getElementById('clear-all-suggestions-btn');
         this.focusModeSelect = document.getElementById('focus-mode-select');
         this.customizeTodayButton = document.getElementById('customize-today-btn');
         this.todayWhisperPrompt = document.getElementById('today-whisper-prompt');
@@ -137,6 +129,7 @@ class WeaveApp {
         this.toggleChatHistoryButton = document.getElementById('toggle-chat-history-btn');
         this.chatView = document.getElementById('action-view');
         this.chatSyncStatus = document.getElementById('chat-sync-status');
+        this.contactsSort = document.getElementById('contacts-sort');
         this.suggestionProviderSelect = document.getElementById('suggestion-llm-provider');
         this.suggestionModelInput = document.getElementById('suggestion-llm-model');
         this.suggestionBaseUrlInput = document.getElementById('suggestion-llm-base-url');
@@ -151,26 +144,63 @@ class WeaveApp {
         this.librarySearchButton = document.getElementById("library-search-btn");
         this.librarySearchQueries = document.getElementById("library-search-queries");
         this.settingsGraphContainer = document.getElementById("settings-graph-container");
-    this.deleteAllDataButton = document.getElementById('delete-all-data-btn');
+        this.deleteAllDataButton = document.getElementById('delete-all-data-btn');
+    }
+
+    nextFrame() {
+        return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+    }
+
+    deferTask(task, delay = 0, label = 'background task') {
+        window.setTimeout(() => {
+            Promise.resolve()
+                .then(() => task())
+                .catch((error) => console.error(`Failed ${label}:`, error));
+        }, delay);
     }
 
     async loadInitialData() {
         try {
-            this.todos = (await window.electronAPI.getPersistentTodos()) || [];
+            this.applyRadarState(await window.electronAPI.getRadarState());
         } catch (error) {
-            console.error('Failed to load suggestions:', error);
+            console.error('Failed to load radar state:', error);
             this.todos = [];
         }
-
-        if (!this.getVisibleTodos().length) {
-            await this.generateSuggestions({ replace: true, silent: true });
-        } else {
-            this.renderSuggestions();
+        try {
+            this.manualTodos = ((await window.electronAPI.getPersistentTodos()) || []).filter((todo) => this.isRegularTodo(todo));
+        } catch (error) {
+            console.error('Failed to load regular tasks:', error);
+            this.manualTodos = [];
         }
 
-        await this.loadGreetingContext();
-        await this.loadGoogleStatus();
-        await this.loadMorningBriefs();
+        this.renderSuggestions();
+        await this.nextFrame();
+
+        if (!this.getVisibleTodos().length) {
+            this.deferTask(
+                () => this.generateSuggestions({ replace: true, silent: true }),
+                120,
+                'startup radar refresh'
+            );
+        }
+
+        this.deferTask(() => this.loadGreetingContext(), 0, 'greeting context');
+        this.deferTask(() => this.loadGoogleStatus(), 120, 'Google status');
+    }
+
+    applyRadarState(payload = {}) {
+        const state = payload && !Array.isArray(payload) ? payload : { allSignals: payload || [] };
+        const relationshipSignals = this.normalizeTodos(state.relationshipSignals || (state.allSignals || []).filter((item) => String(item.signal_type || '').toLowerCase() === 'relationship'));
+        const todoSignals = this.normalizeTodos(state.todoSignals || (state.allSignals || []).filter((item) => String(item.signal_type || '').toLowerCase() === 'todo'));
+        const allSignals = this.normalizeTodos(state.allSignals || [...relationshipSignals, ...todoSignals]);
+        this.radarState = {
+            generated_at: state.generated_at || null,
+            allSignals,
+            relationshipSignals,
+            todoSignals,
+            sections: state.sections || {}
+        };
+        this.todos = allSignals.filter((todo) => !todo.completed);
     }
 
     async loadGreetingContext() {
@@ -238,9 +268,6 @@ class WeaveApp {
         this.refreshButton?.addEventListener('click', triggerRefresh);
         this.manualGenerateSuggestionsButton?.addEventListener('click', triggerRefresh);
         this.presencePrimaryAction?.addEventListener('click', triggerRefresh);
-        this.clearAllSuggestionsButton?.addEventListener('click', async () => {
-            await this.clearAllSuggestions();
-        });
         this.focusModeSelect?.addEventListener('change', async () => {
             const value = this.focusModeSelect.value || 'all';
             this.currentFilter = value;
@@ -252,7 +279,7 @@ class WeaveApp {
         this.customizeTodayButton?.addEventListener('click', () => {
             this.showExtendedToday = !this.showExtendedToday;
             localStorage.setItem('showExtendedToday', String(this.showExtendedToday));
-            this.showToast(this.showExtendedToday ? 'Expanded today view' : 'Focused today view');
+            this.showToast(this.showExtendedToday ? 'Expanded radar view' : 'Focused radar view');
             this.renderSuggestions();
         });
 
@@ -268,7 +295,7 @@ class WeaveApp {
                 await this.generateSuggestions({ replace: true, silent: false, forceEngineRefresh: true });
             } catch (err) {
                 console.error('[Renderer] fallback generateSuggestions handler failed:', err);
-                try { this.showToast('Priority refresh failed'); } catch (_) {}
+                try { this.showToast('Radar refresh failed'); } catch (_) {}
             }
         });
 
@@ -331,15 +358,10 @@ class WeaveApp {
                 return;
             }
 
-            if (action === 'brief-open') {
+            const regularTaskAction = event.target.closest('[data-regular-task-action]');
+            if (regularTaskAction) {
                 event.stopPropagation();
-                this.openMorningBriefModal();
-                return;
-            }
-
-            if (action === 'brief-archive') {
-                event.stopPropagation();
-                this.openMorningBriefModal();
+                await this.completeRegularTask(regularTaskAction.dataset.regularTaskId);
                 return;
             }
 
@@ -364,13 +386,9 @@ class WeaveApp {
             this.suggestionAutoTimer = window.setInterval(() => {
                 if (document.hidden) return;
                 this.generateSuggestions({ replace: false, silent: true }).catch(() => {});
-            }, 60 * 60 * 1000);
+            }, 20 * 60 * 1000);
         }
 
-        document.getElementById('morning-brief-close-btn')?.addEventListener('click', () => this.closeMorningBriefModal());
-        this.morningBriefModal?.addEventListener('click', (event) => {
-            if (event.target?.id === 'morning-brief-modal') this.closeMorningBriefModal();
-        });
     }
 
     async withTimeout(promise, timeoutMs, label = 'operation') {
@@ -394,21 +412,11 @@ class WeaveApp {
         }
         this.setPresenceMode('thinking');
 
-        const activeSuggestions = (Array.isArray(this.todos) ? this.todos : []).filter((todo) => !todo?.completed);
-        const remainingCapacity = Math.max(0, 7 - activeSuggestions.length);
-
-        if (remainingCapacity <= 0) {
-            if (!silent) this.showToast('You already have 7 active priorities');
-            this.renderSuggestions();
-            this.setPresenceMode('waiting');
-            return;
-        }
-
         if (!silent) {
             this.remindersList.innerHTML = this.emptyStateHTML(
                 'refresh',
-                'Refreshing priorities...',
-                'Reviewing recent client work, meetings, and open loops.'
+                'Refreshing relationship radar...',
+                'Reviewing recent conversations, follow-ups, and meeting context.'
             );
         }
 
@@ -422,13 +430,11 @@ class WeaveApp {
                     20000,
                     'triggerSuggestionRefresh'
                 );
-                if (Array.isArray(refreshResult?.suggestions) && refreshResult.suggestions.length) {
-                    const normalizedRefreshed = this.normalizeTodos(refreshResult.suggestions);
-                    this.todos = this.mergeTodos(replace ? [] : this.todos, normalizedRefreshed).filter((todo) => !todo.completed).slice(0, 7);
-                    await this.withTimeout(window.electronAPI.savePersistentTodos(this.todos), 5000, 'savePersistentTodos');
+                if (refreshResult?.radarState || Array.isArray(refreshResult?.suggestions)) {
+                    this.applyRadarState(refreshResult.radarState || { allSignals: refreshResult.suggestions || [] });
                     this.renderSuggestions();
                     this.setPresenceMode('suggesting');
-                    if (!silent) this.showToast('Priorities refreshed from memory');
+                    if (!silent) this.showToast('Radar refreshed from relationship memory');
                     return;
                 }
             }
@@ -437,31 +443,19 @@ class WeaveApp {
                 throw new Error('electronAPI.generateProactiveTodos is not available');
             }
             const generated = await this.withTimeout(
-                window.electronAPI.generateProactiveTodos({
-                    maxNewSuggestions: remainingCapacity,
-                    activeSuggestionCount: activeSuggestions.length
-                }),
+                window.electronAPI.generateProactiveTodos({}),
                 20000,
                 'generateProactiveTodos'
             );
             console.debug('[Renderer] generateSuggestions received', Array.isArray(generated) ? `${generated.length} items` : typeof generated);
-            const normalized = this.normalizeTodos(generated);
-
-            if (replace && !activeSuggestions.length) {
-                this.todos = normalized;
-            } else {
-                this.todos = this.mergeTodos(this.todos, normalized);
-            }
-            this.todos = this.todos.filter((todo) => !todo.completed).slice(0, 7);
-
-            await this.withTimeout(window.electronAPI.savePersistentTodos(this.todos), 5000, 'savePersistentTodos');
+            this.applyRadarState({ allSignals: generated || [] });
             this.renderSuggestions();
             this.setPresenceMode('suggesting');
         };
 
         this.suggestionRefreshInFlight = run().catch((error) => {
             console.error('Failed to generate suggestions:', error);
-            this.showToast('Priority refresh failed');
+            this.showToast('Radar refresh failed');
             this.renderSuggestions();
             this.setPresenceMode('waiting');
         }).finally(() => {
@@ -474,14 +468,13 @@ class WeaveApp {
     async clearAllSuggestions() {
         try {
             this.todos = [];
+            this.radarState = { allSignals: [], relationshipSignals: [], todoSignals: [], sections: {} };
             this.expandedCards.clear();
-            await window.electronAPI.savePersistentTodos([]);
-            await window.electronAPI.clearSuggestions?.();
             this.renderSuggestions();
-            this.showToast('All priorities cleared');
+            this.showToast('Radar reset');
         } catch (error) {
             console.error('Failed to clear all suggestions:', error);
-            this.showToast('Failed to clear priorities');
+            this.showToast('Failed to reset radar');
         }
     }
 
@@ -515,7 +508,7 @@ class WeaveApp {
                     : '';
                 return {
                     id: item.id || `suggestion_${Date.now()}_${index}`,
-                    title: compact(item.title || 'Untitled priority', 62),
+                    title: compact(item.title || 'Untitled signal', 62),
                     description: compact(item.description || item.body || whyNow || 'No extra context yet.', 88),
                     intent: compact(item.intent || item.description || '', 88),
                     reason: compact(item.reason || item.description || '', 88),
@@ -597,46 +590,73 @@ class WeaveApp {
         if (!this.remindersList) return;
 
         const visibleTodos = this.getVisibleTodos();
-        const briefBanner = this.renderMorningBriefBanner();
         this.remindersList.classList.remove('today-dissolve');
         void this.remindersList.offsetWidth;
         this.remindersList.classList.add('today-dissolve');
         this.updatePresenceSummary(visibleTodos);
 
         if (!visibleTodos.length) {
-            this.remindersList.innerHTML = briefBanner + this.emptyStateHTML(
+            this.remindersList.innerHTML = this.emptyStateHTML(
                 'task_alt',
-                'No urgent client work found',
-                'Sync Google, refresh priorities, or ask Weave what needs attention.'
-            );
+                'No signals surfaced yet',
+                'Refresh the radar, sync Apple Contacts, or ask Weave what matters now.'
+            ) + this.renderRegularTodosSection();
             this.setPresenceMode('waiting');
             return;
         }
-
-        const primaryNow = visibleTodos.slice(0, 1);
-        const supportingNow = visibleTodos.slice(1, 3);
-        const extraTasks = visibleTodos.slice(3, 7);
         this.setPresenceMode('suggesting');
 
-        const section = (items, offset = 0) => {
+        const section = (label, items, offset = 0) => {
             if (!items.length) return '';
             return `
-                <div class="study-suggestion-group conversation-stream">
+                <section class="study-suggestion-group conversation-stream">
+                    <div class="regular-tasks-header" style="margin-bottom: 10px;">
+                        <div class="regular-tasks-kicker">${this.escapeHtml(label)}</div>
+                    </div>
                     ${items.map((todo, index) => this.renderSuggestionCard(todo, index + offset)).join('')}
-                </div>
+                </section>
             `;
         };
+        const regularTasks = this.renderRegularTodosSection();
 
-        const moreContent = [
-            section(supportingNow, 1),
-            section(extraTasks, 3)
-        ].join('');
+        if (this.currentFilter === 'all') {
+            const relationshipSignals = (this.radarState.relationshipSignals || []).filter((todo) => !todo.completed && (!todo.snoozedUntil || Number(todo.snoozedUntil) <= Date.now())).slice(0, this.showExtendedToday ? 5 : 3);
+            const todoSignals = (this.radarState.todoSignals || []).filter((todo) => !todo.completed && (!todo.snoozedUntil || Number(todo.snoozedUntil) <= Date.now())).slice(0, this.showExtendedToday ? 5 : 3);
+            this.remindersList.innerHTML = `
+                ${section('Top relationship moves', relationshipSignals, 0)}
+                ${section('Top to-dos', todoSignals, relationshipSignals.length)}
+                ${regularTasks}
+            `;
+            return;
+        }
 
         this.remindersList.innerHTML = `
-            ${briefBanner}
-            ${section(primaryNow, 0)}
-            ${moreContent && !this.showExtendedToday ? '<div class="today-more-wrap"><button class="pill-btn" type="button" data-action="toggle-more">Show more</button></div>' : ''}
-            ${this.showExtendedToday ? `<div class="today-more-block">${moreContent}<div class="today-more-wrap"><button class="pill-btn" type="button" data-action="toggle-more">Show less</button></div></div>` : ''}
+            ${section(this.currentFilter === 'relationships' ? 'Relationship signals' : 'To-do signals', visibleTodos, 0)}
+            ${regularTasks}
+        `;
+    }
+
+    renderRegularTodosSection() {
+        const tasks = (this.manualTodos || []).filter((todo) => !todo?.completed).slice(0, 4);
+        if (!tasks.length) return '';
+        return `
+            <section class="regular-tasks-section">
+                <div class="regular-tasks-header">
+                    <div class="regular-tasks-kicker">Regular tasks</div>
+                    <div class="regular-tasks-title">Manual to-dos</div>
+                </div>
+                <div class="regular-task-list">
+                    ${tasks.map((todo) => `
+                        <article class="regular-task-item" data-regular-task-id="${this.escapeHtml(todo.id)}">
+                            <div class="regular-task-copy">
+                                <div class="regular-task-name">${this.escapeHtml(todo.title || 'Untitled task')}</div>
+                                ${todo.description || todo.reason ? `<div class="regular-task-meta">${this.escapeHtml(todo.description || todo.reason || '')}</div>` : ''}
+                            </div>
+                            <button class="pill-btn" type="button" data-regular-task-action="done" data-regular-task-id="${this.escapeHtml(todo.id)}">Done</button>
+                        </article>
+                    `).join('')}
+                </div>
+            </section>
         `;
     }
 
@@ -649,7 +669,6 @@ class WeaveApp {
             const text = String(value || '').replace(/\s+/g, ' ').trim();
             return text.length > limit ? `${text.slice(0, Math.max(0, limit - 1)).trim()}…` : text;
         };
-        const riskLabel = todo.risk_level ? `Risk: ${todo.risk_level}` : '';
         const bundleSummary = todo.display?.summary || '';
         const primaryAction = todo.primary_action || (Array.isArray(todo.suggested_actions) ? todo.suggested_actions.find((a) => this.isConcreteActionLabel(a?.label)) : null);
         const rawSubtitle = todo.reason || todo.trigger_summary || bundleSummary || todo.why_now || todo.description || '';
@@ -661,54 +680,48 @@ class WeaveApp {
             ? todo.epistemic_trace.slice(0, 1).map((r) => compact(`${r.source || 'Source'}: ${r.text || ''}`, 86)).join(' • ')
             : '';
         const categoryLabel = this.prettyCategory(todo.category);
-        const actionLabel = primaryAction?.label || 'Review details';
+        const actionLabel = primaryAction?.label || todo.recommended_action || 'Review details';
         const cardTone = this.cardToneClass(todo.category);
-        
+        const personLabel = this.extractRelationshipTarget(todo);
+        const moveLabel = this.prettySuggestedMove(actionLabel, todo);
+        const evidenceLabel = evidenceCompact || receiptSummary || '';
+
         return `
                 <article class="suggestion-card conversation-entry ${this.escapeHtml(cardTone)}${isStudy ? ' suggestion-study' : ''}" data-id="${this.escapeHtml(todo.id)}" tabindex="0" style="animation-delay:${index * 40}ms;">
                     <div class="suggestion-header">
                         <div class="suggestion-content">
-                            <div class="suggestion-kicker">
-                                <span>${this.escapeHtml(categoryLabel)}</span>
-                                <span>${this.escapeHtml(this.prettyPriority(todo.priority))}</span>
-                                ${todo.time_anchor ? `<span>${this.escapeHtml(todo.time_anchor)}</span>` : ''}
+                            <div class="suggestion-card-topline">
+                                <div class="suggestion-kicker">
+                                    <span>${this.escapeHtml(categoryLabel)}</span>
+                                    <span>${this.escapeHtml(this.prettyPriority(todo.priority))}</span>
+                                    ${todo.time_anchor ? `<span>${this.escapeHtml(todo.time_anchor)}</span>` : ''}
+                                </div>
+                                <button class="suggestion-remove-btn" type="button" data-action="remove" aria-label="Remove suggestion">Remove</button>
                             </div>
                             <div class="suggestion-title">${this.escapeHtml(todo.title)}</div>
-                            ${whyNowCompact ? `<div class="suggestion-description">${this.escapeHtml(whyNowCompact)}</div>` : ''}
-                            ${evidenceCompact ? `<div class="suggestion-context" style="font-style: italic; opacity: 0.8;">${this.escapeHtml(evidenceCompact)}</div>` : ''}
-                            <div class="suggestion-primary-line" style="font-weight: 500; color: var(--accent-blue-strong);">${this.escapeHtml(actionLabel)}</div>
+                            ${personLabel ? `<div class="suggestion-description"><strong>Person:</strong> ${this.escapeHtml(personLabel)}</div>` : ''}
+                            ${whyNowCompact ? `<div class="suggestion-description"><strong>Why now:</strong> ${this.escapeHtml(whyNowCompact)}</div>` : ''}
+                            ${evidenceLabel ? `<div class="suggestion-context" style="font-style: italic; opacity: 0.8;"><strong>Signal:</strong> ${this.escapeHtml(evidenceLabel)}</div>` : ''}
+                            <div class="suggestion-primary-line" style="font-weight: 500; color: var(--accent-blue-strong);"><strong>Suggested move:</strong> ${this.escapeHtml(moveLabel)}</div>
                             ${aiCanAutomate ? '<div class="suggestion-context suggestion-subtle-note" style="font-size: 11px; margin-top: 4px;">AI-assisted automation available</div>' : ''}
-                            ${!expanded ? '<div class="suggestion-primary-wrap"><button class="presence-primary-action" type="button" data-action="info" style="padding: 6px 12px; font-size: 11px;">View details</button></div>' : ''}
+                            ${!expanded ? '<div class="suggestion-primary-wrap"><button class="presence-primary-action" type="button" data-action="info" style="padding: 6px 12px; font-size: 11px;">Why this matters</button></div>' : ''}
                         </div>
                     </div>
                     ${expanded ? `
                         <div class="suggestion-details suggestion-details-quick" style="display:block; margin-top: 16px; border-top: 1px solid var(--glass-border); padding-top: 16px;">
-                            ${todo.reason ? `<div class="suggestion-why" style="margin-bottom: 12px;"><span style="display: block; font-size: 10px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 4px;">Context</span>${this.escapeHtml(todo.reason)}</div>` : ''}
-                            ${todo.step_plan.length ? `<div class="suggestion-steps" style="margin-bottom: 12px;"><span style="display: block; font-size: 10px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 4px;">Plan</span>${todo.step_plan.map((step, stepIndex) => `<div class="suggestion-step">${stepIndex + 1}. ${this.escapeHtml(step)}</div>`).join('')}</div>` : ''}
-                            ${receiptSummary ? `<div class="suggestion-why" style="margin-bottom: 12px;"><span style="display: block; font-size: 10px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 4px;">Source</span>${this.escapeHtml(receiptSummary)}</div>` : ''}
+                            ${todo.reason ? `<div class="suggestion-why" style="margin-bottom: 12px;"><span style="display: block; font-size: 10px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 4px;">Why this matters now</span>${this.escapeHtml(todo.reason)}</div>` : ''}
+                            ${todo.step_plan.length ? `<div class="suggestion-steps" style="margin-bottom: 12px;"><span style="display: block; font-size: 10px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 4px;">Suggested sequence</span>${todo.step_plan.map((step, stepIndex) => `<div class="suggestion-step">${stepIndex + 1}. ${this.escapeHtml(step)}</div>`).join('')}</div>` : ''}
+                            ${receiptSummary ? `<div class="suggestion-why" style="margin-bottom: 12px;"><span style="display: block; font-size: 10px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 4px;">Supporting evidence</span>${this.escapeHtml(receiptSummary)}</div>` : ''}
                             <div class="reminder-actions" style="opacity:1; margin-top:20px; display: flex; gap: 8px;">
-                                ${todo.source === 'morning-brief'
-                                    ? '<button class="pill-btn" type="button" data-action="brief-open">Open brief</button><button class="pill-btn" type="button" data-action="brief-archive">Archive</button>'
-                                    : `${todo.ai_doable ? '<button class="pill-btn pill-btn-primary" type="button" data-action="execute">Execute</button>' : ''}<button class="pill-btn" type="button" data-action="done">Mark done</button><button class="pill-btn" type="button" data-action="snooze">Snooze</button><button class="pill-btn destructive" type="button" data-action="remove">Dismiss</button>`
-                                }
+                                ${todo.ai_doable ? '<button class="pill-btn pill-btn-primary" type="button" data-action="execute">Draft opener</button>' : ''}
+                                <button class="pill-btn" type="button" data-action="done">Handled</button>
+                                <button class="pill-btn" type="button" data-action="snooze">Snooze</button>
+                                <button class="pill-btn destructive" type="button" data-action="remove">Remove</button>
                             </div>
                         </div>
                     ` : ''}
                 </article>
             `;
-    }
-
-    renderMorningBriefBanner() {
-        const latest = (this.morningBriefs || [])[0];
-        if (!latest) return '';
-        const subtitle = (latest.priorities || []).slice(0, 3).map((p) => p.title).filter(Boolean).join(' • ');
-        return `
-            <article class="morning-brief-flow" data-id="brief_banner" tabindex="0">
-                <div class="morning-brief-date">${this.escapeHtml(latest.dateLabel || '')}</div>
-                <p class="morning-brief-text">${this.escapeHtml(subtitle || 'Since yesterday: a short snapshot of client work and open priorities.')}</p>
-                <button class="ghost-button" type="button" data-action="brief-open">Open brief</button>
-            </article>
-        `;
     }
 
     toggleCard(taskId) {
@@ -727,16 +740,11 @@ class WeaveApp {
             await new Promise((resolve) => setTimeout(resolve, 220));
         }
         try {
-            await window.electronAPI.completeTask(taskId);
+            this.todos = this.todos.filter((todo) => todo.id !== taskId);
+            this.applyRadarState({ allSignals: this.todos });
+            await window.electronAPI.saveSuggestions(this.todos);
         } catch (_) {}
-        this.todos = this.todos.filter((todo) => todo.id !== taskId);
         this.expandedCards.delete(taskId);
-
-        try {
-            await window.electronAPI.savePersistentTodos(this.todos);
-        } catch (error) {
-            console.error('Failed to save completed suggestion:', error);
-        }
 
         this.renderSuggestions();
 
@@ -744,15 +752,16 @@ class WeaveApp {
             await this.generateSuggestions({ replace: true, silent: true });
         }
 
-        this.showToast('Marked done');
+        this.showToast('Signal marked handled');
     }
 
     async removeSuggestion(taskId) {
         this.todos = this.todos.filter((todo) => todo.id !== taskId);
+        this.applyRadarState({ allSignals: this.todos });
         this.expandedCards.delete(taskId);
         try {
-            await window.electronAPI.savePersistentTodos(this.todos);
-            this.showToast('Priority removed');
+            await window.electronAPI.saveSuggestions(this.todos);
+            this.showToast('Signal removed');
         } catch (error) {
             console.error('Failed to remove suggestion:', error);
             this.showToast('Remove failed');
@@ -764,8 +773,9 @@ class WeaveApp {
         const todo = this.todos.find((item) => item.id === taskId);
         if (!todo) return;
         todo.snoozedUntil = Date.now() + (minutes * 60 * 1000);
+        this.applyRadarState({ allSignals: this.todos });
         try {
-            await window.electronAPI.savePersistentTodos(this.todos);
+            await window.electronAPI.saveSuggestions(this.todos);
             this.showToast(`Snoozed for ${Math.round(minutes / 60)}h`);
         } catch (error) {
             console.error('Failed to snooze suggestion:', error);
@@ -898,11 +908,8 @@ class WeaveApp {
             if (todo.completed) return false;
             if (todo.snoozedUntil && Number(todo.snoozedUntil) > now) return false;
             if (this.currentFilter === 'all') return true;
-            if (this.currentFilter === 'client') return ['followup', 'relationship_intelligence'].includes(todo.category) || this.hasClientSignal(todo);
-            if (this.currentFilter === 'delivery') return ['work', 'creative', 'study'].includes(todo.category);
-            if (this.currentFilter === 'followups') return ['followup', 'relationship_intelligence'].includes(todo.category);
-            if (this.currentFilter === 'focus') return ['work', 'creative', 'study'].includes(todo.category);
-            if (this.currentFilter === 'people') return ['followup', 'relationship_intelligence'].includes(todo.category);
+            if (this.currentFilter === 'relationships') return String(todo.signal_type || '').toLowerCase() === 'relationship' || ['followup', 'relationship_intelligence'].includes(todo.category);
+            if (this.currentFilter === 'todos') return String(todo.signal_type || '').toLowerCase() === 'todo' || ['work', 'creative', 'study'].includes(todo.category);
             return todo.category === this.currentFilter;
         });
 
@@ -912,7 +919,29 @@ class WeaveApp {
                 if (priorityDelta !== 0) return priorityDelta;
                 return (b.createdAt || 0) - (a.createdAt || 0);
             })
-            .slice(0, 10);
+            .slice(0, 12);
+    }
+
+    isRegularTodo(todo = {}) {
+        if (!todo || todo.completed) return false;
+        if (todo.source === 'auto_suggestion') return false;
+        if (Array.isArray(todo.epistemic_trace) && todo.epistemic_trace.length) return false;
+        if (Array.isArray(todo.suggested_actions) && todo.suggested_actions.length) return false;
+        if (todo.primary_action) return false;
+        return Boolean(String(todo.title || '').trim());
+    }
+
+    async completeRegularTask(taskId) {
+        if (!taskId) return;
+        try {
+            await window.electronAPI.completeTask(taskId);
+            this.manualTodos = this.manualTodos.filter((todo) => todo.id !== taskId);
+            this.renderSuggestions();
+            this.showToast('Task marked done');
+        } catch (error) {
+            console.error('Failed to complete regular task:', error);
+            this.showToast('Task update failed');
+        }
     }
 
     formatConfidence(value) {
@@ -924,17 +953,20 @@ class WeaveApp {
         try {
             const contacts = await window.electronAPI.getRelationshipContacts();
             this.contacts = (contacts || []).map(c => ({
+                metadata: this.safeJsonParse(c.metadata),
                 id: c.id,
-                name: c.display_name, company: c.company, role: c.role, warmth: c.warmth_score, depth: c.depth_score, centrality: c.network_centrality, summary: c.relationship_summary, metadata: c.metadata,
+                name: c.display_name, company: c.company, role: c.role, warmth: c.warmth_score, depth: c.depth_score, centrality: c.network_centrality, summary: c.relationship_summary,
                 last_contact_at: c.last_interaction_at,
                 is_overdue_followup: c.status === 'needs_followup',
                 is_weak_tie: c.status === 'cooling' || c.status === 'decaying',
                 strength: c.strength_score,
                 interaction_count: c.interaction_count_30d,
-                recommendation: c.metadata?.recommendation || '',
-                emails: c.metadata?.emails || [],
-                phones: c.metadata?.phones || [],
-                interests: c.metadata?.interests || []
+                recommendation: this.safeJsonParse(c.metadata)?.recommendation || '',
+                emails: this.safeJsonParse(c.metadata)?.emails || [],
+                phones: this.safeJsonParse(c.metadata)?.phones || [],
+                interests: this.safeJsonParse(c.metadata)?.interests || [],
+                first_name: this.safeJsonParse(c.metadata)?.first_name || '',
+                last_name: this.safeJsonParse(c.metadata)?.last_name || ''
             }));
             this.renderContactsList();
             console.log(`[App] Loaded ${this.contacts.length} contacts`);
@@ -954,25 +986,35 @@ class WeaveApp {
                     <div class="empty-icon" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;">
                         <span class="material-symbols-outlined">group</span>
                     </div>
-                    <div class="empty-text">No contacts found</div>
-                    <div class="empty-sub" style="font-size: 12px; color: var(--text-tertiary); margin-top: 8px;">Add email, calendar, or person records to detect contacts</div>
+                    <div class="empty-text">No people found</div>
+                    <div class="empty-sub" style="font-size: 12px; color: var(--text-tertiary); margin-top: 8px;">People appear here after you sync Apple Contacts. Weave then attaches remembered interactions to those contact nodes over time.</div>
                 </div>
             `;
             return;
         }
 
-        const sorted = this.contacts.sort((a, b) => (b.strength || 0) - (a.strength || 0));
+        const query = String(document.getElementById('contacts-search')?.value || '').trim().toLowerCase();
+        const sortMode = this.contactsSort?.value || 'cooling';
+        const filtered = this.contacts.filter((contact) => {
+            if (!query) return true;
+            return [contact.name, contact.company, contact.role, ...(contact.interests || [])]
+                .map((value) => String(value || '').toLowerCase())
+                .some((value) => value.includes(query));
+        });
+        const sorted = filtered.sort((a, b) => this.compareContacts(a, b, sortMode));
         
         itemsContainer.innerHTML = sorted.map((contact, idx) => {
             const lastContact = contact.last_contact_at ? new Date(contact.last_contact_at).toLocaleDateString() : 'Never';
             const statusIcon = contact.is_overdue_followup ? '⚠️' : contact.is_weak_tie ? '📉' : '✓';
+            const statusText = this.contactStatusText(contact);
             
             return `
                 <div class="contact-item ${idx === 0 ? 'active' : ''}" data-contact-id="${contact.id}">
                     <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 4px;">
                         <div class="contact-name">${statusIcon} ${contact.name}</div>
                     </div>
-                    <div class="contact-meta">Last: ${lastContact}</div>
+                    <div class="contact-meta">${this.escapeHtml(statusText)} • Last: ${lastContact}</div>
+                    ${contact.company || contact.role ? `<div class="contact-meta">${this.escapeHtml([contact.role, contact.company].filter(Boolean).join(' at '))}</div>` : ''}
                     <div class="strength-bar">
                         <div class="strength-bar-fill" style="width: ${(contact.strength || 0) * 100}%"></div>
                     </div>
@@ -997,33 +1039,49 @@ class WeaveApp {
         const detailPanel = document.getElementById('contact-detail');
         if (!detailPanel) return;
 
-        const strengthPercent = Math.round((contact.strength || 0) * 100);
-        const warmthPercent = Math.round((contact.warmth || 0) * 100);
-        const depthPercent = Math.round((contact.depth || 0) * 100);
-        const centralityPercent = Math.round((contact.centrality || 0) * 100);
+        const detail = {
+            ...contact,
+            metadata: this.safeJsonParse(contact.metadata)
+        };
+        const strengthPercent = Math.round((detail.strength || 0) * 100);
+        const warmthPercent = Math.round((detail.warmth || 0) * 100);
+        const depthPercent = Math.round((detail.depth || 0) * 100);
+        const centralityPercent = Math.round((detail.centrality || 0) * 100);
+        const recentSignals = this.buildContactSignals(detail);
 
-        let suggestedActionsHtml = '<h4>Suggested Actions</h4>';
+        let suggestedActionsHtml = '<h4>Recommended Next Move</h4>';
         
-        if (contact.is_overdue_followup) {
-            suggestedActionsHtml += `<button class="action-btn" data-action="followup">📧 Send Follow-up</button>`;
+        if (detail.is_overdue_followup) {
+            suggestedActionsHtml += `<button class="action-btn" data-action="followup">Draft follow-up</button>`;
         }
-        if (contact.is_weak_tie) {
-            suggestedActionsHtml += `<button class="action-btn" data-action="reconnect">👋 Reconnect (weak tie)</button>`;
+        if (detail.is_weak_tie) {
+            suggestedActionsHtml += `<button class="action-btn" data-action="reconnect">Reconnect this tie</button>`;
         }
-        suggestedActionsHtml += `<button class="action-btn" data-action="share">📎 Share Article</button>`;
+        suggestedActionsHtml += `<button class="action-btn" data-action="brief">Prep briefing</button>`;
+        suggestedActionsHtml += `<button class="action-btn" data-action="share">Share something useful</button>`;
 
         detailPanel.innerHTML = `
             <div class="contact-detail">
-                <h3>${this.escapeHtml(contact.name)}</h3>
-                ${contact.role || contact.company ? `<div style="color: var(--text-secondary); margin-top: -8px; margin-bottom: 16px;">${this.escapeHtml(contact.role || '')} ${contact.role && contact.company ? 'at' : ''} ${this.escapeHtml(contact.company || '')}</div>` : ''}
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
+                    <div>
+                        <h3>${this.escapeHtml(detail.name)}</h3>
+                        <div class="contact-meta">${this.escapeHtml([detail.first_name, detail.last_name].filter(Boolean).join(' '))}</div>
+                    </div>
+                    <button class="pill-btn" type="button" data-action="edit-profile">Edit</button>
+                </div>
+                ${detail.role || detail.company ? `<div style="color: var(--text-secondary); margin-top: -8px; margin-bottom: 16px;">${this.escapeHtml(detail.role || '')} ${detail.role && detail.company ? 'at' : ''} ${this.escapeHtml(detail.company || '')}</div>` : ''}
                 
-                ${contact.summary ? `<div class="relationship-summary" style="margin-bottom: 16px; font-style: italic; color: var(--text-primary); border-left: 2px solid var(--accent-blue); padding-left: 8px;">${this.escapeHtml(contact.summary)}</div>` : ''}
+                ${detail.summary ? `<div class="relationship-summary" style="margin-bottom: 16px; font-style: italic; color: var(--text-primary); border-left: 2px solid var(--accent-blue); padding-left: 8px;">${this.escapeHtml(detail.summary)}</div>` : ''}
+                <div class="suggestion-why" style="margin-bottom: 16px;">
+                    <span style="display:block; font-size:10px; text-transform:uppercase; color:var(--text-tertiary); margin-bottom:4px;">Why this person matters</span>
+                    ${this.escapeHtml(detail.recommendation || this.contactStatusText(detail))}
+                </div>
 
                 <div style="margin: 16px 0;">
                     <div style="font-size: 12px; color: var(--text-tertiary); margin-bottom: 4px;">Contact Information</div>
                     <div class="contact-info">
-                        ${contact.emails && contact.emails.length > 0 ? contact.emails.map(e => `<div>📧 ${this.escapeHtml(e)}</div>`).join('') : '<div style="opacity: 0.5;">No email</div>'}
-                        ${contact.phones && contact.phones.length > 0 ? contact.phones.map(p => `<div>📞 ${this.escapeHtml(p)}</div>`).join('') : ''}
+                        ${detail.emails && detail.emails.length > 0 ? detail.emails.map(e => `<div>📧 ${this.escapeHtml(e)}</div>`).join('') : '<div style="opacity: 0.5;">No email</div>'}
+                        ${detail.phones && detail.phones.length > 0 ? detail.phones.map(p => `<div>📞 ${this.escapeHtml(p)}</div>`).join('') : ''}
                     </div>
                 </div>
 
@@ -1053,22 +1111,31 @@ class WeaveApp {
                     </div>
                 </div>
 
-                ${contact.related_contacts && contact.related_contacts.length > 0 ? `
+                ${recentSignals.length ? `
                 <div style="margin: 16px 0;">
-                    <div style="font-size: 12px; color: var(--text-tertiary); margin-bottom: 4px;">Common Connections (Bridges)</div>
+                    <div style="font-size: 12px; color: var(--text-tertiary); margin-bottom: 4px;">Recent Signals</div>
+                    <div style="display: grid; gap: 8px;">
+                        ${recentSignals.map((signal) => `<div class="contact-meta" style="white-space: normal;">${this.escapeHtml(signal)}</div>`).join('')}
+                    </div>
+                </div>
+                ` : ''}
+
+                ${detail.related_contacts && detail.related_contacts.length > 0 ? `
+                <div style="margin: 16px 0;">
+                    <div style="font-size: 12px; color: var(--text-tertiary); margin-bottom: 4px;">Bridge Contacts</div>
                     <div style="display: flex; flex-wrap: wrap; gap: 6px;">
-                        ${contact.related_contacts.map(rc => `
+                        ${detail.related_contacts.map(rc => `
                             <span class="pill-btn bridge-contact" style="font-size: 11px; padding: 2px 8px; cursor: pointer;" data-contact-id="${rc.id}">${this.escapeHtml(rc.display_name)}</span>
                         `).join('')}
                     </div>
                 </div>
                 ` : ''}
 
-                ${contact.interests && contact.interests.length > 0 ? `
+                ${detail.interests && detail.interests.length > 0 ? `
                 <div style="margin: 16px 0;">
                     <div style="font-size: 12px; color: var(--text-tertiary); margin-bottom: 4px;">Shared Interests</div>
                     <div style="display: flex; flex-wrap: wrap; gap: 6px;">
-                        ${contact.interests.slice(0, 6).map(interest => `
+                        ${detail.interests.slice(0, 6).map(interest => `
                             <span style="background: var(--accent-blue-subtle); color: var(--accent-blue-strong); padding: 4px 8px; border-radius: 4px; font-size: 12px;">
                                 ${this.escapeHtml(interest)}
                             </span>
@@ -1080,6 +1147,7 @@ class WeaveApp {
                 <div class="suggested-actions">
                     ${suggestedActionsHtml}
                 </div>
+                <div id="contact-edit-shell"></div>
             </div>
         `;
 
@@ -1097,10 +1165,79 @@ class WeaveApp {
                 const action = btn.dataset.action;
                 if (action === 'followup' || action === 'reconnect') {
                     this.startRelationshipDraft(contact.id);
+                } else if (action === 'brief') {
+                    this.switchView('action-view');
+                    if (this.chatInput) {
+                        this.chatInput.value = `Brief me on ${contact.name} before our next conversation. Include why this relationship matters now, recent signals, and the best opener.`;
+                        this.sendChatMessage();
+                    }
                 } else if (action === 'share') {
-                    this.showToast('Article sharing coming soon');
+                    this.switchView('action-view');
+                    if (this.chatInput) {
+                        this.chatInput.value = `What useful update, article, or value-add could I share with ${contact.name} right now based on our recent context?`;
+                        this.sendChatMessage();
+                    }
                 }
             });
+        });
+        detailPanel.querySelector('[data-action="edit-profile"]')?.addEventListener('click', () => {
+            this.renderContactEditForm(detail);
+        });
+    }
+
+    renderContactEditForm(detail = {}) {
+        const shell = document.getElementById('contact-edit-shell');
+        if (!shell) return;
+        const editable = detail.editable_fields || {};
+        shell.innerHTML = `
+            <div class="settings-card" style="margin-top:16px;">
+                <div class="settings-label" style="margin-bottom:12px;">Edit in Weave</div>
+                <div style="display:grid; gap:12px;">
+                    <input id="edit-display-name" class="settings-input" type="text" placeholder="Display name" value="${this.escapeHtml(editable.display_name || detail.name || '')}">
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                        <input id="edit-first-name" class="settings-input" type="text" placeholder="First name" value="${this.escapeHtml(editable.first_name || detail.first_name || '')}">
+                        <input id="edit-last-name" class="settings-input" type="text" placeholder="Last name" value="${this.escapeHtml(editable.last_name || detail.last_name || '')}">
+                    </div>
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                        <input id="edit-company" class="settings-input" type="text" placeholder="Company" value="${this.escapeHtml(editable.company || detail.company || '')}">
+                        <input id="edit-role" class="settings-input" type="text" placeholder="Role" value="${this.escapeHtml(editable.role || detail.role || '')}">
+                    </div>
+                    <input id="edit-interests" class="settings-input" type="text" placeholder="Interests, comma separated" value="${this.escapeHtml((editable.interests || detail.interests || []).join(', '))}">
+                    <input id="edit-topics" class="settings-input" type="text" placeholder="Topics, comma separated" value="${this.escapeHtml((editable.topics || []).join(', '))}">
+                    <input id="edit-identifiers" class="settings-input" type="text" placeholder="Extra identifiers, comma separated" value="${this.escapeHtml((editable.identifiers || []).join(', '))}">
+                    <textarea id="edit-notes" class="settings-input" placeholder="Notes">${this.escapeHtml(editable.notes || '')}</textarea>
+                    <div style="display:flex; gap:8px; justify-content:flex-end;">
+                        <button class="ghost-button" type="button" data-action="cancel-edit">Cancel</button>
+                        <button class="pill-btn pill-btn-primary" type="button" data-action="save-edit">Save</button>
+                    </div>
+                </div>
+            </div>
+        `;
+        shell.querySelector('[data-action="cancel-edit"]')?.addEventListener('click', () => {
+            shell.innerHTML = '';
+        });
+        shell.querySelector('[data-action="save-edit"]')?.addEventListener('click', async () => {
+            try {
+                const payload = {
+                    contactId: detail.id,
+                    display_name: shell.querySelector('#edit-display-name')?.value || '',
+                    first_name: shell.querySelector('#edit-first-name')?.value || '',
+                    last_name: shell.querySelector('#edit-last-name')?.value || '',
+                    company: shell.querySelector('#edit-company')?.value || '',
+                    role: shell.querySelector('#edit-role')?.value || '',
+                    interests: String(shell.querySelector('#edit-interests')?.value || '').split(',').map((item) => item.trim()).filter(Boolean),
+                    topics: String(shell.querySelector('#edit-topics')?.value || '').split(',').map((item) => item.trim()).filter(Boolean),
+                    identifiers: String(shell.querySelector('#edit-identifiers')?.value || '').split(',').map((item) => item.trim()).filter(Boolean),
+                    notes: shell.querySelector('#edit-notes')?.value || ''
+                };
+                await window.electronAPI.updatePersonProfile(payload);
+                await this.loadContacts();
+                await this.loadContactDetailById(detail.id);
+                this.showToast('Profile updated');
+            } catch (error) {
+                console.error('Failed to update profile:', error);
+                this.showToast('Profile update failed');
+            }
         });
     }
 
@@ -1114,6 +1251,8 @@ class WeaveApp {
                 const mapped = {
                     id: detail.id,
                     name: detail.display_name,
+                    first_name: detail.editable_fields?.first_name || detail.person_node?.metadata?.first_name || '',
+                    last_name: detail.editable_fields?.last_name || detail.person_node?.metadata?.last_name || '',
                     company: detail.company,
                     role: detail.role,
                     last_contact_at: detail.last_interaction_at,
@@ -1126,10 +1265,13 @@ class WeaveApp {
                     summary: detail.relationship_summary,
                     interaction_count: detail.interaction_count_30d,
                     recommendation: detail.metadata?.recommendation || '',
-                    emails: detail.metadata?.emails || [],
-                    phones: detail.metadata?.phones || [],
-                    interests: detail.metadata?.interests || [],
-                    related_contacts: detail.related_contacts || []
+                    emails: detail.imported_fields?.emails || detail.metadata?.emails || [],
+                    phones: detail.imported_fields?.phones || detail.metadata?.phones || [],
+                    interests: detail.editable_fields?.interests || detail.metadata?.interests || [],
+                    related_contacts: detail.related_contacts || [],
+                    editable_fields: detail.editable_fields || {},
+                    imported_fields: detail.imported_fields || {},
+                    person_node: detail.person_node || null
                 };
                 this.showContactDetail(mapped);
                 
@@ -1167,14 +1309,9 @@ class WeaveApp {
         // Setup search
         const searchInput = document.getElementById('contacts-search');
         if (searchInput) {
-            searchInput.addEventListener('input', () => {
-                const query = searchInput.value.toLowerCase();
-                document.querySelectorAll('.contact-item').forEach(item => {
-                    const name = item.querySelector('.contact-name').textContent.toLowerCase();
-                    item.style.display = name.includes(query) ? '' : 'none';
-                });
-            });
+            searchInput.addEventListener('input', () => this.renderContactsList());
         }
+        this.contactsSort?.addEventListener('change', () => this.renderContactsList());
 
         // Setup sync button
         const syncBtn = document.getElementById('sync-contacts-btn');
@@ -1200,11 +1337,11 @@ class WeaveApp {
             
             if (isSyncing) {
                 statusEl.classList.add('syncing');
-                if (textEl) textEl.textContent = 'Updating work memory...';
+                if (textEl) textEl.textContent = 'Updating relationship memory...';
                 this.setPresenceMode('remembering');
             } else {
                 statusEl.classList.remove('syncing');
-                if (textEl) textEl.textContent = 'Work memory updated';
+                if (textEl) textEl.textContent = 'Relationship memory updated';
                 this.setPresenceMode('waiting');
             }
         } catch (e) {
@@ -1213,8 +1350,6 @@ class WeaveApp {
     }
 
     async setupChat() {
-        this.chatSessions = await this.loadChatSessions();
-        this.activeChatId = null;
         this.chatView?.classList.toggle('chat-history-collapsed', this.chatHistoryCollapsed);
         if (this.toggleChatHistoryButton) {
             this.toggleChatHistoryButton.textContent = this.chatHistoryCollapsed ? 'Show threads' : 'Hide threads';
@@ -1232,7 +1367,7 @@ class WeaveApp {
             if (this.toggleChatHistoryButton) this.toggleChatHistoryButton.textContent = this.chatHistoryCollapsed ? 'Show threads' : 'Hide threads';
         });
         this.chatSyncStatus?.addEventListener('click', () => {
-            this.showToast('Work memory is updating in the background');
+            this.showToast('Relationship memory is updating in the background');
         });
 
         this.sendChatButton?.addEventListener('click', () => this.sendChatMessage());
@@ -1281,6 +1416,29 @@ class WeaveApp {
         this.renderChatHistory();
         this.renderActiveChat();
         this.updateChatSyncStatus();
+        this.deferTask(() => this.hydrateChatSessions(), 60, 'chat hydration');
+    }
+
+    async hydrateChatSessions() {
+        await this.nextFrame();
+        const loadedSessions = await this.loadChatSessions();
+        if (!Array.isArray(loadedSessions) || !loadedSessions.length) return;
+
+        const merged = new Map();
+        loadedSessions.forEach((session) => merged.set(session.id, session));
+        (this.chatSessions || []).forEach((session) => {
+            if (!session?.id) return;
+            const existing = merged.get(session.id);
+            if (!existing || (session.updatedAt || 0) >= (existing.updatedAt || 0)) {
+                merged.set(session.id, session);
+            }
+        });
+
+        this.chatSessions = Array.from(merged.values())
+            .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+            .slice(0, 25);
+        this.renderChatHistory();
+        this.renderActiveChat();
     }
 
     async sendChatMessage() {
@@ -2413,7 +2571,7 @@ Would you like me to continue with more detail?` : content;
         const sorted = [...(this.chatSessions || [])].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
         if (!sorted.length) {
             this.chatHistoryList.innerHTML = `
-                <div class="chat-history-empty">No threads yet</div>
+                <div class="chat-history-empty">No relationship threads yet</div>
             `;
             return;
         }
@@ -2423,7 +2581,7 @@ Would you like me to continue with more detail?` : content;
             return `
                 <button class="chat-history-item ${session.id === this.activeChatId ? 'active' : ''}" data-chat-id="${this.escapeHtml(session.id)}">
                     <span class="chat-history-dot" aria-hidden="true"></span>
-                    <div class="chat-history-title" title="${this.escapeHtml(session.title || 'New thread')}">${this.escapeHtml(session.title || 'New thread')}</div>
+                    <div class="chat-history-title" title="${this.escapeHtml(session.title || 'New relationship thread')}">${this.escapeHtml(session.title || 'New relationship thread')}</div>
                     <div class="chat-history-preview">${this.escapeHtml((last?.content || 'No messages yet').slice(0, 60))}</div>
                     <div class="chat-history-time">${this.escapeHtml(this.relativeTime(updatedAt))}</div>
                 </button>
@@ -2442,15 +2600,15 @@ Would you like me to continue with more detail?` : content;
             const prompts = Array.isArray(this.chatDraftPrompts) && this.chatDraftPrompts.length
                 ? this.chatDraftPrompts
                 : this.getChatStarterPrompts();
-            if (this.chatThreadTitle) this.chatThreadTitle.textContent = 'New chat';
+            if (this.chatThreadTitle) this.chatThreadTitle.textContent = 'New relationship thread';
             this.chatMessages.innerHTML = `
-                <div class="empty-state" style="text-align: center; padding: 60px 20px;">
-                    <div class="empty-icon" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;">
+                <div class="empty-state chat-empty-state">
+                    <div class="empty-icon chat-empty-icon">
                         <span class="material-symbols-outlined">forum</span>
                     </div>
-                    <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">Start a new chat</div>
-                    <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">Use one of these context-aware prompts or open a previous thread from the left.</div>
-                    <div style="margin-top:16px; display:flex; flex-wrap:wrap; gap:8px; justify-content:center;">
+                    <div class="empty-text chat-empty-title">Start a new thread</div>
+                    <div class="empty-sub chat-empty-sub">Ask for a real read on a relationship, a sharper follow-up, or a briefing before a conversation.</div>
+                    <div class="chat-starter-grid">
                         ${prompts.map((p, idx) => `<button class="pill-btn" data-starter-prompt="${idx}" type="button">${this.escapeHtml(p)}</button>`).join('')}
                     </div>
                 </div>
@@ -2466,19 +2624,19 @@ Would you like me to continue with more detail?` : content;
             });
             return;
         }
-        if (this.chatThreadTitle) this.chatThreadTitle.textContent = chat.title || 'Current work thread';
+        if (this.chatThreadTitle) this.chatThreadTitle.textContent = chat.title || 'Current relationship thread';
 
         this.chatMessages.innerHTML = '';
         if (!chat.messages?.length) {
             const prompts = this.getChatStarterPrompts();
             this.chatMessages.innerHTML = `
-                <div class="empty-state" style="text-align: center; padding: 60px 20px;">
-                    <div class="empty-icon" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;">
+                <div class="empty-state chat-empty-state">
+                    <div class="empty-icon chat-empty-icon">
                         <span class="material-symbols-outlined">forum</span>
                     </div>
-                    <div class="empty-text" style="font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px;">Ask about your work</div>
-                    <div class="empty-sub" style="font-size: 13px; color: var(--text-tertiary); line-height: 1.5;">Use work memory to prepare for meetings, inspect client history, or close follow-ups.</div>
-                    <div style="margin-top:16px; display:flex; flex-wrap:wrap; gap:8px; justify-content:center;">
+                    <div class="empty-text chat-empty-title">Ask Weave for the honest read</div>
+                    <div class="empty-sub chat-empty-sub">Use memory to prep for meetings, pressure-test your instincts, and choose the right next move.</div>
+                    <div class="chat-starter-grid">
                         ${prompts.map((p, idx) => `<button class="pill-btn" data-starter-prompt="${idx}" type="button">${this.escapeHtml(p)}</button>`).join('')}
                     </div>
                 </div>
@@ -2505,19 +2663,16 @@ Would you like me to continue with more detail?` : content;
         const prompts = [];
         const todos = this.getVisibleTodos().slice(0, 4);
         const topTodo = todos[0];
-        const clientTodo = todos.find((todo) => ['followup', 'relationship_intelligence'].includes(todo.category) || this.hasClientSignal(todo));
-        const deliveryTodo = todos.find((todo) => ['work', 'creative', 'study'].includes(todo.category));
-        const brief = (this.morningBriefs || [])[0];
-        const firstPriority = brief?.priorities?.[0]?.title;
+        const clientTodo = todos.find((todo) => String(todo.signal_type || '').toLowerCase() === 'relationship' || ['followup', 'relationship_intelligence'].includes(todo.category));
+        const deliveryTodo = todos.find((todo) => String(todo.signal_type || '').toLowerCase() === 'todo' || ['work', 'creative', 'study'].includes(todo.category));
         if (topTodo?.title) prompts.push(`What is the best next move for "${topTodo.title}" right now?`);
-        if (topTodo?.title) prompts.push(`What are my top priorities right now based on memory, starting with "${topTodo.title}"?`);
         if (clientTodo?.title) prompts.push(`Draft the right outreach or follow-up for "${clientTodo.title}".`);
-        if (deliveryTodo?.title) prompts.push(`What could block delivery on "${deliveryTodo.title}", and how should I handle it?`);
-        if (firstPriority) prompts.push(`Turn "${firstPriority}" into a concrete plan for today.`);
-        prompts.push('Which client follow-up matters most today, and why?');
-        prompts.push('Prepare me for the next meeting or commitment on my plate.');
-        prompts.push('What is the riskiest open delivery item in my current work?');
-        return Array.from(new Set(prompts.filter(Boolean))).slice(0, 3);
+        if (deliveryTodo?.title) prompts.push(`Brief me on the conversation context behind "${deliveryTodo.title}".`);
+        prompts.push('What are my top five relationship moves?');
+        prompts.push('What are the top to-dos I should do next?');
+        prompts.push('Go deeper on the first relationship move.');
+        prompts.push('Brief me on this person.');
+        return Array.from(new Set(prompts.filter(Boolean))).slice(0, 4);
     }
 
     setupSettings() {
@@ -2535,6 +2690,9 @@ Would you like me to continue with more detail?` : content;
         });
         this.refreshDailyOcrButton?.addEventListener('click', async () => {
             await this.refreshDailyOcrText();
+        });
+        this.appleContactsSyncButton?.addEventListener('click', async () => {
+            await this.syncAppleContactsFromSettings();
         });
         this.suggestionProviderSelect?.addEventListener('change', () => {
             if (this.suggestionBaseUrlInput) {
@@ -2604,7 +2762,51 @@ Would you like me to continue with more detail?` : content;
         } finally {
             this.settingsDataLoading = null;
         }
+        this.renderAppleContactsStatus();
         this.renderDesktopTimeline();
+    }
+
+    renderAppleContactsStatus(result = null) {
+        if (!this.appleContactsSyncStatus) return;
+        if (!result) {
+            this.appleContactsSyncStatus.textContent = 'Apple Contacts is the source of truth for People. Sync to import contacts and attach remembered interactions to them.';
+            return;
+        }
+        if (result.error) {
+            this.appleContactsSyncStatus.textContent = `Apple Contacts sync failed: ${result.error}`;
+            return;
+        }
+        const imported = Number(result.imported || 0);
+        this.appleContactsSyncStatus.textContent = imported > 0
+            ? `Apple Contacts synced. ${imported} contacts were imported into People and linked to memory where possible.`
+            : 'Apple Contacts sync completed, but no importable contacts were found.';
+    }
+
+    async syncAppleContactsFromSettings() {
+        if (!window.electronAPI?.syncAppleContacts) {
+            this.showToast('Apple Contacts sync is unavailable');
+            return;
+        }
+        const button = this.appleContactsSyncButton;
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Syncing...';
+        }
+        try {
+            const result = await window.electronAPI.syncAppleContacts({ force: true, limit: 2000 });
+            this.renderAppleContactsStatus(result || {});
+            await this.loadContacts();
+            this.showToast('Apple Contacts synced');
+        } catch (error) {
+            console.error('Apple Contacts sync failed:', error);
+            this.renderAppleContactsStatus({ error: String(error?.message || error) });
+            this.showToast('Apple Contacts sync failed');
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.textContent = 'Sync Apple Contacts';
+            }
+        }
     }
 
     renderSuggestionProviderStatus(settings = null) {
@@ -3481,10 +3683,10 @@ Would you like me to continue with more detail?` : content;
         }
     }
 
-    async loadMorningBriefs() {
+    async loadMorningBriefs({ allowGenerate = true } = {}) {
         try {
             let briefs = await window.electronAPI.getMorningBriefs();
-            if (!Array.isArray(briefs) || !briefs.length) {
+            if ((!Array.isArray(briefs) || !briefs.length) && allowGenerate) {
                 await window.electronAPI.generateMorningBrief({ force: false });
                 briefs = await window.electronAPI.getMorningBriefs();
             }
@@ -3622,11 +3824,11 @@ Would you like me to continue with more detail?` : content;
         if (!this.previewMessage) return;
 
         let preview = formalityValue > 65
-            ? 'I can help you prioritize the most relevant actions for today.'
-            : 'I can help sort out what matters next.';
+            ? 'I can help identify who matters now and the strongest next move.'
+            : 'I can help sort out which relationship needs attention next.';
 
         if (verbosityValue > 65) {
-            preview += ' I will include a bit more context so each suggestion feels grounded in your recent work.';
+            preview += ' I will include more context so each suggestion feels grounded in your recent relationship memory.';
         } else if (verbosityValue < 35) {
             preview += ' Short version first.';
         }
@@ -3695,8 +3897,8 @@ Would you like me to continue with more detail?` : content;
         const visibleCount = this.getVisibleTodos ? this.getVisibleTodos().length : (this.todos || []).length;
         const period = hour < 12 ? 'Good morning' : (hour < 18 ? 'Good afternoon' : 'Good evening');
         const focusLine = visibleCount === 0
-            ? 'Your workspace is clear'
-            : (visibleCount === 1 ? 'one priority needs attention' : `${visibleCount} priorities need attention`);
+            ? 'your radar is clear'
+            : (visibleCount === 1 ? 'one relationship signal needs attention' : `${visibleCount} relationship signals need attention`);
         element.textContent = `${period}, ${name}. ${focusLine}.`;
         this.applyAmbientTone(hour);
         this.updatePresenceSummary(this.getVisibleTodos ? this.getVisibleTodos() : (this.todos || []));
@@ -3707,37 +3909,38 @@ Would you like me to continue with more detail?` : content;
         const count = Array.isArray(visibleTodos) ? visibleTodos.length : 0;
         this.updateTodaySnapshot(visibleTodos);
         if (count === 0) {
-            this.presenceSummary.textContent = 'Your agenda is currently clear. Sync your accounts or refresh to discover new priorities.';
-            this.presencePrimaryAction.textContent = 'Review priorities';
+            this.presenceSummary.textContent = 'Your radar is quiet. Refresh it or ask Weave what matters now.';
+            this.presencePrimaryAction.textContent = 'Refresh radar';
             return;
         }
 
         const top = visibleTodos[0];
         const title = this.truncate(top?.title || 'Start here', 72);
+        const person = this.extractRelationshipTarget(top);
         this.presenceSummary.textContent = count === 1
-            ? `Active priority: ${title}`
-            : `${count} priorities are active. Next: ${title}`;
-        this.presencePrimaryAction.textContent = 'Review priorities';
+            ? `${person ? `${person} needs attention` : 'One signal is active'}. Next move: ${title}`
+            : `${count} signals are active. Strongest signal: ${title}`;
+        this.presencePrimaryAction.textContent = 'Refresh radar';
     }
 
     updateTodaySnapshot(visibleTodos = []) {
-        const items = Array.isArray(visibleTodos) ? visibleTodos : [];
-        const clientCount = items.filter((todo) => ['followup', 'relationship_intelligence'].includes(todo.category) || this.hasClientSignal(todo)).length;
-        const deliveryCount = items.filter((todo) => ['work', 'creative', 'study'].includes(todo.category)).length;
-        if (this.todayOpenCount) this.todayOpenCount.textContent = String(items.length);
-        if (this.todayClientCount) this.todayClientCount.textContent = String(clientCount);
-        if (this.todayDeliveryCount) this.todayDeliveryCount.textContent = String(deliveryCount);
+        const allSignals = (this.radarState?.allSignals || []).filter((todo) => !todo.completed);
+        const relationshipSignals = (this.radarState?.relationshipSignals || []).filter((todo) => !todo.completed);
+        const todoSignals = (this.radarState?.todoSignals || []).filter((todo) => !todo.completed);
+        if (this.todayOpenCount) this.todayOpenCount.textContent = String(allSignals.length);
+        if (this.todayClientCount) this.todayClientCount.textContent = String(relationshipSignals.length);
+        if (this.todayDeliveryCount) this.todayDeliveryCount.textContent = String(todoSignals.length);
     }
 
     setPresenceMode(mode = 'waiting') {
         this.presenceMode = mode;
         if (!this.presenceState) return;
         const labels = {
-            idle: 'Today',
-            thinking: 'Reviewing context',
+            idle: 'Relationship radar',
+            thinking: 'Reviewing relationship context',
             remembering: 'Updating memory',
-            suggesting: 'Priorities ready',
-            waiting: 'Today'
+            suggesting: 'Radar ready',
+            waiting: 'Relationship radar'
         };
         const label = labels[mode] || labels.waiting;
         this.presenceState.textContent = label;
@@ -3753,10 +3956,10 @@ Would you like me to continue with more detail?` : content;
         const el = this.todayWhisperPrompt;
         if (!el) return;
         const prompts = [
-            'Ask about a client, project, or next step',
-            'Review open client follow-ups',
-            'Prepare for an upcoming meeting',
-            'Find the next delivery item to close'
+            'What are my top five relationship moves?',
+            'What are the top to-dos I should do next?',
+            'Go deeper on the first relationship move.',
+            'Brief me on this person.'
         ];
         const initial = Math.floor(Math.random() * prompts.length);
         el.textContent = prompts[initial];
@@ -3778,10 +3981,10 @@ Would you like me to continue with more detail?` : content;
     startChatPromptRotation() {
         if (!this.chatInput) return;
         const prompts = [
-            'Ask about a client, project, meeting, or next step',
-            'What client follow-up should I handle first?',
-            'Prepare me for my next client meeting',
-            'What work can I close in the next 30 minutes?'
+            'Ask for the top relationship moves right now',
+            'Ask for the top to-dos right now',
+            'Ask Weave to go deeper on one move',
+            'Ask Weave to brief you on a person'
         ];
         let index = Math.floor(Math.random() * prompts.length);
         this.chatInput.placeholder = prompts[index];
@@ -3808,8 +4011,8 @@ Would you like me to continue with more detail?` : content;
 
     prettyCategory(category) {
         if (category === 'followup') return 'Follow-up';
-        if (category === 'relationship_intelligence') return 'Client relationship';
-        if (['work', 'creative', 'study'].includes(category)) return 'Delivery';
+        if (category === 'relationship_intelligence') return 'Relationship insight';
+        if (['work', 'creative', 'study'].includes(category)) return 'Briefing';
         if (category === 'personal') return 'General';
         return category.charAt(0).toUpperCase() + category.slice(1);
     }
@@ -3826,6 +4029,18 @@ Would you like me to continue with more detail?` : content;
             todo.suggestion_group
         ].map((value) => String(value || '').toLowerCase()).join(' ');
         return /\b(client|customer|proposal|invoice|contract|retainer|stakeholder|meeting|follow ?up|reply|scope|brief)\b/.test(haystack);
+    }
+
+    isBriefingSignal(todo = {}) {
+        const haystack = [
+            todo.title,
+            todo.reason,
+            todo.description,
+            todo.trigger_summary,
+            todo.primary_action?.label,
+            todo.opportunity_type
+        ].map((value) => String(value || '').toLowerCase()).join(' ');
+        return /\b(brief|meeting|prep|prepare|call|conversation|investor|stakeholder|intro)\b/.test(haystack);
     }
 
     cardToneClass(category = '') {
@@ -3889,6 +4104,78 @@ Would you like me to continue with more detail?` : content;
                 <div class="empty-sub" style="font-size:13px; color:var(--text-tertiary); line-height:1.5;">${this.escapeHtml(subtitle)}</div>
             </div>
         `;
+    }
+
+    safeJsonParse(value) {
+        if (!value) return {};
+        if (typeof value === 'object') return value;
+        try {
+            return JSON.parse(value);
+        } catch (_) {
+            return {};
+        }
+    }
+
+    extractRelationshipTarget(todo = {}) {
+        const candidates = [
+            todo.metadata?.person_name,
+            todo.metadata?.contact_name,
+            todo.display?.person,
+            todo.display?.target,
+            todo.target_surface
+        ].filter(Boolean);
+        if (candidates.length) return String(candidates[0]);
+        const title = String(todo.title || '');
+        const match = title.match(/\bwith\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/);
+        if (match) return match[1];
+        return '';
+    }
+
+    prettySuggestedMove(actionLabel = '', todo = {}) {
+        const raw = String(actionLabel || todo.recommended_action || 'Review details').trim();
+        if (/^execute$/i.test(raw)) return 'Take the suggested next move';
+        return raw;
+    }
+
+    contactStatusText(contact = {}) {
+        if (contact.is_overdue_followup) return 'Needs follow-up';
+        if (contact.is_weak_tie) return 'Cooling relationship';
+        if ((contact.centrality || 0) > 0.65) return 'Bridge connection';
+        if ((contact.interaction_count || 0) >= 3) return 'Actively warm';
+        return 'In network';
+    }
+
+    compareContacts(a = {}, b = {}, sortMode = 'cooling') {
+        const timeValue = (value) => {
+            const ts = value ? new Date(value).getTime() : 0;
+            return Number.isFinite(ts) ? ts : 0;
+        };
+        if (sortMode === 'strongest') return (b.strength || 0) - (a.strength || 0);
+        if (sortMode === 'recent') return timeValue(b.last_contact_at) - timeValue(a.last_contact_at);
+        if (sortMode === 'bridges') return (b.centrality || 0) - (a.centrality || 0);
+        if (sortMode === 'new') return timeValue(b.created_at) - timeValue(a.created_at);
+        const score = (contact) => (contact.is_overdue_followup ? 3 : 0) + (contact.is_weak_tie ? 2 : 0) + (1 - Number(contact.warmth || 0));
+        return score(b) - score(a);
+    }
+
+    buildContactSignals(contact = {}) {
+        const signals = [];
+        if (contact.last_contact_at) {
+            signals.push(`Last interaction: ${new Date(contact.last_contact_at).toLocaleDateString()}`);
+        }
+        if (typeof contact.interaction_count === 'number') {
+            signals.push(`30-day interaction count: ${contact.interaction_count}`);
+        }
+        if ((contact.centrality || 0) > 0.65) {
+            signals.push('This person looks like a bridge across your network.');
+        }
+        if (contact.is_weak_tie) {
+            signals.push('The relationship is cooling relative to its depth and should be re-warmed deliberately.');
+        }
+        if (contact.is_overdue_followup) {
+            signals.push('Recent memory suggests this follow-up is overdue.');
+        }
+        return signals.slice(0, 4);
     }
 
     showToast(message) {
@@ -4040,12 +4327,15 @@ Would you like me to continue with more detail?` : content;
         
         if (syncStatusEl) {
             const textEl = syncStatusEl.querySelector(".sync-text");
-            if (textEl) textEl.textContent = "Updating work memory...";
-            syncStatusEl.classList.add("syncing");
+            if (textEl) {
+                textEl.textContent = payload?.type === "request_chat_save"
+                    ? "Saving chat to memory..."
+                    : "Relationship memory refreshed";
+            }
             
             clearTimeout(this._syncResetTimer);
             this._syncResetTimer = setTimeout(() => {
-                if (textEl) textEl.textContent = "Work memory updated";
+                if (textEl) textEl.textContent = "Relationship memory updated";
                 syncStatusEl.classList.remove("syncing");
             }, 3000);
         }

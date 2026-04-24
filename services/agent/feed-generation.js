@@ -1379,54 +1379,10 @@ async function generateFeedSuggestions(apiKey, now = Date.now(), options = {}) {
   }
   const deduped = Array.from(entitySeen.values());
 
-  // If nothing survived, include a demo fallback suggestion so the UI/chat can show a proactive example.
-  // This helps surface the pipeline during development or empty DB states.
   const final = deduped
     .sort((a, b) => (Number(b.confidence || 0) + (b.priority === 'high' ? 0.15 : 0)) - (Number(a.confidence || 0) + (a.priority === 'high' ? 0.15 : 0)))
     .slice(0, 7)
     .filter((item) => item.primary_action && isConcreteActionLabel(item.primary_action.label));
-
-  if (!final.length) {
-    const demoId = `sug_demo_${Date.now()}`;
-    const demo = {
-      id: demoId,
-      suggestion_id: `prop_demo_${Date.now()}`,
-      type: 'next_action',
-      title: 'Search Google for "hello"',
-      body: 'Open Google and search for the word "hello" to demo the extension-driven automation.',
-      description: 'Demo proactive suggestion: open Google and search.',
-      intent: 'demo_search',
-      reason: 'Demo suggestion to validate operator-first automation flow',
-      trigger_summary: 'demo',
-      expected_benefit: 'Showcase automated typing and search via extension',
-      plan: ['Open Google', 'Type "hello"', 'Press Enter'],
-      step_plan: ['Open Google', 'Type "hello"', 'Press Enter'],
-      category: 'work',
-      priority: 'low',
-      confidence: 0.6,
-      value_score: 4,
-      risk_score: 1,
-      final_score: 2,
-      display: { headline: 'Demo: Google search', summary: 'Type and search "hello"', insight: 'Developer demo suggestion' },
-      epistemic_trace: [{ node_id: 'demo', source: 'system', text: 'Demo suggestion generated', timestamp: new Date().toISOString() }],
-      suggested_actions: [{ label: 'Search Google: hello', type: 'browser_operator', payload: { action: 'navigate_and_type', url: 'https://www.google.com', template: 'hello' } }],
-      primary_action: { label: 'Search Google: hello', type: 'browser_operator', payload: { action: 'navigate_and_type', url: 'https://www.google.com', template: 'hello' } },
-      ai_generated: false,
-      ai_doable: false,
-      action_type: 'manual_next_step',
-      execution_mode: 'manual',
-      target_surface: 'browser',
-      assignee: 'human',
-      ai_draft: null,
-      action_plan: ['Open Google', 'Type "hello"', 'Press Enter'],
-      source_node_ids: [],
-      source_edge_paths: [],
-      evidence: [],
-      retrieval_trace: {},
-      created_at: new Date().toISOString()
-    };
-    return [demo];
-  }
 
   return final;
 }

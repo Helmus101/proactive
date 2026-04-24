@@ -35,6 +35,7 @@ const engine = require('./services/agent/intelligence-engine');
 const extractor = require('./services/extractors/openLoopExtractor');
 const scoring = require('./services/scoring');
 const { answerChatQuery } = require('./services/agent/chat-engine');
+const { buildRadarState } = require('./services/agent/radar-engine');
 const { buildHybridGraphRetrieval } = require('./services/agent/hybrid-graph-retrieval');
 const { buildRetrievalThought } = require('./services/agent/retrieval-thought-system');
 const { generateEmbedding } = require('./services/embedding-engine');
@@ -42,6 +43,8 @@ const { generateTopTodosFromMemoryQuery, generateAndPersistTasksFromLLM } = requ
 const { getLatestRecursiveImprovementLog } = require('./services/agent/recursive-improvement-engine');
 const { getRelationshipContactDetail } = require('./services/relationship-graph');
 const { getRelationshipContacts } = require('./services/relationship-graph');
+const { syncAppleContactsIntoRelationshipGraph } = require('./services/relationship-graph');
+const { updateRelationshipContactProfile } = require('./services/relationship-graph');
 const { resetZeroBaseMemory } = require('./services/agent/zero-base-memory');
 const { runDailyInsights } = require('./services/agent/intelligence-engine');
 const { runEpisodeJob } = require('./services/agent/intelligence-engine');
@@ -101,6 +104,270 @@ function withTimeout(promise, timeoutMs, label = 'operation') {
   });
 }
 
+const KNOWN_BROWSER_APPS = new Set([
+  'google chrome',
+  'chrome',
+  'safari',
+  'arc',
+  'brave browser',
+  'brave',
+  'microsoft edge',
+  'edge',
+  'firefox'
+]);
+
+let browserHistoryCache = {
+  fetchedAt: 0,
+  urls: []
+};
+
+function isBrowserAppName(appName = '') {
+  return KNOWN_BROWSER_APPS.has(String(appName || '').trim().toLowerCase());
+}
+
+function normalizeBrowserHistoryItem(item = {}) {
+  const url = String(item.url || '').trim();
+  if (!url) return null;
+  const timestamp = Number(item.timestamp || item.last_visit_time || item.captured_at || 0);
+  const domain = (() => {
+    try {
+      return new URL(url).hostname.replace(/^www\./, '').toLowerCase();
+    } catch (_) {
+      return String(item.domain || '').trim().toLowerCase();
+    }
+  })();
+  return {
+    url,
+    title: String(item.title || domain || url).trim(),
+    domain,
+    timestamp: Number.isFinite(timestamp) ? timestamp : 0,
+    browser: String(item.browser || item.app || 'Browser').trim(),
+    visitCount: Number(item.visitCount || item.visit_count || 1) || 1
+  };
+}
+
+function flattenStoredBrowserHistory() {
+  const rows = [];
+  const direct = global.extensionData?.urls;
+  if (Array.isArray(direct)) rows.push(...direct);
+
+  const userDataUrls = store.get('userData')?.extensionData?.urls;
+  if (Array.isArray(userDataUrls)) rows.push(...userDataUrls);
+
+  const rawStore = store.get('extensionData');
+  if (Array.isArray(rawStore?.urls)) {
+    rows.push(...rawStore.urls);
+  } else if (rawStore && typeof rawStore === 'object') {
+    for (const value of Object.values(rawStore)) {
+      if (Array.isArray(value?.urls)) rows.push(...value.urls);
+    }
+  }
+
+  const deduped = [];
+  const seen = new Set();
+  for (const item of rows) {
+    const normalized = normalizeBrowserHistoryItem(item);
+    if (!normalized) continue;
+    const bucket = Math.floor((normalized.timestamp || 0) / 60000);
+    const key = `${normalized.url}|${bucket}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(normalized);
+  }
+  return deduped.sort((a, b) => b.timestamp - a.timestamp);
+}
+
+async function getRecentBrowserHistorySnapshot({ maxAgeMs = 2 * 60 * 1000 } = {}) {
+  const now = Date.now();
+  if (browserHistoryCache.urls.length && (now - browserHistoryCache.fetchedAt) < maxAgeMs) {
+    return browserHistoryCache.urls;
+  }
+
+  const stored = flattenStoredBrowserHistory();
+  if (stored.length) {
+    browserHistoryCache = { fetchedAt: now, urls: stored };
+  }
+
+  try {
+    const fresh = await getBrowserHistory();
+    const normalized = (fresh || []).map(normalizeBrowserHistoryItem).filter(Boolean);
+    if (normalized.length) {
+      browserHistoryCache = { fetchedAt: now, urls: normalized };
+      return normalized;
+    }
+  } catch (error) {
+    console.warn('[BrowserHistory] Failed to refresh recent history:', error?.message || error);
+  }
+
+  return browserHistoryCache.urls;
+}
+
+function scoreHistoryItemForScreenshot(item = {}, screenshotTs, appName = '', windowTitle = '') {
+  const titleLower = String(windowTitle || '').toLowerCase();
+  const itemTitleLower = String(item.title || '').toLowerCase();
+  const domainLower = String(item.domain || '').toLowerCase();
+  const browserActive = isBrowserAppName(appName);
+  const deltaMs = Math.abs(Number(screenshotTs || 0) - Number(item.timestamp || 0));
+  const allowedWindowMs = browserActive ? 15 * 60 * 1000 : 3 * 60 * 1000;
+  if (!deltaMs || deltaMs > allowedWindowMs) return 0;
+
+  let score = 1 - Math.min(1, deltaMs / allowedWindowMs);
+  if (browserActive) score += 0.35;
+  if (domainLower && titleLower.includes(domainLower)) score += 0.45;
+  if (itemTitleLower && titleLower.includes(itemTitleLower.slice(0, 60))) score += 0.55;
+  if (itemTitleLower && itemTitleLower.split(/\s+/).filter((token) => token.length >= 5).some((token) => titleLower.includes(token))) score += 0.18;
+  if (String(item.browser || '').toLowerCase() === String(appName || '').toLowerCase()) score += 0.12;
+  return Number(score.toFixed(3));
+}
+
+async function findAssociatedUrlsForScreenshot({ timestamp, appName = '', windowTitle = '', limit = 5 } = {}) {
+  const history = await getRecentBrowserHistorySnapshot();
+  if (!Array.isArray(history) || !history.length) return [];
+
+  return history
+    .map((item) => ({
+      ...item,
+      association_score: scoreHistoryItemForScreenshot(item, timestamp, appName, windowTitle)
+    }))
+    .filter((item) => item.association_score >= 0.2)
+    .sort((a, b) => {
+      if (b.association_score !== a.association_score) return b.association_score - a.association_score;
+      return Math.abs((timestamp || 0) - (a.timestamp || 0)) - Math.abs((timestamp || 0) - (b.timestamp || 0));
+    })
+    .slice(0, Math.max(1, Number(limit || 5)))
+    .map((item) => ({
+      url: item.url,
+      title: item.title,
+      domain: item.domain,
+      browser: item.browser,
+      timestamp: item.timestamp,
+      visitCount: item.visitCount,
+      association_score: item.association_score
+    }));
+}
+
+function maybeHandleLocalChatToolQuery(query = '') {
+  const normalized = String(query || '').trim();
+  const lower = normalized.toLowerCase();
+  const asksTime = /\b(what time is it|what's the time|current time|time right now|time now|local time)\b/.test(lower);
+  const asksDate = /\b(what(?:'s| is)? the date|today'?s date|current date|date today|what day is it|which day is it|what day today)\b/.test(lower);
+  const asksTimezone = /\b(timezone|time zone)\b/.test(lower);
+
+  if (!asksTime && !asksDate && !asksTimezone) return null;
+
+  const now = new Date();
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time';
+  const fullDate = new Intl.DateTimeFormat(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }).format(now);
+  const clockTime = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'short' }).format(now);
+
+  const parts = [];
+  if (asksDate && asksTime) {
+    parts.push(`It is ${fullDate}, ${clockTime}.`);
+  } else if (asksDate) {
+    parts.push(`Today is ${fullDate}.`);
+  } else if (asksTime) {
+    parts.push(`It is ${clockTime}.`);
+  }
+  if (asksTimezone) {
+    parts.push(`Your current timezone is ${timezone}.`);
+  }
+
+  const toolResult = {
+    tool: 'local_datetime',
+    timezone,
+    iso: now.toISOString(),
+    date: fullDate,
+    time: clockTime
+  };
+
+  return {
+    content: parts.join(' ').trim(),
+    tool_result: toolResult,
+    retrieval: {
+      source_mode: 'tool_only',
+      usedSources: ['local_datetime'],
+      evidence_count: 1,
+      tool_result: toolResult
+    },
+    thinking_trace: {
+      thinking_summary: 'Handled locally with the built-in date/time tool.',
+      filters: [],
+      search_queries: { context: [], messages: [], lexical: [], web: [] },
+      results_summary: {
+        headline: 'Resolved with a local tool call.',
+        details: [parts.join(' ').trim()]
+      },
+      data_sources: ['Local date/time tool'],
+      stage_trace: [
+        {
+          step: 'local_tool',
+          label: 'Local tool',
+          status: 'completed',
+          detail: `Resolved with ${toolResult.tool}.`
+        }
+      ],
+      reasoning_chain: [
+        {
+          step: 'tool_router',
+          summary: 'The query matched a simple date/time request and was answered locally.'
+        }
+      ]
+    }
+  };
+}
+
+function getStoredRadarState() {
+  const state = store.get('radarState') || null;
+  if (state && typeof state === 'object') return state;
+  const suggestions = Array.isArray(store.get('suggestions')) ? store.get('suggestions') : [];
+  const persistentTodos = Array.isArray(store.get('persistentTodos')) ? store.get('persistentTodos') : [];
+  const relationshipSignals = suggestions.filter((item) => String(item.signal_type || '').toLowerCase() === 'relationship' || looksRelationshipSuggestion(item));
+  const todoSignals = [
+    ...suggestions.filter((item) => String(item.signal_type || '').toLowerCase() === 'todo'),
+    ...persistentTodos.filter((item) => !item?.completed).map((item) => ({
+      ...item,
+      signal_type: 'todo',
+      category: item.category || 'work'
+    }))
+  ];
+  return {
+    generated_at: new Date().toISOString(),
+    allSignals: [...relationshipSignals, ...todoSignals],
+    relationshipSignals,
+    todoSignals,
+    sections: {
+      relationship: { status: 'ready', count: relationshipSignals.length },
+      todo: { status: 'ready', count: todoSignals.length }
+    }
+  };
+}
+
+function persistRadarState(radarState = {}) {
+  const clean = {
+    generated_at: radarState.generated_at || new Date().toISOString(),
+    allSignals: Array.isArray(radarState.allSignals) ? radarState.allSignals : [],
+    relationshipSignals: Array.isArray(radarState.relationshipSignals) ? radarState.relationshipSignals : [],
+    todoSignals: Array.isArray(radarState.todoSignals) ? radarState.todoSignals : [],
+    sections: radarState.sections || {}
+  };
+  store.set('radarState', clean);
+  store.set('suggestions', clean.allSignals.filter((item) => !item?.completed));
+  return clean;
+}
+
+function uniqById(items = []) {
+  const out = [];
+  const seen = new Set();
+  for (const item of items || []) {
+    if (!item) continue;
+    const key = String(item.id || `${item.title || ''}|${item.signal_type || ''}|${item.category || ''}`);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
 
 // Express server for OAuth callback
 const oauthApp = express();
@@ -155,7 +422,7 @@ let suggestionRunQueued = false;
 let lastCaptureSuggestionTriggerAt = 0;
 const MAX_PRACTICAL_SUGGESTIONS = 7;
 const CAPTURE_TRIGGER_MIN_INTERVAL_MS = 60 * 60 * 1000;
-const SUGGESTION_REFRESH_INTERVAL_MINUTES = 60;
+const SUGGESTION_REFRESH_INTERVAL_MINUTES = 20;
 const PERIODIC_SCREENSHOT_INTERVAL_MS = 30 * 1000;
 const PERIODIC_SCREENSHOT_WAKE_DELAY_MS = 2500;
 const LOW_POWER_OCR_MIN_INTERVAL_MS = 5 * 60 * 1000;
@@ -220,6 +487,28 @@ function shouldDeferBackgroundWork(label = 'background') {
   const defer = idleTime < 180 || appBusy;
   if (defer) console.log(`[${label}] Deferring heavy work until idle; idle=${idleTime}s`);
   return defer;
+}
+
+function looksRelationshipSuggestion(item = {}) {
+  const category = String(item.category || item.type || '').toLowerCase();
+  const opportunityType = String(item.opportunity_type || '').toLowerCase();
+  const displayPerson = String(item.display?.person || item.display?.target || '').trim();
+  const haystack = [
+    item.title,
+    item.reason,
+    item.description,
+    item.trigger_summary,
+    item.display?.headline,
+    item.display?.summary,
+    item.primary_action?.label,
+    opportunityType,
+    category
+  ].map((value) => String(value || '').toLowerCase()).join(' ');
+
+  if (displayPerson) return true;
+  if (['followup', 'relationship', 'relationship_intelligence', 'social'].includes(category)) return true;
+  if (/(reconnect|follow up|intro|introduction|meeting prep|brief|stakeholder|warm|cold|relationship|network|reach out|investor|client|partner|contact)/.test(haystack)) return true;
+  return ['reconnect_risk', 'timely_follow_up', 'intro_opportunity', 'meeting_prep', 'value_add_share', 'emerging_connection'].includes(opportunityType);
 }
 
 function markAppInteraction(reason = 'interaction') {
@@ -1304,6 +1593,22 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   if (ocr.error) event.ocrError = ocr.error;
   if (isReducedLoadMode()) lastLowPowerOCRAt = Date.now();
 
+  try {
+    const associatedUrls = await findAssociatedUrlsForScreenshot({
+      timestamp,
+      appName: event.activeApp,
+      windowTitle: event.activeWindowTitle,
+      limit: 5
+    });
+    if (associatedUrls.length) {
+      event.associatedUrls = associatedUrls;
+      event.primaryUrl = associatedUrls[0].url;
+      event.primaryDomain = associatedUrls[0].domain || '';
+    }
+  } catch (historyError) {
+    console.warn('[SensorCapture] Failed to associate browser URLs:', historyError?.message || historyError);
+  }
+
   event.study_signal = inferStudySignal(event.text, event);
   event.study_context = {
     in_session: inStudySession,
@@ -1317,7 +1622,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     event.text,
     event.activeWindowTitle,
     event.activeApp,
-    null // URL not available for screen captures
+    event.primaryUrl || null
   );
 
   if (filterCheck.shouldFilter) {
@@ -1365,6 +1670,11 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
         source_app: event.activeApp || 'Desktop',
         data_source: 'screenshot_ocr',
         window_title: event.activeWindowTitle || '',
+        url: event.primaryUrl || null,
+        primary_url: event.primaryUrl || null,
+        primary_domain: event.primaryDomain || null,
+        associated_urls: event.associatedUrls || [],
+        browser_context_urls: event.associatedUrls || [],
         context_title: event.activeWindowTitle || event.sourceName || '',
         timestamp: event.captured_at,
         app_id: event.activeApp || 'Desktop',
@@ -1620,29 +1930,6 @@ function scheduleDailyTasks() {
   if (dailySummaryTimer) clearTimeout(dailySummaryTimer);
   if (patternUpdateTimer) clearTimeout(patternUpdateTimer);
   if (morningBriefTimer) clearTimeout(morningBriefTimer);
-
-  // Schedule morning brief at 7:00 AM
-  const morningBriefTime = new Date();
-  morningBriefTime.setHours(7, 0, 0, 0);
-  if (morningBriefTime <= now) {
-    morningBriefTime.setDate(morningBriefTime.getDate() + 1);
-  }
-  const morningBriefDelay = morningBriefTime.getTime() - now.getTime();
-
-  morningBriefTimer = setTimeout(async () => {
-    console.log('Running scheduled morning brief generation...');
-    try {
-      const brief = await generateMorningBrief({ force: true, scheduled: true });
-      console.log(`Scheduled morning brief completed (${brief?.date || 'unknown date'})`);
-    } catch (error) {
-      console.error('Error in scheduled morning brief:', error);
-    }
-
-    // Schedule next day
-    scheduleDailyTasks();
-  }, morningBriefDelay);
-
-  console.log(`Morning brief scheduled for: ${morningBriefTime.toLocaleString()}`);
 
   // Schedule daily summary at 4:00 PM
   const summaryTime = new Date();
@@ -1927,6 +2214,9 @@ async function hasNewEventsSince(jobKey) {
 }
 
 async function runRelationshipGraphUpdate(options = {}) {
+  if (!options?.force && shouldDeferBackgroundWork(options?.backfill ? 'RelationshipGraphBackfill' : 'RelationshipGraph')) {
+    return { contacts: 0, deferred: true };
+  }
   try {
     const result = await runRelationshipGraphJob(options);
     debouncedStoreSet('memoryGraphHealth', {
@@ -2045,6 +2335,7 @@ async function runSemanticWindowGeneration() {
 
 async function runSuggestionEngineJob(options = {}) {
   const force = options?.force === true;
+  if (!force && shouldDeferBackgroundWork('SuggestionEngine')) return;
   if (suggestionJobLock) {
     suggestionRunQueued = true;
     const now = Date.now();
@@ -2055,28 +2346,20 @@ async function runSuggestionEngineJob(options = {}) {
     return;
   }
   const check = await hasNewEventsSince('suggestion');
-  const existingActiveSuggestions = mergeSuggestionQueues(store.get('suggestions') || [], [], MAX_PRACTICAL_SUGGESTIONS);
-  const remainingCapacity = Math.max(0, MAX_PRACTICAL_SUGGESTIONS - existingActiveSuggestions.length);
-  if (!force && remainingCapacity <= 0 && !check.hasNew) {
-    if ((store.get('suggestions') || []).length !== existingActiveSuggestions.length) {
-      store.set('suggestions', existingActiveSuggestions);
-    }
-    console.log('[SuggestionEngine] Active suggestion pool is full (7/7) and no new events; skipping hourly top-up');
+  const existingState = getStoredRadarState();
+  if (!force && !check.hasNew && Array.isArray(existingState?.allSignals) && existingState.allSignals.length) {
+    console.log('[SuggestionEngine] No new events; keeping current radar state');
     return;
   }
-  const capacityToGenerate = Math.max(remainingCapacity, 4);
   lastSuggestionHeavyRunAt = Date.now();
   suggestionJobLock = true;
 
   try {
     const llmConfig = getSuggestionLLMConfig();
-    const envToggle = String(process.env.PROACTIVE_AUTO_CREATE_TODOS || '').toLowerCase();
-    const persistedToggle = store.get('autoCreateTodos');
-    const autoCreateEnabled = (envToggle === '' || envToggle === 'true') && (persistedToggle !== false);
     if (!llmConfig) {
-      console.warn('[SuggestionEngine] No active LLM configuration; skipping suggestion generation');
+      console.warn('[SuggestionEngine] No active LLM configuration; skipping radar generation');
       if (mainWindow && mainWindow.webContents) {
-        mainWindow.webContents.send('proactive-suggestions', store.get('suggestions') || []);
+        mainWindow.webContents.send('proactive-suggestions', getStoredRadarState());
       }
       return;
     }
@@ -2092,106 +2375,38 @@ async function runSuggestionEngineJob(options = {}) {
       });
     }
 
-    console.log(`[SuggestionEngine] Running hourly top-up (${existingActiveSuggestions.length}/7 active, capacity=${remainingCapacity}, new_events=${Boolean(check.hasNew)}, provider=${llmConfig.provider}, force=${force})...`);
-    const proactiveMemory = store.get('proactiveMemory') || { core: '' };
+    console.log(`[SuggestionEngine] Running radar planner (new_events=${Boolean(check.hasNew)}, provider=${llmConfig.provider}, force=${force})...`);
+    const manualTodos = (store.get('persistentTodos') || []).filter((todo) => !todo?.completed);
 
     debouncedStoreSet('memoryGraphHealth', {
       ...(store.get('memoryGraphHealth') || {}),
       lastSuggestionAttemptAt: new Date().toISOString(),
       suggestionStatus: 'running'
     });
-    const newSuggestions = await withTimeout(
-      generateTopTodosFromMemoryQuery(llmConfig, {
-        query: `What are the top tasks and things to do right now?`,
-        standing_notes: proactiveMemory.core || '',
-        max_suggestions: capacityToGenerate,
-        existing_suggestions: existingActiveSuggestions.map((item) => ({
-          title: item.title,
-          reason: item.reason || item.description || '',
-          primary_action: item.primary_action?.label || item.recommended_action || ''
-        })),
-        study_context: getStudySessionState()
+    const radarState = await withTimeout(
+      buildRadarState({
+        llmConfig,
+        manualTodos,
+        maxRelationshipSignals: 5,
+        maxTodoSignals: 5
       }),
-      20000,
-      'generateTopTodosFromMemoryQuery'
+      14000,
+      'buildRadarState'
     );
-    console.log(`[SuggestionEngine] Generated ${newSuggestions.length} actionable suggestions`);
+    persistRadarState(radarState);
+    console.log(`[SuggestionEngine] Generated radar state (${radarState.relationshipSignals?.length || 0} relationship, ${radarState.todoSignals?.length || 0} todo)`);
     store.set('lastSuggestionRun', new Date().toISOString());
     store.set('lastProcessedEventTimestamp:suggestion', check.maxTs);
     debouncedStoreSet('memoryGraphHealth', {
       ...(store.get('memoryGraphHealth') || {}),
       lastSuggestionRunAt: new Date().toISOString(),
-      lastSuggestionCount: newSuggestions.length,
+      lastSuggestionCount: radarState.allSignals?.length || 0,
       suggestionStatus: 'idle'
     });
-
-    // Keep only AI-generated suggestions; no non-AI fallbacks allowed.
-    const latestSuggestions = (Array.isArray(newSuggestions) ? newSuggestions : [])
-      .filter((item) => item && item.ai_generated !== false)
-      .filter(isActionableSuggestion)
-      .sort((a, b) => Number(b.score || b.confidence || 0) - Number(a.score || a.confidence || 0))
-      .slice(0, capacityToGenerate);
-    const existingSuggestions = store.get('suggestions') || [];
-    const outgoingSuggestions = mergeSuggestionQueues(existingSuggestions, latestSuggestions, MAX_PRACTICAL_SUGGESTIONS);
-    store.set('suggestions', outgoingSuggestions);
-    if (latestSuggestions.length) {
-      // Auto-convert top suggestions into persistent todos if they are not duplicates.
-      // Gate this behavior behind an environment variable and a persisted setting so it can be disabled.
-      if (autoCreateEnabled) {
-        try {
-          const persistentTodos = store.get('persistentTodos') || [];
-          // Use the project's normalizeSuggestion helper to create a compact todo representation
-          const candidates = latestSuggestions.slice(0, 3).map((sugg) => {
-            const ns = normalizeSuggestion(sugg, { now: Date.now() });
-            return {
-              id: ns.id || `todo_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-              title: ns.title || ns.description || 'Task',
-              description: ns.description || ns.reason || '',
-              reason: ns.reason || '',
-              priority: ns.priority || 'medium',
-              category: ns.category || 'work',
-              createdAt: Date.now(),
-              completed: false,
-              source: 'auto_suggestion'
-            };
-          });
-
-          // Merge and dedupe using existing deduplicateTasks helper
-          const merged = deduplicateTasks([...(persistentTodos || []), ...candidates]);
-          // Keep a reasonable cap on persistent todos
-          const capped = merged.slice(0, 100);
-          store.set('persistentTodos', capped);
-          try {
-            console.log('[SuggestionEngine] Auto-created persistent todos from suggestions:', candidates.map(c => c.title));
-          } catch (_) {}
-          if (mainWindow && mainWindow.webContents) {
-            try { mainWindow.webContents.send('persistent-todos-updated', capped); } catch (_) {}
-          }
-        } catch (e) {
-          console.warn('[SuggestionEngine] Auto-create todos failed:', e?.message || e);
-        }
-      } else {
-        try { console.log('[SuggestionEngine] Auto-create persistent todos disabled by config'); } catch (_) {}
-      }
-    }
-
-    // Optionally call LLM to produce 3-5 structured tasks and persist them as well
-    try {
-      const generateTasksEnabled = autoCreateEnabled && llmConfig;
-      if (generateTasksEnabled) {
-        generateAndPersistTasksFromLLM(llmConfig, {
-          standing_notes: proactiveMemory.core || '',
-          study_context: getStudySessionState()
-        }).catch((e) => console.warn('[TaskLLM] generation failed:', e?.message || e));
-      }
-    } catch (e) {
-      console.warn('[SuggestionEngine] LLM task generation failed to start:', e?.message || e);
-    }
-
     if (mainWindow && mainWindow.webContents) {
-      mainWindow.webContents.send('proactive-suggestions', outgoingSuggestions);
+      mainWindow.webContents.send('proactive-suggestions', radarState);
     }
-    console.log(`[SuggestionEngine] Published ${outgoingSuggestions.length} AI suggestions`);
+    console.log(`[SuggestionEngine] Published ${radarState.allSignals?.length || 0} radar signals`);
   } catch (error) {
     console.error('[SuggestionEngine] Error:', error.message || error);
     debouncedStoreSet('memoryGraphHealth', {
@@ -2371,15 +2586,15 @@ function startMemoryGraphProcessing() {
 
   // Suggestion engine hourly; each run only fills missing slots up to 7.
   if (suggestionEngineTimer) clearInterval(suggestionEngineTimer);
-  // Aligned hourly suggestion engine
+  // Aligned relationship suggestion engine
   try {
     if (suggestionEngineTimer) clearInterval(suggestionEngineTimer);
-    const hourMs = 60 * 60 * 1000;
-    const nextHour = Math.ceil(Date.now() / hourMs) * hourMs;
-    const suggestionDelay = Math.max(1000, nextHour - Date.now());
+    const suggestionIntervalMs = SUGGESTION_REFRESH_INTERVAL_MINUTES * 60 * 1000;
+    const nextBoundary = Math.ceil(Date.now() / suggestionIntervalMs) * suggestionIntervalMs;
+    const suggestionDelay = Math.max(1000, nextBoundary - Date.now());
     setTimeout(() => {
       runSuggestionEngineJob().catch((e) => console.warn('[MemoryGraph] Aligned suggestion generation failed:', e?.message || e));
-      try { suggestionEngineTimer = setInterval(runSuggestionEngineJob, hourMs); } catch (_) {}
+      try { suggestionEngineTimer = setInterval(runSuggestionEngineJob, suggestionIntervalMs); } catch (_) {}
     }, suggestionDelay);
   } catch (e) {
     console.warn('[MemoryGraph] Failed to schedule aligned suggestion job:', e?.message || e);
@@ -2404,7 +2619,9 @@ function startMemoryGraphProcessing() {
   // Avoid heavy graph work during initial UI load; rely on scheduled aligned runs.
 
   // Suggestions can lag behind graph warmup; avoid launch-time battery spikes.
-  runSuggestionEngineJob().catch((e) => console.warn('[MemoryGraph] Initial suggestion generation failed:', e?.message || e));
+  setTimeout(() => {
+    runSuggestionEngineJob().catch((e) => console.warn('[MemoryGraph] Initial suggestion generation failed:', e?.message || e));
+  }, 15000);
 }
 
 function scheduleWeeklyInsights() {
@@ -7442,6 +7659,39 @@ ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
             ts: item.ts || null
           }))
       : [];
+    const resolvedChatSessionId = String(options?.chat_session_id || `chat_${Date.now()}`);
+    const localToolResponse = maybeHandleLocalChatToolQuery(query);
+    if (localToolResponse) {
+      await persistChatTurnAsRawEvent({
+        chatSessionId: resolvedChatSessionId,
+        role: 'user',
+        content: query,
+        chatHistory: normalizedChatHistory
+      });
+      await appendChatMessageToDb({
+        sessionId: resolvedChatSessionId,
+        role: 'user',
+        content: query,
+        ts: Date.now()
+      }).catch((err) => console.warn('[chat-memory] Failed to append user tool turn:', err?.message || err));
+      await persistChatTurnAsRawEvent({
+        chatSessionId: resolvedChatSessionId,
+        role: 'assistant',
+        content: localToolResponse.content || '',
+        chatHistory: normalizedChatHistory.concat([{ role: 'user', content: String(query || ''), ts: Date.now() }]),
+        retrieval: localToolResponse.retrieval || null
+      });
+      await appendChatMessageToDb({
+        sessionId: resolvedChatSessionId,
+        role: 'assistant',
+        content: localToolResponse.content || '',
+        ts: Date.now(),
+        retrieval: localToolResponse.retrieval || null,
+        thinkingTrace: localToolResponse.thinking_trace || null
+      }).catch((err) => console.warn('[chat-memory] Failed to append assistant tool turn:', err?.message || err));
+      return localToolResponse;
+    }
+
     const response = await answerChatQuery({
       apiKey: process.env.DEEPSEEK_API_KEY,
       query,
@@ -7456,7 +7706,6 @@ ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
         try { event.sender.send('chat-step', data); } catch (_) {}
       }
     });
-    const resolvedChatSessionId = String(options?.chat_session_id || `chat_${Date.now()}`);
     await persistChatTurnAsRawEvent({
       chatSessionId: resolvedChatSessionId,
       role: 'user',
@@ -7541,95 +7790,25 @@ ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
 ipcMain.handle('generate-proactive-todos', async (event, payload = {}) => {
   console.log('[Main] IPC generate-proactive-todos invoked from', event?.sender?.getURL ? event.sender.getURL() : 'main');
   try {
-    const looksValidAISuggestion = (item) => Boolean(
-      item &&
-      isActionableSuggestion(item) &&
-      ['study', 'relationship', 'work', 'personal', 'creative', 'followup'].includes(String(item.type || '').toLowerCase()) &&
-      item.title &&
-      item.reason &&
-      Array.isArray(item.evidence) &&
-      item.evidence.length > 0 &&
-      item.time_anchor &&
-      item.display &&
-      item.display.headline &&
-      item.display.summary &&
-      item.display.insight &&
-      Array.isArray(item.epistemic_trace) &&
-      item.epistemic_trace.length >= 2 &&
-      Array.isArray(item.suggested_actions) &&
-      item.suggested_actions.length >= 1 &&
-      item.primary_action &&
-      item.ai_generated !== false &&
-      hasConcreteSuggestionAction(item.primary_action?.label || '') &&
-      !/\b(take the next step|keep momentum|be proactive|work on this|handle this)\b/i.test(String(item.title || ''))
-    );
-    const proactiveMemory = store.get('proactiveMemory') || { core: '' };
-    const existingSuggestions = store.get('suggestions') || [];
-    const activeCountFromPayload = Number(payload?.activeSuggestionCount);
-    const activeCount = Number.isFinite(activeCountFromPayload)
-      ? Math.max(0, activeCountFromPayload)
-      : (Array.isArray(existingSuggestions) ? existingSuggestions.filter((item) => !item?.completed).length : 0);
-    const maxNewSuggestionsFromPayload = Number(payload?.maxNewSuggestions);
-    const maxNewSuggestions = Number.isFinite(maxNewSuggestionsFromPayload)
-      ? Math.max(0, Math.min(MAX_PRACTICAL_SUGGESTIONS, maxNewSuggestionsFromPayload))
-      : Math.max(0, MAX_PRACTICAL_SUGGESTIONS - activeCount);
-
-    if (maxNewSuggestions <= 0) {
-      return Array.isArray(existingSuggestions) ? existingSuggestions : [];
-    }
-
     const llmConfig = getSuggestionLLMConfig();
     if (!llmConfig) {
-      return Array.isArray(existingSuggestions) ? existingSuggestions : [];
+      return getStoredRadarState().allSignals || [];
     }
-    const suggestions = await withTimeout(
-      generateTopTodosFromMemoryQuery(llmConfig, {
-        query: `Look through my memory and generate ${maxNewSuggestions} short actionable todos or actions I need to do right now. Do not duplicate existing active suggestions.`,
-        standing_notes: proactiveMemory.core || '',
-        max_suggestions: maxNewSuggestions,
-        active_suggestion_count: activeCount,
-        existing_suggestions: existingSuggestions.slice(0, MAX_PRACTICAL_SUGGESTIONS).map((item) => ({
-          title: item.title,
-          reason: item.reason || item.description || '',
-          primary_action: item.primary_action?.label || item.recommended_action || ''
-        })),
-        study_context: getStudySessionState()
+    const radarState = await withTimeout(
+      buildRadarState({
+        llmConfig,
+        manualTodos: (store.get('persistentTodos') || []).filter((todo) => !todo?.completed),
+        maxRelationshipSignals: 5,
+        maxTodoSignals: 5
       }),
-      20000,
-      'generateTopTodosFromMemoryQuery'
+      14000,
+      'buildRadarState'
     );
-    const validatedSuggestions = (Array.isArray(suggestions) ? suggestions : [])
-      .filter(looksValidAISuggestion)
-      .slice(0, maxNewSuggestions);
-    const mergedSuggestions = mergeSuggestionQueues(existingSuggestions, validatedSuggestions, MAX_PRACTICAL_SUGGESTIONS);
-    store.set('suggestions', mergedSuggestions);
-    return mergedSuggestions.map((item) => ({
-      ...item,
-      ai_doable: Boolean(item.ai_doable),
-      assignee: item.assignee || (item.ai_doable ? 'ai' : 'human'),
-      action_type: item.action_type || null,
-      execution_mode: item.execution_mode || (item.ai_doable ? 'draft_or_execute' : 'manual'),
-      target_surface: item.target_surface || null,
-      expected_benefit: item.expected_benefit || '',
-      display: item.display || null,
-      epistemic_trace: Array.isArray(item.epistemic_trace) ? item.epistemic_trace : [],
-      suggested_actions: Array.isArray(item.suggested_actions) ? item.suggested_actions : [],
-      primary_action: item.primary_action || null,
-      opportunity_type: item.opportunity_type || null,
-      reason_codes: Array.isArray(item.reason_codes) ? item.reason_codes : [],
-      time_anchor: item.time_anchor || null,
-      candidate_score: Number(item.candidate_score || 0),
-      prerequisites: Array.isArray(item.prerequisites) ? item.prerequisites : [],
-      step_plan: Array.isArray(item.step_plan) ? item.step_plan : [],
-      action_plan: Array.isArray(item.action_plan) ? item.action_plan : [],
-      ai_draft: item.ai_draft || '',
-      source: 'zero-base-suggestion-engine',
-      completed: false,
-      createdAt: item.created_at ? new Date(item.created_at).getTime() : Date.now()
-    }));
+    persistRadarState(radarState);
+    return radarState.allSignals || [];
   } catch (error) {
     console.error('Error generating proactive todos:', error);
-    return store.get('suggestions') || [];
+    return getStoredRadarState().allSignals || [];
   }
 });
 
@@ -9428,8 +9607,8 @@ ipcMain.handle('start-google-auth', async () => {
 // Suggestions persistence (simple electron-store backed)
 ipcMain.handle('get-suggestions', async () => {
   try {
-    const s = store.get('suggestions') || [];
-    return Array.isArray(s) ? s.slice(0, MAX_PRACTICAL_SUGGESTIONS) : [];
+    const state = getStoredRadarState();
+    return Array.isArray(state?.allSignals) ? state.allSignals.slice(0, MAX_PRACTICAL_SUGGESTIONS * 2) : [];
   } catch (e) {
     console.error('Failed to get suggestions:', e);
     return [];
@@ -9438,13 +9617,19 @@ ipcMain.handle('get-suggestions', async () => {
 
 ipcMain.handle('save-suggestions', async (event, suggestions) => {
   try {
-    const final = rankAndLimitSuggestions(Array.isArray(suggestions) ? suggestions : [], {
-      maxTotal: MAX_PRACTICAL_SUGGESTIONS,
-      maxPerCategory: 2,
-      maxFollowups: 1,
-      now: Date.now()
+    const current = getStoredRadarState();
+    const relationshipSignals = (Array.isArray(suggestions) ? suggestions : []).filter((item) => String(item.signal_type || '').toLowerCase() !== 'todo');
+    const todoSignals = uniqById([
+      ...(current.todoSignals || []).filter((item) => !item?.completed),
+      ...(Array.isArray(suggestions) ? suggestions : []).filter((item) => String(item.signal_type || '').toLowerCase() === 'todo')
+    ]);
+    persistRadarState({
+      ...current,
+      relationshipSignals,
+      todoSignals,
+      allSignals: [...relationshipSignals, ...todoSignals],
+      generated_at: new Date().toISOString()
     });
-    store.set('suggestions', final);
     return true;
   } catch (e) {
     console.error('Failed to save suggestions:', e);
@@ -9452,14 +9637,8 @@ ipcMain.handle('save-suggestions', async (event, suggestions) => {
   }
 });
 
-ipcMain.handle('clear-suggestions', async () => {
-  try {
-    store.delete('suggestions');
-    return true;
-  } catch (e) {
-    console.error('Failed to clear suggestions:', e);
-    return false;
-  }
+ipcMain.handle('get-radar-state', async () => {
+  return getStoredRadarState();
 });
 
 // Debug function to manually trigger suggestions
@@ -9471,22 +9650,24 @@ ipcMain.handle('debug-trigger-suggestions', async () => {
 
 ipcMain.handle('trigger-suggestion-refresh', async (_event, payload = {}) => {
   try {
-    console.log('[Suggestions] User-triggered refresh requested');
+    console.log('[Radar] User-triggered refresh requested');
     await runSuggestionEngineJob({ force: true });
-    const suggestions = store.get('suggestions') || [];
+    const radarState = getStoredRadarState();
     const persistentTodos = store.get('persistentTodos') || [];
     return {
       success: true,
-      suggestions: Array.isArray(suggestions) ? suggestions.slice(0, MAX_PRACTICAL_SUGGESTIONS) : [],
+      radarState,
+      suggestions: Array.isArray(radarState?.allSignals) ? radarState.allSignals : [],
       persistentTodos: Array.isArray(persistentTodos) ? persistentTodos.slice(0, 25) : [],
-      source: 'memory-suggestion-engine',
+      source: 'chat-backed-radar',
       payload
     };
   } catch (error) {
-    console.error('[Suggestions] User-triggered refresh failed:', error);
+    console.error('[Radar] User-triggered refresh failed:', error);
     return {
       success: false,
-      suggestions: Array.isArray(store.get('suggestions')) ? store.get('suggestions').slice(0, MAX_PRACTICAL_SUGGESTIONS) : [],
+      radarState: getStoredRadarState(),
+      suggestions: Array.isArray(getStoredRadarState()?.allSignals) ? getStoredRadarState().allSignals : [],
       error: error?.message || String(error)
     };
   }
@@ -10631,14 +10812,32 @@ ipcMain.handle('clear-extension-data', async () => {
 });
 
 ipcMain.handle('get-relationship-contacts', async (_event, payload = {}) => {
+  await syncAppleContactsIntoRelationshipGraph({
+    force: Boolean(payload?.forceAppleContactsSync),
+    limit: payload?.appleContactsLimit || 500
+  }).catch((error) => {
+    console.warn('[get-relationship-contacts] Apple Contacts sync skipped:', error?.message || error);
+  });
   return getRelationshipContacts({
     limit: payload?.limit || 50,
     status: payload?.status || null
   });
 });
 
+ipcMain.handle('sync-apple-contacts', async (_event, payload = {}) => {
+  return syncAppleContactsIntoRelationshipGraph({
+    force: payload?.force !== false,
+    limit: payload?.limit || 500
+  });
+});
+
 ipcMain.handle('get-relationship-contact-detail', async (_event, contactId) => {
   return getRelationshipContactDetail(contactId);
+});
+
+ipcMain.handle('update-person-profile', async (_event, payload = {}) => {
+  const contactId = payload?.contactId || payload?.contact_id;
+  return updateRelationshipContactProfile(contactId, payload || {});
 });
 
 ipcMain.handle('generate-relationship-draft', async (_event, payload = {}) => {
@@ -10657,7 +10856,7 @@ ipcMain.handle('generate-relationship-draft', async (_event, payload = {}) => {
 
 // Persistent todos management
 ipcMain.handle('get-persistent-todos', () => {
-  const todos = (store.get('persistentTodos') || []).filter((todo) => !todo?.completed);
+  const todos = (store.get('persistentTodos') || []).filter((todo) => !todo?.completed && todo?.source !== 'auto_suggestion');
   store.set('persistentTodos', todos);
   return todos;
 });
@@ -10879,11 +11078,6 @@ app.whenReady().then(async () => {
 
   // Initialize daily task scheduling
   scheduleDailyTasks();
-  setTimeout(() => {
-    generateMorningBrief({ force: false, scheduled: false }).catch((e) => {
-      console.warn('Initial morning brief generation failed:', e?.message || e);
-    });
-  }, STARTUP_HEAVY_JOB_DELAY_MS);
   startSensorCaptureLoop();
   setTimeout(() => startSourceWarmup(), STARTUP_HEAVY_JOB_DELAY_MS);
   setTimeout(() => startPeriodicScreenshotCapture(), Math.max(15000, getPeriodicScreenshotWakeDelayMs()));

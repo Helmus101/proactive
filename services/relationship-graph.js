@@ -1,5 +1,12 @@
 const crypto = require('crypto');
 const db = require('./db');
+const { fetchAppleContacts } = require('./apple-contacts');
+const { upsertMemoryNode, upsertMemoryEdge } = require('./agent/graph-store');
+
+const APPLE_CONTACTS_SYNC_TTL_MS = 12 * 60 * 60 * 1000;
+let appleContactsSyncAt = 0;
+let appleContactsSyncInFlight = null;
+let appleContactsLastResult = { imported: 0, skipped: true, source: 'apple_contacts' };
 
 function nowIso() {
   return new Date().toISOString();
@@ -28,6 +35,10 @@ function asList(value) {
   return [value].filter(Boolean);
 }
 
+function uniqList(values = []) {
+  return Array.from(new Set(asList(values).map((item) => normalizeText(item)).filter(Boolean)));
+}
+
 function normalizeText(value = '') {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
@@ -52,6 +63,10 @@ function trim(value = '', max = 220) {
   return text.length > max ? `${text.slice(0, Math.max(0, max - 1)).trim()}…` : text;
 }
 
+function uniqNormalized(values = [], limit = 24) {
+  return Array.from(new Set(asList(values).map((item) => normalizeText(item)).filter(Boolean))).slice(0, limit);
+}
+
 function isEmail(value = '') {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim());
 }
@@ -63,13 +78,40 @@ function nameFromEmail(email = '') {
   return clean.split(/\s+/).map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(' ');
 }
 
+function splitNameParts(value = '') {
+  const normalized = normalizeName(value || '');
+  if (!normalized || isEmail(normalized)) return { first_name: '', last_name: '' };
+  const parts = normalized.split(/\s+/).filter(Boolean);
+  if (!parts.length) return { first_name: '', last_name: '' };
+  if (parts.length === 1) return { first_name: parts[0], last_name: '' };
+  return {
+    first_name: parts[0],
+    last_name: parts.slice(1).join(' ')
+  };
+}
+
 function isLikelyPersonName(value = '') {
   const text = normalizeName(value);
   if (!text || text.length < 3 || text.length > 80) return false;
+  if (/^(You|Me|I|Myself)$/i.test(text)) return false;
   if (isEmail(text)) return true;
   if (!/^[A-Z][\p{L}'-]+(?:\s+[A-Z][\p{L}'-]+){0,3}$/u.test(text)) return false;
   if (/\b(App|Chrome|Safari|Calendar|Gmail|Google|LinkedIn|Messages|Slack|Team|School|University|College|Inc|LLC|Ltd|Labs|Studio|Support|Settings|Terminal|Code)\b/.test(text)) return false;
   return true;
+}
+
+function chooseBetterDisplayName(existingName = '', incomingName = '') {
+  const existing = normalizeName(existingName || '');
+  const incoming = normalizeName(incomingName || '');
+  if (!existing) return incoming;
+  if (!incoming) return existing;
+  if (isEmail(incoming) && !isEmail(existing)) return existing;
+  if (isEmail(existing) && !isEmail(incoming)) return incoming;
+  const existingParts = existing.split(/\s+/);
+  const incomingParts = incoming.split(/\s+/);
+  if (existingParts.length > incomingParts.length && existing.toLowerCase().startsWith(incoming.toLowerCase())) return existing;
+  if (incomingParts.length > existingParts.length && incoming.toLowerCase().startsWith(existing.toLowerCase())) return incoming;
+  return incoming.length >= existing.length ? incoming : existing;
 }
 
 function parseContactString(value = '') {
@@ -204,45 +246,112 @@ async function findContactByIdentifiers(identifiers = [], displayName = '') {
 async function syncSemanticPersonNode(contact = {}, identifiers = [], evidence = {}) {
   const now = nowIso();
   const contactId = contact.id;
-  const title = contact.display_name || contact.name || 'Contact';
+  const contactMeta = asObj(contact.metadata);
+  const overrides = asObj(contactMeta.editable_overrides);
+  const title = overrides.display_name || contact.display_name || contact.name || 'Contact';
   const nodeId = `person_${contactId.replace(/^rel_/, '')}`;
+  const splitName = splitNameParts(title);
+  const sourceRefs = uniqNormalized([
+    ...asList(contactMeta.source_refs),
+    ...asList(contactMeta.relationship_contact_ids),
+    ...asList(contactMeta.interaction_refs),
+    evidence.event_id,
+    evidence.node_id
+  ], 32);
+  const topics = uniqNormalized([
+    ...asList(contact.topics),
+    ...asList(contactMeta.topics),
+    ...asList(contactMeta.interests)
+  ], 12);
   const metadata = {
     relationship_contact_id: contactId,
+    apple_contact_id: contactId,
     name: title,
+    display_name: title,
+    first_name: overrides.first_name || contactMeta.first_name || splitName.first_name || '',
+    last_name: overrides.last_name || contactMeta.last_name || splitName.last_name || '',
     email: identifiers.find((item) => item.identifier_type === 'email')?.identifier_value || null,
-    company: contact.company || null,
-    role: contact.role || null,
+    company: overrides.company || contact.company || null,
+    role: overrides.role || contact.role || null,
     latest_interaction_at: contact.last_interaction_at || evidence.timestamp || null,
     strength_score: Number(contact.strength_score || 0),
     relationship_tier: contact.relationship_tier || null,
-    source_refs: [evidence.event_id].filter(Boolean),
-    topics: asList(contact.topics || asObj(contact.metadata).topics).slice(0, 12)
+    source_refs: sourceRefs,
+    interaction_refs: uniqNormalized([...(contactMeta.interaction_refs || []), evidence.event_id].filter(Boolean), 32),
+    topics,
+    interests: uniqNormalized([...(contactMeta.interests || []), ...(overrides.interests || []), ...topics], 12),
+    identifiers: identifiers.map((item) => ({ type: item.identifier_type, value: item.identifier_value })),
+    notes: trim(overrides.notes || contactMeta.notes || '', 1200),
+    editable_overrides: overrides
   };
 
-  await db.runQuery(
-    `INSERT OR REPLACE INTO memory_nodes
-     (id, layer, subtype, title, summary, canonical_text, confidence, status, source_refs, metadata, graph_version, created_at, updated_at, embedding, anchor_date, anchor_at)
-     VALUES (?, 'semantic', 'person', ?, ?, ?, ?, 'active', ?,
-             ?, 'relationship_graph_v1',
-             COALESCE((SELECT created_at FROM memory_nodes WHERE id = ?), ?), ?,
-             COALESCE((SELECT embedding FROM memory_nodes WHERE id = ?), '[]'), ?, ?)`,
-    [
-      nodeId,
-      title,
-      `Relationship contact: ${title}`,
-      `${title}\n${contact.company || ''}\n${contact.role || ''}`.trim(),
-      Math.max(0.65, Number(contact.strength_score || 0.65)),
-      JSON.stringify(metadata.source_refs),
-      JSON.stringify(metadata),
-      nodeId,
-      now,
-      now,
-      nodeId,
-      String(contact.last_interaction_at || evidence.timestamp || now).slice(0, 10),
-      contact.last_interaction_at || evidence.timestamp || now
-    ]
-  ).catch(() => {});
+  await upsertMemoryNode({
+    id: nodeId,
+    layer: 'semantic',
+    subtype: 'person',
+    title,
+    summary: `Relationship contact: ${title}`,
+    canonicalText: `${title}\n${contact.company || ''}\n${contact.role || ''}\n${topics.join(', ')}`.trim(),
+    confidence: Math.max(0.65, Number(contact.strength_score || 0.65)),
+    status: 'active',
+    sourceRefs: metadata.source_refs,
+    metadata,
+    graphVersion: 'relationship_graph_v1',
+    createdAt: now,
+    updatedAt: now,
+    anchorDate: String(contact.last_interaction_at || evidence.timestamp || now).slice(0, 10),
+    anchorAt: contact.last_interaction_at || evidence.timestamp || now,
+    connectionCount: metadata.source_refs.length
+  }).catch(() => {});
+
+  for (const topic of topics) {
+    const topicId = `topic_${stableId('rel_topic', topic).replace(/^rel_topic_/, '')}`;
+    await upsertMemoryNode({
+      id: topicId,
+      layer: 'semantic',
+      subtype: 'topic',
+      title: topic,
+      summary: `Topic connected to ${title}`,
+      canonicalText: `${topic}\nRelated contact: ${title}`,
+      confidence: 0.58,
+      status: 'active',
+      sourceRefs: metadata.source_refs,
+    metadata: {
+      related_people: [title],
+      display_name: title,
+      relationship_contact_id: contactId,
+      source_refs: metadata.source_refs
+    },
+      graphVersion: 'relationship_graph_v1',
+      createdAt: now,
+      updatedAt: now,
+      anchorDate: String(contact.last_interaction_at || evidence.timestamp || now).slice(0, 10),
+      anchorAt: contact.last_interaction_at || evidence.timestamp || now
+    }).catch(() => {});
+
+    await upsertMemoryEdge({
+      fromNodeId: nodeId,
+      toNodeId: topicId,
+      edgeType: 'RELATED_TO',
+      weight: 0.72,
+      traceLabel: 'contact_interest',
+      evidenceCount: Math.max(1, metadata.source_refs.length),
+      metadata: { relationship_contact_id: contactId, topic }
+    }).catch(() => {});
+  }
   return nodeId;
+}
+
+async function getPersonNodeByContactId(contactId) {
+  if (!contactId) return null;
+  return db.getQuery(
+    `SELECT *
+     FROM memory_nodes
+     WHERE subtype = 'person'
+       AND json_extract(COALESCE(metadata, '{}'), '$.relationship_contact_id') = ?
+     LIMIT 1`,
+    [contactId]
+  ).catch(() => null);
 }
 
 async function upsertRelationshipContact(contact = {}, identifiers = [], evidence = {}) {
@@ -275,15 +384,40 @@ async function upsertRelationshipContact(contact = {}, identifiers = [], evidenc
   const existing = await findContactByIdentifiers(normalizedIdentifiers, displayName);
   const id = existing?.id || stableId('rel', normalizedIdentifiers.find((item) => item.identifier_type === 'email')?.normalized_value || normalizedIdentifier(displayName));
   const now = nowIso();
+  const chosenDisplayName = chooseBetterDisplayName(existing?.display_name, displayName);
+  const existingMeta = asObj(existing?.metadata);
+  const incomingMeta = asObj(parsedContact.metadata);
+  const mergedTopics = uniqNormalized([
+    ...(existingMeta.topics || []),
+    ...(incomingMeta.topics || []),
+    ...(existingMeta.interests || []),
+    ...(incomingMeta.interests || [])
+  ], 12);
   const metadata = {
-    ...asObj(existing?.metadata),
-    ...asObj(parsedContact.metadata),
+    ...existingMeta,
+    ...incomingMeta,
+    emails: uniqList([...(existingMeta.emails || []), ...(incomingMeta.emails || []), ...asList(parsedContact.email || parsedContact.emails)]),
+    phones: uniqList([...(existingMeta.phones || []), ...(incomingMeta.phones || []), ...asList(parsedContact.phone || parsedContact.phones)]),
+    addresses: uniqList([...(existingMeta.addresses || []), ...(incomingMeta.addresses || [])]),
+    urls: uniqList([...(existingMeta.urls || []), ...(incomingMeta.urls || [])]),
+    notes: trim([existingMeta.notes, incomingMeta.notes].filter(Boolean).join('\n\n'), 1500),
+    interaction_refs: uniqNormalized([...(existingMeta.interaction_refs || []), ...(incomingMeta.interaction_refs || []), evidence.event_id], 32),
+    source_refs: uniqNormalized([...(existingMeta.source_refs || []), ...(incomingMeta.source_refs || []), evidence.event_id], 32),
+    topics: mergedTopics,
+    interests: uniqNormalized([...(existingMeta.interests || []), ...(incomingMeta.interests || []), ...mergedTopics], 12),
     sources: Array.from(new Set([
-      ...asList(asObj(existing?.metadata).sources),
+      ...asList(existingMeta.sources),
+      ...asList(incomingMeta.sources),
       evidence.source || parsedContact.source || 'memory'
     ].filter(Boolean))),
-    linkedin_observed: Boolean(parsedContact.linkedin_observed || asObj(existing?.metadata).linkedin_observed),
-    score_inputs: asObj(existing?.metadata).score_inputs || null
+    birthday: incomingMeta.birthday || existingMeta.birthday || null,
+    apple_contacts: Boolean(incomingMeta.apple_contacts || existingMeta.apple_contacts),
+    linkedin_observed: Boolean(parsedContact.linkedin_observed || existingMeta.linkedin_observed),
+    score_inputs: existingMeta.score_inputs || null,
+    first_name: incomingMeta.first_name || existingMeta.first_name || splitNameParts(chosenDisplayName).first_name || '',
+    last_name: incomingMeta.last_name || existingMeta.last_name || splitNameParts(chosenDisplayName).last_name || '',
+    display_name: chosenDisplayName,
+    editable_overrides: asObj(existingMeta.editable_overrides)
   };
   const lastInteraction = parsedContact.last_interaction_at || evidence.timestamp || existing?.last_interaction_at || null;
   const company = parsedContact.company || existing?.company || null;
@@ -296,10 +430,7 @@ async function upsertRelationshipContact(contact = {}, identifiers = [], evidenc
      VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT interaction_count_30d FROM relationship_contacts WHERE id = ?), 0), ?, COALESCE((SELECT status FROM relationship_contacts WHERE id = ?), 'warm'), ?,
              COALESCE((SELECT created_at FROM relationship_contacts WHERE id = ?), ?), ?)
      ON CONFLICT(id) DO UPDATE SET
-       display_name = CASE
-         WHEN excluded.display_name LIKE '%@%' THEN relationship_contacts.display_name
-         ELSE excluded.display_name
-       END,
+       display_name = excluded.display_name,
        company = COALESCE(excluded.company, relationship_contacts.company),
        role = COALESCE(excluded.role, relationship_contacts.role),
        last_interaction_at = CASE
@@ -310,9 +441,9 @@ async function upsertRelationshipContact(contact = {}, identifiers = [], evidenc
        relationship_tier = COALESCE(excluded.relationship_tier, relationship_contacts.relationship_tier),
        metadata = excluded.metadata,
        updated_at = excluded.updated_at`,
-    [
+      [
       id,
-      isEmail(displayName) ? nameFromEmail(displayName) : displayName,
+      isEmail(chosenDisplayName) ? nameFromEmail(chosenDisplayName) : chosenDisplayName,
       company,
       role,
       Number(existing?.strength_score || parsedContact.strength_score || 0),
@@ -417,7 +548,85 @@ function participantsFromMetadata(metadata = {}, type = '') {
   add(meta.organizer, 'calendar');
   add(meta.attendees, 'calendar');
   add(meta.participants || meta.person_labels, String(type || '').toLowerCase().includes('calendar') ? 'calendar' : 'memory');
+  add((meta.entity_labels || []).map((item) => String(item || '').replace(/^person:/i, '')).filter(Boolean), 'memory');
   return out;
+}
+
+function isCommunicationSurface(type = '', metadata = {}, sourceApp = '') {
+  const hay = `${type || ''} ${sourceApp || ''} ${metadata.app || ''} ${metadata.activeApp || ''} ${metadata.content_type || ''} ${metadata.source_type || ''}`.toLowerCase();
+  return /\b(message|chat|thread|gmail|mail|slack|teams|discord|whatsapp|telegram|signal|messages|imessage|sms)\b/.test(hay);
+}
+
+function extractObservedParticipants(text = '', metadata = {}, type = '', sourceApp = '') {
+  const safeText = String(text || '');
+  const lines = safeText.split(/\n+/).map((line) => normalizeText(line)).filter(Boolean);
+  const results = [];
+  const seen = new Set();
+
+  const push = ({ name = '', email = '', company = '', role = '', source = 'observed_surface' } = {}) => {
+    const normalizedName = normalizeName(name || '');
+    const normalizedEmail = normalizeText(email || '').toLowerCase();
+    const key = `${normalizedName.toLowerCase()}|${normalizedEmail}|${source}`;
+    if ((!normalizedName || !isLikelyPersonName(normalizedName)) && !isEmail(normalizedEmail)) return;
+    if (seen.has(key)) return;
+    seen.add(key);
+    results.push({
+      name: normalizedName || nameFromEmail(normalizedEmail),
+      email: normalizedEmail,
+      company: trim(company || '', 90),
+      role: trim(role || '', 90),
+      source
+    });
+  };
+
+  const windowTitle = normalizeText(metadata.window_title || metadata.activeWindowTitle || metadata.title || '');
+  const url = normalizeText(metadata.url || '');
+  const domain = normalizeText(metadata.domain || (() => {
+    try {
+      return url ? new URL(url).hostname.replace(/^www\./, '') : '';
+    } catch (_) {
+      return '';
+    }
+  })());
+
+  if (domain.includes('linkedin.com') || /\blinkedin\b/i.test(windowTitle) || /\blinkedin\b/i.test(safeText)) {
+    for (const candidate of extractLinkedInProfile(safeText, metadata)) {
+      push({ ...candidate, source: 'linkedin_profile' });
+    }
+    const titleCandidate = windowTitle.match(/^([A-Z][\p{L}'-]+(?:\s+[A-Z][\p{L}'-]+){0,3})\s*(?:\||[-–])\s*LinkedIn/iu);
+    if (titleCandidate) push({ name: titleCandidate[1], source: 'linkedin_profile' });
+  }
+
+  if (isCommunicationSurface(type, metadata, sourceApp)) {
+    const titlePatterns = [
+      /(?:messages?\s+with|chat with|conversation with)\s+([A-Z][\p{L}'-]+(?:\s+[A-Z][\p{L}'-]+){0,3})/iu,
+      /^([A-Z][\p{L}'-]+(?:\s+[A-Z][\p{L}'-]+){0,3})\s*(?:[-–|:])\s*(?:whatsapp|messages|imessage|signal|telegram|slack|discord|teams)\b/iu,
+      /(?:whatsapp|messages|imessage|signal|telegram|slack|discord|teams)\s*(?:[-–|:])\s*([A-Z][\p{L}'-]+(?:\s+[A-Z][\p{L}'-]+){0,3})/iu
+    ];
+    for (const pattern of titlePatterns) {
+      const match = windowTitle.match(pattern);
+      if (match) push({ name: match[1], source: 'chat_header' });
+    }
+
+    for (const line of lines.slice(0, 80)) {
+      const speakerMatch = line.match(/^([A-Z][\p{L}'-]+(?:\s+[A-Z][\p{L}'-]+){0,3})\s*:\s+/u);
+      if (speakerMatch) push({ name: speakerMatch[1], source: 'chat_speaker' });
+
+      const headerMatch = line.match(/^(?:from|to|cc|bcc)\s*:\s*(.+)$/i);
+      if (headerMatch) {
+        const parsed = parseContactString(headerMatch[1]);
+        push({ name: parsed?.name || '', email: parsed?.email || '', source: 'message_header' });
+      }
+
+      const emailMatch = line.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+      if (emailMatch) {
+        const parsed = parseContactString(line);
+        push({ name: parsed?.name || '', email: parsed?.email || emailMatch[0], source: 'message_email' });
+      }
+    }
+  }
+
+  return results;
 }
 
 async function loadKnownIdentifiers() {
@@ -454,42 +663,40 @@ function extractLinkedInProfile(text = '', metadata = {}) {
   return candidates.slice(0, 3);
 }
 
+function extractRelationshipTopics(text = '', metadata = {}) {
+  const seeded = uniqNormalized([
+    ...asList(metadata.topics),
+    ...asList(metadata.topic_labels),
+    ...asList(metadata.interests),
+    ...asList(metadata.keywords)
+  ], 12);
+  if (seeded.length) return seeded;
+
+  const source = normalizeText(text);
+  const discovered = [];
+  const patterns = [
+    /\b(?:about|around|on)\s+([A-Za-z][A-Za-z0-9&/\- ]{3,40})/gi,
+    /\binterest in\s+([A-Za-z][A-Za-z0-9&/\- ]{3,40})/gi,
+    /\bthe\s+([a-z][a-z0-9&/\- ]{3,30})\s+is\b/gi,
+    /\b([a-z][a-z0-9&/\- ]{3,30})\s+is next\b/gi
+  ];
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(source)) !== null) {
+      const candidate = trim(match[1], 48).replace(/[.,;:]$/, '');
+      if (candidate && candidate.split(/\s+/).length <= 6) discovered.push(candidate);
+    }
+  }
+  return uniqNormalized(discovered, 12);
+}
+
 async function linkMentionsForEvent({ eventId, type = '', source = '', text = '', metadata = {}, envelope = {} } = {}) {
   await ensureRelationshipTables();
   const ts = envelope.occurred_at || metadata.occurred_at || metadata.timestamp || nowIso();
   const sourceApp = envelope.app || metadata.app || metadata.activeApp || source || '';
   const safeText = String(text || metadata.raw_text || metadata.redacted_text || '').slice(0, 12000);
-  const participants = participantsFromMetadata(metadata, type);
+  const relationshipTopics = extractRelationshipTopics(safeText, metadata);
   const linked = [];
-
-  for (const participant of participants) {
-    const contact = await upsertRelationshipContact(
-      {
-        name: participant.name,
-        email: participant.email,
-        last_interaction_at: ts,
-        relationship_tier: participant.source === 'calendar' || participant.source === 'gmail' ? 'network' : 'observed_contact'
-      },
-      [
-        participant.email ? { type: 'email', value: participant.email, source_label: participant.source, confidence: 1 } : null,
-        participant.name ? { type: 'name', value: participant.name, source_label: participant.source, confidence: 0.95 } : null
-      ].filter(Boolean),
-      { source: participant.source, event_id: eventId, timestamp: ts }
-    );
-    if (!contact) continue;
-    await linkRelationshipMention({
-      contactId: contact.id,
-      eventId,
-      retrievalDocId: `event:${eventId}`,
-      timestamp: ts,
-      sourceApp,
-      snippet: safeText || envelope.title || contact.display_name,
-      confidence: 0.98,
-      mentionType: participant.source === 'calendar' ? 'calendar_attendee' : 'direct_participant',
-      metadata: { source: participant.source }
-    });
-    linked.push(contact);
-  }
 
   const known = await loadKnownIdentifiers();
   const textLower = safeText.toLowerCase();
@@ -511,25 +718,6 @@ async function linkMentionsForEvent({ eventId, type = '', source = '', text = ''
       metadata: { matched_identifier: item.identifier_value, identifier_type: item.identifier_type }
     });
     seen.add(item.contact_id);
-  }
-
-  for (const candidate of extractLinkedInProfile(safeText, metadata)) {
-    const contact = await upsertRelationshipContact(candidate, [
-      { type: 'name', value: candidate.name, source_label: 'linkedin_screenshot', confidence: 0.82 }
-    ], { source: 'linkedin_screenshot', event_id: eventId, timestamp: ts });
-    if (!contact) continue;
-    await linkRelationshipMention({
-      contactId: contact.id,
-      eventId,
-      retrievalDocId: `event:${eventId}`,
-      timestamp: ts,
-      sourceApp: sourceApp || 'LinkedIn',
-      snippet: bestSnippetAround(safeText, candidate.name),
-      confidence: 0.78,
-      mentionType: 'linkedin_profile_observed',
-      metadata: { company: candidate.company || '', role: candidate.role || '' }
-    });
-    linked.push(contact);
   }
 
   return linked;
@@ -691,28 +879,6 @@ async function backfillRelationshipContacts() {
       envelope: { app: row.app, title: row.title, occurred_at: row.occurred_at || row.timestamp }
     }).catch(() => {});
   }
-
-  const personRows = await db.allQuery(
-    `SELECT id, title, summary, metadata, updated_at, created_at
-     FROM memory_nodes
-     WHERE layer = 'semantic' AND subtype = 'person'
-     LIMIT 1000`
-  ).catch(() => []);
-  for (const row of personRows || []) {
-    const metadata = asObj(row.metadata);
-    await upsertRelationshipContact({
-      name: row.title,
-      email: metadata.email || null,
-      company: metadata.company || null,
-      role: metadata.role || null,
-      last_interaction_at: metadata.latest_interaction_at || row.updated_at || row.created_at,
-      relationship_tier: metadata.relationship_tier || 'observed_contact',
-      metadata: { semantic_node_id: row.id, notes: row.summary || '' }
-    }, [
-      metadata.email ? { type: 'email', value: metadata.email, source_label: 'semantic_node' } : null,
-      row.title ? { type: 'name', value: row.title, source_label: 'semantic_node', confidence: 0.8 } : null
-    ].filter(Boolean), { source: 'semantic_node', node_id: row.id, timestamp: row.updated_at || row.created_at }).catch(() => {});
-  }
 }
 
 async function runRelationshipGraphJob(options = {}) {
@@ -723,10 +889,67 @@ async function runRelationshipGraphJob(options = {}) {
   return { contacts: Number(count?.count || 0), backfill: Boolean(options.backfill), updated_at: nowIso() };
 }
 
+async function syncAppleContactsIntoRelationshipGraph({ force = false, limit = 500 } = {}) {
+  await ensureRelationshipTables();
+  const now = Date.now();
+  if (!force && appleContactsLastResult && (now - appleContactsSyncAt) < APPLE_CONTACTS_SYNC_TTL_MS) {
+    return appleContactsLastResult;
+  }
+  if (appleContactsSyncInFlight) return appleContactsSyncInFlight;
+
+  appleContactsSyncInFlight = (async () => {
+    try {
+      const rows = await fetchAppleContacts({ limit });
+      let imported = 0;
+      for (const row of rows || []) {
+        const emails = asList(row.emails);
+        const phones = asList(row.phones);
+        const primaryEmail = emails[0] || '';
+        const contact = await upsertRelationshipContact(
+          {
+            name: row.name || primaryEmail,
+            email: primaryEmail,
+            company: row.company || null,
+            role: row.role || null,
+            metadata: {
+              emails,
+              phones,
+              addresses: asList(row.addresses),
+              urls: asList(row.urls),
+              birthday: row.birthday || null,
+              notes: trim(row.notes || '', 500),
+              apple_contacts: true
+            },
+            relationship_tier: 'apple_contact'
+          },
+          [
+            ...emails.map((email) => ({ type: 'email', value: email, source_label: 'apple_contacts', confidence: 1 })),
+            ...phones.map((phone) => ({ type: 'alias', value: phone, source_label: 'apple_contacts', confidence: 0.9 })),
+            row.name ? { type: 'name', value: row.name, source_label: 'apple_contacts', confidence: 0.95 } : null
+          ].filter(Boolean),
+          { source: 'apple_contacts', timestamp: nowIso() }
+        );
+        if (contact?.id) imported += 1;
+      }
+      appleContactsSyncAt = Date.now();
+      appleContactsLastResult = { imported, source: 'apple_contacts', skipped: false };
+      return appleContactsLastResult;
+    } catch (error) {
+      appleContactsSyncAt = Date.now();
+      appleContactsLastResult = { imported: 0, source: 'apple_contacts', skipped: false, error: String(error?.message || error) };
+      return appleContactsLastResult;
+    } finally {
+      appleContactsSyncInFlight = null;
+    }
+  })();
+
+  return appleContactsSyncInFlight;
+}
+
 async function getRelationshipContacts({ limit = 50, status = null } = {}) {
   await ensureRelationshipTables();
   const params = [];
-  const where = [];
+  const where = [`json_extract(COALESCE(metadata, '{}'), '$.apple_contacts') = 1`];
   if (status) {
     where.push(`status = ?`);
     params.push(status);
@@ -742,7 +965,17 @@ async function getRelationshipContacts({ limit = 50, status = null } = {}) {
      LIMIT ?`,
     params
   ).catch(() => []);
-  return (rows || []).map((row) => ({ ...row, metadata: asObj(row.metadata) }));
+  return (rows || []).map((row) => {
+    const metadata = asObj(row.metadata);
+    const overrides = asObj(metadata.editable_overrides);
+    return {
+      ...row,
+      display_name: overrides.display_name || metadata.display_name || row.display_name,
+      company: overrides.company || row.company,
+      role: overrides.role || row.role,
+      metadata
+    };
+  });
 }
 
 async function getRelationshipContactDetail(contactId) {
@@ -777,13 +1010,117 @@ async function getRelationshipContactDetail(contactId) {
     LIMIT 10
   `, [contactId, contactId]).catch(() => []);
 
-  return { 
-    ...contact, 
-    metadata: asObj(contact.metadata), 
+  const metadata = asObj(contact.metadata);
+  const overrides = asObj(metadata.editable_overrides);
+  const personNode = await getPersonNodeByContactId(contactId);
+  const personNodeMeta = asObj(personNode?.metadata);
+  const splitName = splitNameParts(overrides.display_name || metadata.display_name || contact.display_name || '');
+
+  return {
+    ...contact,
+    display_name: overrides.display_name || metadata.display_name || contact.display_name,
+    company: overrides.company || contact.company,
+    role: overrides.role || contact.role,
+    metadata,
     identifiers, 
     mentions,
-    related_contacts: relatedContacts
+    related_contacts: relatedContacts,
+    person_node: personNode ? { ...personNode, metadata: personNodeMeta } : null,
+    imported_fields: {
+      emails: asList(metadata.emails),
+      phones: asList(metadata.phones),
+      addresses: asList(metadata.addresses),
+      urls: asList(metadata.urls),
+      birthday: metadata.birthday || null
+    },
+    editable_fields: {
+      display_name: overrides.display_name || metadata.display_name || contact.display_name || '',
+      first_name: overrides.first_name || personNodeMeta.first_name || metadata.first_name || splitName.first_name || '',
+      last_name: overrides.last_name || personNodeMeta.last_name || metadata.last_name || splitName.last_name || '',
+      company: overrides.company || contact.company || '',
+      role: overrides.role || contact.role || '',
+      notes: overrides.notes || metadata.notes || '',
+      interests: uniqNormalized([...(overrides.interests || []), ...(metadata.interests || [])], 24),
+      topics: uniqNormalized([...(overrides.topics || []), ...(metadata.topics || [])], 24),
+      identifiers: uniqNormalized(asList(overrides.identifiers), 24)
+    },
+    recent_interaction_refs: uniqNormalized(mentions.map((row) => row.event_id).filter(Boolean), 20),
+    related_node_summaries: uniqNormalized([...(personNodeMeta.topics || []), ...(personNodeMeta.interests || [])], 20)
   };
+}
+
+async function updateRelationshipContactProfile(contactId, updates = {}) {
+  await ensureRelationshipTables();
+  const existing = await db.getQuery(`SELECT * FROM relationship_contacts WHERE id = ?`, [contactId]).catch(() => null);
+  if (!existing) return null;
+  const metadata = asObj(existing.metadata);
+  const currentOverrides = asObj(metadata.editable_overrides);
+
+  const editable = {
+    display_name: normalizeName(updates.display_name || currentOverrides.display_name || metadata.display_name || existing.display_name || ''),
+    first_name: normalizeName(updates.first_name || currentOverrides.first_name || metadata.first_name || ''),
+    last_name: normalizeName(updates.last_name || currentOverrides.last_name || metadata.last_name || ''),
+    company: normalizeText(updates.company || currentOverrides.company || existing.company || ''),
+    role: normalizeText(updates.role || currentOverrides.role || existing.role || ''),
+    notes: trim(updates.notes || currentOverrides.notes || metadata.notes || '', 1500),
+    interests: uniqNormalized(updates.interests || currentOverrides.interests || metadata.interests || [], 24),
+    topics: uniqNormalized(updates.topics || currentOverrides.topics || metadata.topics || [], 24),
+    identifiers: uniqNormalized(updates.identifiers || currentOverrides.identifiers || [], 24)
+  };
+  if (!editable.display_name && (editable.first_name || editable.last_name)) {
+    editable.display_name = normalizeName([editable.first_name, editable.last_name].filter(Boolean).join(' '));
+  }
+
+  const nextMetadata = {
+    ...metadata,
+    display_name: editable.display_name || metadata.display_name || existing.display_name,
+    first_name: editable.first_name || metadata.first_name || '',
+    last_name: editable.last_name || metadata.last_name || '',
+    notes: editable.notes || metadata.notes || '',
+    interests: uniqNormalized([...(metadata.interests || []), ...editable.interests], 24),
+    topics: uniqNormalized([...(metadata.topics || []), ...editable.topics], 24),
+    editable_overrides: editable
+  };
+
+  await db.runQuery(
+    `UPDATE relationship_contacts
+     SET display_name = ?, company = ?, role = ?, metadata = ?, updated_at = ?
+     WHERE id = ?`,
+    [
+      editable.display_name || existing.display_name,
+      editable.company || existing.company || null,
+      editable.role || existing.role || null,
+      JSON.stringify(nextMetadata),
+      nowIso(),
+      contactId
+    ]
+  ).catch(() => {});
+
+  const refreshed = await db.getQuery(`SELECT * FROM relationship_contacts WHERE id = ?`, [contactId]).catch(() => null);
+  if (refreshed) {
+    const identifiers = await db.allQuery(
+      `SELECT identifier_type, identifier_value, source_label, confidence
+       FROM relationship_contact_identifiers
+       WHERE contact_id = ?`,
+      [contactId]
+    ).catch(() => []);
+    const normalizedIdentifiers = [
+      ...identifiers.map((item) => normalizeIdentifierInput({
+        type: item.identifier_type,
+        value: item.identifier_value,
+        source_label: item.source_label,
+        confidence: item.confidence
+      }, 'memory')).filter(Boolean),
+      ...editable.identifiers.map((value) => normalizeIdentifierInput({ type: 'alias', value, source_label: 'weave_edit', confidence: 0.95 }, 'weave_edit')).filter(Boolean),
+      ...(editable.display_name ? [normalizeIdentifierInput({ type: 'name', value: editable.display_name, source_label: 'weave_edit', confidence: 0.98 }, 'weave_edit')] : []).filter(Boolean)
+    ];
+    await syncSemanticPersonNode({ ...refreshed, metadata: nextMetadata }, normalizedIdentifiers, {
+      source: 'weave_edit',
+      timestamp: nowIso()
+    }).catch(() => {});
+  }
+
+  return getRelationshipContactDetail(contactId);
 }
 
 async function buildRelationshipDraftContext(contactId, options = {}) {
@@ -879,13 +1216,16 @@ module.exports = {
   runRelationshipGraphJob,
   getRelationshipContacts,
   getRelationshipContactDetail,
+  updateRelationshipContactProfile,
   buildRelationshipDraftContext,
   buildDeterministicDraft,
   searchRelationshipContext,
+  syncAppleContactsIntoRelationshipGraph,
   __test__: {
     normalizeName,
     isLikelyPersonName,
     extractLinkedInProfile,
+    extractObservedParticipants,
     scoreStatus
   }
 };

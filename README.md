@@ -1,12 +1,15 @@
-# Weave Todo App
+# Weave
 
-An Electron application with Chrome extension integration that uses AI to generate Weave to-do lists based on your browsing data, emails, and calendar events.
+An Electron app that turns continuous work context into relationship intelligence for founders and consultants. Weave captures ambient signals from email, calendar, browsing, and screen context, then surfaces who matters now, why now, and the best next move.
 
 ## Features
 
 - **Google OAuth Integration**: Connect your Google account to access Gmail and Calendar data
 - **Chrome Extension Data Collection**: Automatically collects browsing data for AI analysis
-- **AI-Powered Task Generation**: Uses DeepSeek AI to analyze your data and create proactive to-do lists
+- **Apple Contacts As Source Of Truth**: People in Weave come from Apple Contacts, then conversations, meetings, and notes attach to those people over time
+- **Relationship Radar**: Ranks the people, follow-ups, briefs, and opportunities that deserve attention now
+- **AI Relationship Strategist**: Drafts outreach, prepares meeting briefs, and answers questions about your network
+- **Apple Contacts Sync**: On macOS, Weave can import names, emails, phones, addresses, URLs, birthdays, and notes from Apple Contacts when access is allowed
 - **Voice-to-Agent (VTA) Control**: Global hotkey voice input that can drive an adaptive desktop automation loop
 - **No Database Required**: Uses local storage for data persistence
 - **Task Execution**: Execute tasks directly from the app
@@ -81,8 +84,8 @@ npm start
 
 1. **Connect Google Account**: Click "Connect Google Account" to authenticate
 2. **Sync Data**: Use "Sync Data" to collect emails and calendar events
-3. **Generate Tasks**: Click "Generate Proactive Todos" to analyze your data with AI
-4. **Manage Tasks**: View, prioritize, and execute tasks from the main dashboard
+3. **Refresh Relationship Radar**: Ask Weave to analyze recent context and surface relationship signals
+4. **Act on the Right People**: Draft follow-ups, prepare briefs, and review why each opportunity matters
 
 ## Architecture
 
@@ -114,15 +117,15 @@ The app now supports a hybrid VTA flow inspired by "Wispr Flow + Manus":
 1. Electron app collects local activity data
 2. Electron app stores data locally using electron-store
 3. User triggers AI analysis
-4. AI processes data and generates tasks
-5. Tasks are displayed and can be executed
+4. AI processes the data into relationship memory, briefs, and next moves
+5. Radar cards, people views, and assistant answers are displayed for review and action
 
 ### Data Storage
 
 The app uses `electron-store` for local data persistence:
 - Google OAuth tokens
 - User data (emails, calendar, browsing)
-- Generated tasks
+- Relationship radar cards and assistant context
 - Local sync settings
 
 ## Security Considerations
