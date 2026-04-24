@@ -137,6 +137,7 @@ class WeaveApp {
         this.toggleChatHistoryButton = document.getElementById('toggle-chat-history-btn');
         this.chatView = document.getElementById('action-view');
         this.chatSyncStatus = document.getElementById('chat-sync-status');
+        this.chatSuggestionsList = document.getElementById("chat-suggestions-list");
         this.contactsSort = document.getElementById('contacts-sort');
         this.suggestionProviderSelect = document.getElementById('suggestion-llm-provider');
         this.suggestionModelInput = document.getElementById('suggestion-llm-model');
@@ -651,6 +652,10 @@ class WeaveApp {
             ${section(this.currentFilter === 'relationships' ? 'Relationship signals' : 'To-do signals', visibleTodos, 0)}
             ${regularTasks}
         `;
+        if (this.chatSuggestionsList) {
+            const chatVisible = this.getVisibleTodos().slice(0, 6);
+            this.chatSuggestionsList.innerHTML = chatVisible.map((todo, idx) => this.renderSuggestionCard(todo, idx)).join("");
+        }
     }
 
     renderRegularTodosSection() {
@@ -1736,12 +1741,12 @@ Would you like me to continue with more detail?` : content;
             label: 'Analyzing your question',
             startedAt,
             completedAt: null,
-            expanded: false,
+            expanded: true,
             stages: initialStages,
             stageMap: new Map(initialStages.map((stage) => [stage.id, stage])),
             trace: []
         };
-        panel.dataset.expanded = 'false';
+        panel.dataset.expanded = 'true';
         const toggleExpanded = () => {
             const state = panel.__thinkingState;
             state.expanded = !state.expanded;
