@@ -2226,7 +2226,35 @@ ${reflectorFeedback ? `[Reflector Feedback]\nRejected for: ${reflectorFeedback.c
 ${query}`;
 
   try {
-    const content = await callLLM(prompt, apiKey, policy.temperature, { task: 'synthesis', maxTokens: policy.maxTokens });
+    let content = await callLLM(prompt, apiKey, policy.temperature, { task: 'synthesis', maxTokens: policy.maxTokens });
+
+    // Handle tool calls
+    const toolCallMatches = Array.from(content.matchAll(/<tool_call>(.*?)<\/tool_call>/gs));
+    if (toolCallMatches.length > 0) {
+      const toolResults = [];
+      for (const match of toolCallMatches) {
+        const callJson = safeJsonParse(match[1], null);
+        if (callJson?.tool) {
+          try {
+            const result = await dispatchTool(callJson.tool, callJson.input || {});
+            toolResults.push({ tool: callJson.tool, input: callJson.input, result });
+          } catch (toolErr) {
+            toolResults.push({ tool: callJson.tool, input: callJson.input, error: toolErr.message });
+          }
+        }
+      }
+
+      if (toolResults.length > 0) {
+        const feedbackPrompt = `${prompt}
+
+[Tool Results]
+${JSON.stringify(toolResults, null, 2)}
+
+The tools above were executed based on your previous output. Now provide the final response to the user, incorporating these results if they are relevant. Do not output more tool calls.`;
+        content = await callLLM(feedbackPrompt, apiKey, policy.temperature, { task: 'synthesis', maxTokens: policy.maxTokens });
+      }
+    }
+
     return sanitizeAssistantOutput(normalizeAssistantContent(content));
   } catch (llmError) {
     return buildGroundedFallbackAnswer(query, retrieval, drilldownEvidence);
