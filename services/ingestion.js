@@ -4,7 +4,8 @@ const db = require('./db');
 const { generateEmbedding, calculateSentimentScore } = require('./embedding-engine');
 const { upsertRetrievalDoc } = require('./agent/graph-store');
 const cognitiveRouter = require('./agent/cognitive-router');
-const { linkMentionsForEvent } = require('./relationship-graph');
+const { linkMentionsForEvent, __test__ } = require('./relationship-graph');
+const { extractObservedParticipants } = __test__;
 
 let ingestionInitialized = false;
 let initializingPromise = null;
@@ -1174,6 +1175,10 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
     eventStatus = 'blocked';
   }
 
+  // Extract observed participants
+  const observedParticipants = extractObservedParticipants(safeText || rawInputText, safeMetadataInput, type, source);
+  const observedNames = observedParticipants.map(p => p.name).filter(Boolean);
+
   const preliminaryEnvelope = normalizeEventEnvelope({
     id,
     type,
@@ -1187,6 +1192,9 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
     },
     entities
   });
+
+  const allParticipants = Array.from(new Set([...(preliminaryEnvelope?.participants || []), ...observedNames])).slice(0, 16);
+
   const canonicalMemoryMetadata = buildCanonicalEventMetadata({
     id,
     type,
@@ -1195,7 +1203,7 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
     date: preliminaryEnvelope.occurred_date || dStr,
     metadata: safeMetadataInput,
     entities,
-    participants: preliminaryEnvelope.participants || [],
+    participants: allParticipants,
     topics: preliminaryEnvelope.topics || [],
     sentimentScore,
     sessionId,
@@ -1305,12 +1313,14 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
           safeMetadata.person_labels?.length ? `People: ${safeMetadata.person_labels.join(', ')}` : '',
           safeMetadata.topic_labels?.length ? `Topics: ${safeMetadata.topic_labels.join(', ')}` : '',
           safeMetadata.action_markers?.length ? `Signals: ${safeMetadata.action_markers.join(', ')}` : '',
+          safeMetadata.associated_urls?.length ? `URLs: ${safeMetadata.associated_urls.map(u => u.url).join(', ')}` : '',
           safeMetadata.compact_capture_text,
           envelope.text
         ].filter(Boolean).join('\n'),
         metadata: {
           ...canonicalMemoryMetadata,
           envelope,
+          associated_urls: safeMetadata.associated_urls || [],
           data_source: safeMetadata.data_source,
           storage_data_source: safeMetadata.storage_data_source,
           source_refs: [id]

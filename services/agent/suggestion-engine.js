@@ -347,11 +347,16 @@ function actionLabelForTitle(title = '') {
 
 function normalizeSuggestionType(value = '', fallbackText = '') {
   const raw = String(value || '').toLowerCase().trim();
-  const valid = ['study', 'relationship', 'work', 'personal', 'creative', 'followup'];
+  const valid = ['study', 'relationship', 'work', 'personal', 'creative', 'followup', 'nurture', 'life_event', 'checkin', 'task', 'opportunity', 'insight'];
   if (valid.includes(raw)) return raw;
   const hay = `${raw} ${String(fallbackText || '').toLowerCase()}`;
   if (/\bstudy|quiz|exam|class|assignment|homework|lecture|review|flashcard|vocab\b/.test(hay)) return 'study';
-  if (/\brelationship|follow ?up|reply|check-?in|reconnect|birthday|anniversary|friend|mentor|alex|maya|sam|leo\b/.test(hay)) return 'followup';
+  if (/\blife[ _]event|birthday|anniversary|wedding|graduation|funeral\b/.test(hay)) return 'life_event';
+  if (/\bnurture|mentor|coaching|help|support\b/.test(hay)) return 'nurture';
+  if (/\bcheck-?in|reconnect|say hi\b/.test(hay)) return 'checkin';
+  if (/\brelationship|follow ?up|reply|friend|alex|maya|sam|leo\b/.test(hay)) return 'relationship';
+  if (/\bopportunity|lead|deal|sale|partnership\b/.test(hay)) return 'opportunity';
+  if (/\binsight|pattern|discovery|learned\b/.test(hay)) return 'insight';
   if (/\bwork|project|client|meeting|presentation|proposal|deadline|task|job\b/.test(hay)) return 'work';
   if (/\bpersonal|home|health|fitness|hobby|family|bill|shopping\b/.test(hay)) return 'personal';
   if (/\bcreative|design|writing|art|music|video|ideation|brainstorm\b/.test(hay)) return 'creative';
@@ -767,7 +772,7 @@ async function generateTopTodosFromMemoryQuery(llmConfig, options = {}) {
   ${JSON.stringify(topFiveItems)}
 
   Generate proactive suggestions. Up to 8 candidates.
-  Format JSON array: [{"type": "work|followup|study|personal|creative|relationship", "title": "imperative", "reason": "why now", "description": "", "outcome": "", "evidence": ["id"], "time_anchor": "today|now", "priority": "low|medium|high", "confidence": 0.0, "primary_action": "label", "secondary_action": "", "source_index": 1, "expires_at": "ISO"}]
+  Format JSON array: [{"type": "work|followup|study|personal|creative|relationship|nurture|life_event|checkin|task|opportunity|insight", "title": "imperative", "reason": "why now", "description": "", "outcome": "", "evidence": ["id"], "time_anchor": "today|now", "priority": "low|medium|high", "confidence": 0.0, "primary_action": "label", "secondary_action": "", "source_index": 1, "expires_at": "ISO"}]
 
   Rules:
   - Title MUST start with verb + specific entity/time.
@@ -930,7 +935,7 @@ Rules:
   description (optional),
   reason (one sentence grounded in memory),
   time_anchor (optional, e.g. "now" or "today 10:00"),
-  category (optional: work|followup|study|personal|creative|relationship),
+  category (optional: work|followup|study|personal|creative|relationship|nurture|life_event|checkin|task|opportunity|insight),
   priority (optional: low|medium|high).
 - Return strict JSON only.
 

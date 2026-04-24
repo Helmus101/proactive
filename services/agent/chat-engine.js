@@ -5,6 +5,7 @@ const { buildRawEvidenceText } = require('../raw-evidence-text');
 const { callLLM } = require('./intelligence-engine');
 const { buildHybridGraphRetrieval, formatContext, estimateTokensHeuristic } = require('./hybrid-graph-retrieval');
 const { buildRetrievalThought, widenTemporalWindow, inferSurfaceFamilies } = require('./retrieval-thought-system');
+const { dispatchTool, TOOL_SCHEMAS } = require('./tool-dispatcher');
 
 function safeJsonParse(value, fallback) {
   try {
@@ -225,6 +226,26 @@ function normalizeAssistantContent(raw, fallback = "I couldn't produce an answer
     }
   }
   return fallback;
+}
+
+function parseToolCalls(text = '') {
+  const toolCalls = [];
+  const regex = /<tool_call>([\s\S]*?)<\/tool_call>/gi;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    const raw = match[1].trim();
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed?.tool) toolCalls.push(parsed);
+    } catch (_) {
+      try {
+        const fixed = raw.replace(/'/g, '"').replace(/([{,])\s*([a-zA-Z0-9_]+)\s*:/g, '$1"$2":');
+        const parsedFixed = JSON.parse(fixed);
+        if (parsedFixed?.tool) toolCalls.push(parsedFixed);
+      } catch (__) {}
+    }
+  }
+  return toolCalls;
 }
 
 function sanitizeAssistantOutput(raw = '') {
@@ -2182,6 +2203,12 @@ If the user asks for strategy, recommendations, prioritization, or interpretatio
 If the user asks for a draft, make it sound natural and specific to the relationship context rather than polished marketing copy.
 If the request is complex, you may open with one short orienting sentence before the main answer, but do not add filler acknowledgments.
 
+[Available Tools]
+You can use tools by outputting <tool_call>{"tool": "name", "input": {...}}</tool_call>.
+Available tools: ${Object.keys(TOOL_SCHEMAS).join(', ')}.
+Example: To create a contact, use <tool_call>{"tool": "contact_create", "input": {"name": "John Doe", "notes": "Met at conference"}}</tool_call>.
+When using a tool, you must still provide a helpful response to the user.
+
 [Grounded Context]
 ${contextMemoryXml}
 
@@ -2199,7 +2226,35 @@ ${reflectorFeedback ? `[Reflector Feedback]\nRejected for: ${reflectorFeedback.c
 ${query}`;
 
   try {
-    const content = await callLLM(prompt, apiKey, policy.temperature, { task: 'synthesis', maxTokens: policy.maxTokens });
+    let content = await callLLM(prompt, apiKey, policy.temperature, { task: 'synthesis', maxTokens: policy.maxTokens });
+
+    // Handle tool calls
+    const toolCallMatches = Array.from(content.matchAll(/<tool_call>(.*?)<\/tool_call>/gs));
+    if (toolCallMatches.length > 0) {
+      const toolResults = [];
+      for (const match of toolCallMatches) {
+        const callJson = safeJsonParse(match[1], null);
+        if (callJson?.tool) {
+          try {
+            const result = await dispatchTool(callJson.tool, callJson.input || {});
+            toolResults.push({ tool: callJson.tool, input: callJson.input, result });
+          } catch (toolErr) {
+            toolResults.push({ tool: callJson.tool, input: callJson.input, error: toolErr.message });
+          }
+        }
+      }
+
+      if (toolResults.length > 0) {
+        const feedbackPrompt = `${prompt}
+
+[Tool Results]
+${JSON.stringify(toolResults, null, 2)}
+
+The tools above were executed based on your previous output. Now provide the final response to the user, incorporating these results if they are relevant. Do not output more tool calls.`;
+        content = await callLLM(feedbackPrompt, apiKey, policy.temperature, { task: 'synthesis', maxTokens: policy.maxTokens });
+      }
+    }
+
     return sanitizeAssistantOutput(normalizeAssistantContent(content));
   } catch (llmError) {
     return buildGroundedFallbackAnswer(query, retrieval, drilldownEvidence);

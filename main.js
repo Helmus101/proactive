@@ -2390,7 +2390,7 @@ async function runSuggestionEngineJob(options = {}) {
         maxRelationshipSignals: 5,
         maxTodoSignals: 5
       }),
-      14000,
+      45000,
       'buildRadarState'
     );
     persistRadarState(radarState);
@@ -7801,7 +7801,7 @@ ipcMain.handle('generate-proactive-todos', async (event, payload = {}) => {
         maxRelationshipSignals: 5,
         maxTodoSignals: 5
       }),
-      14000,
+      45000,
       'buildRadarState'
     );
     persistRadarState(radarState);
