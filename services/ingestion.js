@@ -1312,7 +1312,7 @@ async function ingestRawEvent({ type, timestamp, source, text, metadata }) {
         [appName, ocrHash, twoHoursAgo]
       );
       if (recentDuplicate) {
-        isDuplicateOCR = true;
+        return { id: recentDuplicate.id, skipped: true, reason: 'duplicate_ocr' };
       }
     } catch (e) {
       console.warn('[ingestion] Duplicate OCR check failed:', e.message);
