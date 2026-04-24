@@ -2676,8 +2676,10 @@ async function runSuggestionEngineJob(options = {}) {
       buildRadarState({
         llmConfig,
         manualTodos,
+        maxCentralSignals: 5,
         maxRelationshipSignals: 5,
-        maxTodoSignals: 5
+        maxTodoSignals: 5,
+        existingState
       }),
       45000,
       'buildRadarState'
@@ -8101,9 +8103,11 @@ ipcMain.handle('generate-proactive-todos', async (event, payload = {}) => {
     const radarState = await withTimeout(
       buildRadarState({
         llmConfig,
-        manualTodos: (store.get('persistentTodos') || []).filter((todo) => !todo?.completed),
+        manualTodos: (store.get("persistentTodos") || []).filter((todo) => !todo?.completed),
+        maxCentralSignals: 5,
         maxRelationshipSignals: 5,
-        maxTodoSignals: 5
+        maxTodoSignals: 5,
+        existingState: getStoredRadarState()
       }),
       45000,
       'buildRadarState'
