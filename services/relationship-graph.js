@@ -271,8 +271,10 @@ async function syncSemanticPersonNode(contact = {}, identifiers = [], evidence =
     first_name: overrides.first_name || contactMeta.first_name || splitName.first_name || '',
     last_name: overrides.last_name || contactMeta.last_name || splitName.last_name || '',
     email: identifiers.find((item) => item.identifier_type === 'email')?.identifier_value || null,
-    company: overrides.company || contact.company || null,
-    role: overrides.role || contact.role || null,
+    company: overrides.company || contact.company || contactMeta.company || null,
+    role: overrides.role || contact.role || contactMeta.role || null,
+    location: overrides.location || contactMeta.location || contact.location || null,
+    linkedin_url: overrides.linkedin_url || contactMeta.linkedin_url || contactMeta.urls?.find(u => u.includes('linkedin.com')) || null,
     latest_interaction_at: contact.last_interaction_at || evidence.timestamp || null,
     strength_score: Number(contact.strength_score || 0),
     relationship_tier: contact.relationship_tier || null,
@@ -698,6 +700,43 @@ async function linkMentionsForEvent({ eventId, type = '', source = '', text = ''
   const relationshipTopics = extractRelationshipTopics(safeText, metadata);
   const linked = [];
 
+  // 1. Process observed participants and ensure they exist as contacts
+  const observed = extractObservedParticipants(safeText, metadata, type, sourceApp);
+  for (const person of observed) {
+    const contact = await upsertRelationshipContact(
+      {
+        display_name: person.name,
+        email: person.email,
+        company: person.company,
+        role: person.role,
+        metadata: {
+          topics: relationshipTopics,
+          source: person.source || 'observed'
+        }
+      },
+      [
+        person.email ? { type: 'email', value: person.email, source_label: person.source } : null,
+        person.name ? { type: 'name', value: person.name, source_label: person.source } : null
+      ].filter(Boolean),
+      { event_id: eventId, source: person.source, timestamp: ts }
+    );
+    if (contact) {
+      await linkRelationshipMention({
+        contactId: contact.id,
+        eventId,
+        retrievalDocId: `event:${eventId}`,
+        timestamp: ts,
+        sourceApp,
+        snippet: bestSnippetAround(safeText, person.name || person.email),
+        confidence: 0.85,
+        mentionType: 'observed_participant_mention',
+        metadata: { source: person.source }
+      });
+      linked.push(contact);
+    }
+  }
+
+  // 2. Scan for other known contacts mentioned in text
   const known = await loadKnownIdentifiers();
   const textLower = safeText.toLowerCase();
   const seen = new Set(linked.map((item) => item.id));
@@ -706,7 +745,7 @@ async function linkMentionsForEvent({ eventId, type = '', source = '', text = ''
     const needle = String(item.normalized_value || '').toLowerCase();
     if (needle.length < 4) continue;
     if (!textLower.includes(needle)) continue;
-    await linkRelationshipMention({
+    const contactMention = await linkRelationshipMention({
       contactId: item.contact_id,
       eventId,
       retrievalDocId: `event:${eventId}`,
@@ -717,6 +756,10 @@ async function linkMentionsForEvent({ eventId, type = '', source = '', text = ''
       mentionType: 'known_contact_mention',
       metadata: { matched_identifier: item.identifier_value, identifier_type: item.identifier_type }
     });
+    if (contactMention) {
+      const contactRow = await db.getQuery(`SELECT * FROM relationship_contacts WHERE id = ?`, [item.contact_id]);
+      if (contactRow) linked.push(contactRow);
+    }
     seen.add(item.contact_id);
   }
 

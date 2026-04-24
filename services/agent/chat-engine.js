@@ -5,6 +5,7 @@ const { buildRawEvidenceText } = require('../raw-evidence-text');
 const { callLLM } = require('./intelligence-engine');
 const { buildHybridGraphRetrieval, formatContext, estimateTokensHeuristic } = require('./hybrid-graph-retrieval');
 const { buildRetrievalThought, widenTemporalWindow, inferSurfaceFamilies } = require('./retrieval-thought-system');
+const { dispatchTool, TOOL_SCHEMAS } = require('./tool-dispatcher');
 
 function safeJsonParse(value, fallback) {
   try {
@@ -225,6 +226,26 @@ function normalizeAssistantContent(raw, fallback = "I couldn't produce an answer
     }
   }
   return fallback;
+}
+
+function parseToolCalls(text = '') {
+  const toolCalls = [];
+  const regex = /<tool_call>([\s\S]*?)<\/tool_call>/gi;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    const raw = match[1].trim();
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed?.tool) toolCalls.push(parsed);
+    } catch (_) {
+      try {
+        const fixed = raw.replace(/'/g, '"').replace(/([{,])\s*([a-zA-Z0-9_]+)\s*:/g, '$1"$2":');
+        const parsedFixed = JSON.parse(fixed);
+        if (parsedFixed?.tool) toolCalls.push(parsedFixed);
+      } catch (__) {}
+    }
+  }
+  return toolCalls;
 }
 
 function sanitizeAssistantOutput(raw = '') {
@@ -2181,6 +2202,12 @@ Answer strictly from the grounded memory/web context in <context_memory>. If evi
 If the user asks for strategy, recommendations, prioritization, or interpretation, make a real judgment instead of hedging across every option.
 If the user asks for a draft, make it sound natural and specific to the relationship context rather than polished marketing copy.
 If the request is complex, you may open with one short orienting sentence before the main answer, but do not add filler acknowledgments.
+
+[Available Tools]
+You can use tools by outputting <tool_call>{"tool": "name", "input": {...}}</tool_call>.
+Available tools: ${Object.keys(TOOL_SCHEMAS).join(', ')}.
+Example: To create a contact, use <tool_call>{"tool": "contact_create", "input": {"name": "John Doe", "notes": "Met at conference"}}</tool_call>.
+When using a tool, you must still provide a helpful response to the user.
 
 [Grounded Context]
 ${contextMemoryXml}
