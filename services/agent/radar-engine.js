@@ -763,153 +763,152 @@ async function buildRadarState({ llmConfig = null, manualTodos = [], maxCentralS
   const runRelationshipSuggestionsEngine = relationshipsEnabled
     ? require('./relationship-suggestions-engine').runRelationshipSuggestionsEngine
     : null;
-  const [centralContext, relationshipChat, todoChat, deterministicRelSignals] = await Promise.all([
-    retrieveBoundedContext('What are the top high-level insights or patterns from recent activity?', {
-      seedLimit: 8,
-      hopLimit: 4,
-      evidenceLimit: 10
-    }),
-    relationshipsEnabled ? runChatBackedSection({
-      section: 'relationship',
-      llmConfig,
-      relationshipCandidates,
-      manualTodos,
-      limit: maxRelationshipSignals,
-      existingSignals: existingRelationship
-    }) : Promise.resolve({ took_ms: 0, retrieval: null, signals: [], error: null }),
-    runChatBackedSection({
-      section: 'todo',
-      llmConfig,
-      relationshipCandidates,
-      manualTodos,
-      limit: maxTodoSignals,
-      existingSignals: existingTodo
-    }),
-    relationshipsEnabled ? runRelationshipSuggestionsEngine({
-      llmConfig,
-      limit: maxRelationshipSignals,
-      deepScan: false
-    }).catch(() => []) : Promise.resolve([])
-  ]);
+  const centralContext = await retrieveBoundedContext('What are the top high-level insights or patterns from recent activity?', {
+    seedLimit: 8,
+    hopLimit: 4,
+    evidenceLimit: 10
+  });
+
+  const relationshipChat = relationshipsEnabled ? await runChatBackedSection({
+    section: 'relationship',
+    llmConfig,
+    relationshipCandidates,
+    manualTodos,
+    limit: maxRelationshipSignals,
+    existingSignals: existingRelationship
+  }) : { took_ms: 0, retrieval: null, signals: [], error: null };
+
+  const todoChat = await runChatBackedSection({
+    section: 'todo',
+    llmConfig,
+    relationshipCandidates,
+    manualTodos,
+    limit: maxTodoSignals,
+    existingSignals: existingTodo
+  });
+
+  const deterministicRelSignals = relationshipsEnabled ? await runRelationshipSuggestionsEngine({
+    llmConfig,
+    limit: maxRelationshipSignals,
+    deepScan: false
+  }).catch(() => []) : [];
 
   timings.central_retrieval_ms = centralContext.took_ms;
   timings.relationship_chat_ms = relationshipChat.took_ms;
   timings.todo_chat_ms = todoChat.took_ms;
 
-  const results = await Promise.all([
-    (async () => {
-      try {
-        let signals = await runSectionLLM({
+  const centralSignalsResult = await (async () => {
+    try {
+      let signals = await runSectionLLM({
+        section: 'central',
+        llmConfig,
+        context: centralContext,
+        relationshipCandidates,
+        manualTodos,
+        limit: maxCentralSignals,
+        existingSignals: existingCentral
+      });
+      if (signals.length) {
+        signals = await deepenSignals({
           section: 'central',
           llmConfig,
-          context: centralContext,
-          relationshipCandidates,
-          manualTodos,
-          limit: maxCentralSignals,
-          existingSignals: existingCentral
+          signals,
+          context: centralContext
         });
-        if (signals.length) {
-          signals = await deepenSignals({
-            section: 'central',
-            llmConfig,
-            signals,
-            context: centralContext
-          });
-        }
-        return { section: 'central', signals, error: null };
-      } catch (error) {
-        return { section: 'central', signals: [], error: String(error?.message || error) };
       }
-    })(),
-    (async () => {
-      try {
-        if (!relationshipsEnabled) {
-          return { section: 'relationship', signals: [], error: null };
-        }
-        timings.relationship_prompt_ms = relationshipChat?.took_ms || 0;
+      return { section: 'central', signals, error: null };
+    } catch (error) {
+      return { section: 'central', signals: [], error: String(error?.message || error) };
+    }
+  })();
 
-        // Use deterministic signals from the relationship engine as the primary source.
-        // They have specific day counts, trigger events, and pre-written draft openers.
-        let signals = Array.isArray(deterministicRelSignals) && deterministicRelSignals.length
-          ? deterministicRelSignals.slice(0, maxRelationshipSignals)
-          : [];
-
-        // Supplement with LLM-generated signals when deterministic ones don't fill the quota
-        if (signals.length < maxRelationshipSignals) {
-          const existing = new Set(signals.map(s => safeLower(s.person || s.title)));
-          const llmSignals = await generateRelationshipSignalsFromPrompt({
-            llmConfig,
-            relationshipCandidates,
-            relationshipRetrieval: relationshipChat?.retrieval || null,
-            recentInterestEvidence: [
-              ...(centralContext?.evidence || []),
-              ...((todoChat?.retrieval?.evidence) || [])
-            ],
-            limit: maxRelationshipSignals - signals.length,
-            existingSignals: existingRelationship
-          }).catch(() => []);
-          const deduped = (llmSignals || []).filter(s => !existing.has(safeLower(s.person || s.title)));
-          signals = [...signals, ...deduped].slice(0, maxRelationshipSignals);
-        }
-
-        // Final fallbacks when still empty
-        if (!signals.length) {
-          signals = Array.isArray(relationshipChat?.signals) ? relationshipChat.signals.slice(0, maxRelationshipSignals) : [];
-        }
-        if (!signals.length) {
-          signals = makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals, existingRelationship);
-        }
-        if (!signals.length) {
-          signals = makeRelationshipEvidenceFallback(relationshipChat?.retrieval, maxRelationshipSignals, existingRelationship);
-        }
-
-        return { section: 'relationship', signals, error: relationshipChat?.error || null };
-      } catch (error) {
-        return {
-          section: 'relationship',
-          signals: deterministicRelSignals?.length
-            ? deterministicRelSignals.slice(0, maxRelationshipSignals)
-            : makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals, existingRelationship),
-          error: String(error?.message || error)
-        };
+  const relationshipSignalsResult = await (async () => {
+    try {
+      if (!relationshipsEnabled) {
+        return { section: 'relationship', signals: [], error: null };
       }
-    })(),
-    (async () => {
-      try {
-        let signals = await generateTodoSignalsFromPrompt({
+      timings.relationship_prompt_ms = relationshipChat?.took_ms || 0;
+
+      let signals = Array.isArray(deterministicRelSignals) && deterministicRelSignals.length
+        ? deterministicRelSignals.slice(0, maxRelationshipSignals)
+        : [];
+
+      if (signals.length < maxRelationshipSignals) {
+        const existing = new Set(signals.map(s => safeLower(s.person || s.title)));
+        const llmSignals = await generateRelationshipSignalsFromPrompt({
           llmConfig,
-          todoRetrieval: todoChat?.retrieval || null,
-          projectNodes,
-          limit: maxTodoSignals,
-          existingSignals: existingTodo
-        });
-        timings.todo_prompt_ms = todoChat?.took_ms || 0;
-        if (!signals.length) {
-          signals = Array.isArray(todoChat?.signals) ? todoChat.signals.slice(0, maxTodoSignals) : [];
-        }
-        if (!signals.length) {
-          signals = makeTodoFallback(manualTodos, todoChat?.retrieval, maxTodoSignals, existingTodo);
-        }
-        if (signals.length && !signals.every((item) => item.prompt_native)) {
-          signals = await deepenSignals({
-            section: 'todo',
-            llmConfig,
-            signals,
-            context: {
-              evidence: todoChat?.retrieval?.evidence || [],
-              retrieval: todoChat?.retrieval || null
-            }
-          });
-        }
-        if (!signals.length) {
-          signals = makeTodoFallback(manualTodos, todoChat?.retrieval, maxTodoSignals, existingTodo);
-        }
-        return { section: 'todo', signals, error: todoChat?.error || null };
-      } catch (error) {
-        return { section: 'todo', signals: makeTodoFallback(manualTodos, todoChat?.retrieval, maxTodoSignals, existingTodo), error: String(error?.message || error) };
+          relationshipCandidates,
+          relationshipRetrieval: relationshipChat?.retrieval || null,
+          recentInterestEvidence: [
+            ...(centralContext?.evidence || []),
+            ...((todoChat?.retrieval?.evidence) || [])
+          ],
+          limit: maxRelationshipSignals - signals.length,
+          existingSignals: existingRelationship
+        }).catch(() => []);
+        const deduped = (llmSignals || []).filter(s => !existing.has(safeLower(s.person || s.title)));
+        signals = [...signals, ...deduped].slice(0, maxRelationshipSignals);
       }
-    })()
-  ]);
+
+      if (!signals.length) {
+        signals = Array.isArray(relationshipChat?.signals) ? relationshipChat.signals.slice(0, maxRelationshipSignals) : [];
+      }
+      if (!signals.length) {
+        signals = makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals, existingRelationship);
+      }
+      if (!signals.length) {
+        signals = makeRelationshipEvidenceFallback(relationshipChat?.retrieval, maxRelationshipSignals, existingRelationship);
+      }
+
+      return { section: 'relationship', signals, error: relationshipChat?.error || null };
+    } catch (error) {
+      return {
+        section: 'relationship',
+        signals: deterministicRelSignals?.length
+          ? deterministicRelSignals.slice(0, maxRelationshipSignals)
+          : makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals, existingRelationship),
+        error: String(error?.message || error)
+      };
+    }
+  })();
+
+  const todoSignalsResult = await (async () => {
+    try {
+      let signals = await generateTodoSignalsFromPrompt({
+        llmConfig,
+        todoRetrieval: todoChat?.retrieval || null,
+        projectNodes,
+        limit: maxTodoSignals,
+        existingSignals: existingTodo
+      });
+      timings.todo_prompt_ms = todoChat?.took_ms || 0;
+      if (!signals.length) {
+        signals = Array.isArray(todoChat?.signals) ? todoChat.signals.slice(0, maxTodoSignals) : [];
+      }
+      if (!signals.length) {
+        signals = makeTodoFallback(manualTodos, todoChat?.retrieval, maxTodoSignals, existingTodo);
+      }
+      if (signals.length && !signals.every((item) => item.prompt_native)) {
+        signals = await deepenSignals({
+          section: 'todo',
+          llmConfig,
+          signals,
+          context: {
+            evidence: todoChat?.retrieval?.evidence || [],
+            retrieval: todoChat?.retrieval || null
+          }
+        });
+      }
+      if (!signals.length) {
+        signals = makeTodoFallback(manualTodos, todoChat?.retrieval, maxTodoSignals, existingTodo);
+      }
+      return { section: 'todo', signals, error: todoChat?.error || null };
+    } catch (error) {
+      return { section: 'todo', signals: makeTodoFallback(manualTodos, todoChat?.retrieval, maxTodoSignals, existingTodo), error: String(error?.message || error) };
+    }
+  })();
+
+  const results = [centralSignalsResult, relationshipSignalsResult, todoSignalsResult];
 
   const centralResult = results.find(r => r.section === 'central');
   const relationshipResult = results.find(r => r.section === 'relationship');

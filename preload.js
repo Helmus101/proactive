@@ -64,33 +64,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   submitVoiceAudio: (payload = {}) => ipcRenderer.invoke('submit-voice-audio', payload),
 
   // ── Daily Summary & Historical Sync ──────────────────────────────────────
-
-  /**
-   * Trigger the initial historical backfill.
-   * Can also be called manually to re-run (e.g., from a Settings page).
-   * Returns { success, daysProcessed, userPatterns, userPreferences }
-   */
   runInitialSync: () => ipcRenderer.invoke('run-initial-sync'),
-
-  /**
-   * Check whether the initial sync is done and how many days are stored.
-   * Returns { done: boolean, daysCount: number }
-   */
   getInitialSyncStatus: () => ipcRenderer.invoke('get-initial-sync-status'),
-
-  /**
-   * Fetch historical daily summaries, sorted newest-first.
-   * @param {{ startDate?: string, endDate?: string, limit?: number }} opts
-   * @returns {Promise<DailySummary[]>}
-   */
   getHistoricalSummaries: (opts) => ipcRenderer.invoke('get-historical-summaries', opts || {}),
-
-  /**
-   * Full-text search across all historical summaries.
-   * Great for looking up a person by name, a topic, or a domain.
-   * @param {string} query  e.g. "John", "birthday", "linkedin"
-   * @returns {Promise<Array<{ date, score, snippet, narrative, top_people, intent_clusters }>>}
-   */
   searchDailySummaries: (query) => ipcRenderer.invoke('search-daily-summaries', query),
   searchGraph: (query) => ipcRenderer.invoke('search-graph', query),
 
@@ -111,32 +87,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openUrl: (url) => ipcRenderer.invoke('open-url', url),
   syncAppleContacts: (payload = {}) => ipcRenderer.invoke('sync-apple-contacts', payload),
 
-  // Chat sessions: allow renderer to push sessions to main for long-term memory ingestion
+  // Chat sessions
   saveChatSessionsToMemory: (sessions) => ipcRenderer.invoke('save-chat-sessions-to-memory', sessions),
   saveChatSessions: (sessions) => ipcRenderer.invoke('save-chat-sessions', sessions),
   getChatSessions: (options = {}) => ipcRenderer.invoke('get-chat-sessions', options),
 
-  // ── Initial Sync Event Listeners ─────────────────────────────────────────
-
-  /** Fired when the auto-sync kicks off on first launch. */
+  // ── Event Listeners ──────────────────────────────────────────────────────
   onInitialSyncStarted:  (cb) => ipcRenderer.on('initial-sync-started',  (_e)        => cb()),
-
-  /**
-   * Periodic progress updates during the sync.
-   * @param {(progress: { phase: string, done: number, total: number, currentDate?: string }) => void} cb
-   */
   onInitialSyncProgress: (cb) => ipcRenderer.on('initial-sync-progress', (_e, data)  => cb(data)),
-
-  /**
-   * Fired when the sync completes successfully.
-   * @param {(result: { daysProcessed: number }) => void} cb
-   */
   onInitialSyncComplete: (cb) => ipcRenderer.on('initial-sync-complete', (_e, data)  => cb(data)),
-
-  /** Fired if the auto-sync encounters a fatal error. */
   onInitialSyncError:    (cb) => ipcRenderer.on('initial-sync-error',    (_e, data)  => cb(data)),
 
-  // ── Misc Event Listeners ─────────────────────────────────────────────────
   onAuthSuccess:        (cb) => ipcRenderer.on('auth-success',        (event, ...args) => cb(...args)),
   onGSuiteSyncComplete: (cb) => ipcRenderer.on('gsuite-sync-complete', (event, ...args) => cb(...args)),
   onExtensionEvent:     (cb) => ipcRenderer.on('extension-event',      (event, ...args) => cb(...args)),
@@ -145,6 +106,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onProactiveSuggestions: (cb) => ipcRenderer.on('proactive-suggestions', (_e, suggestions) => cb(suggestions)),
   onVoiceCommandToggle: (cb) => ipcRenderer.on('voice-command-toggle', (_e, payload) => cb(payload)),
   onVoiceSessionUpdate: (cb) => ipcRenderer.on('voice-session-update', (_e, payload) => cb(payload)),
+  onPerformanceModeChanged: (cb) => ipcRenderer.on('performance-mode-changed', (_e, mode) => cb(mode)),
   removeAllListeners:   (channel) => ipcRenderer.removeAllListeners(channel),
 
   // ── Scheduled Automations ─────────────────────────────────────────────────

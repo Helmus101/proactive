@@ -68,6 +68,7 @@ const { runRecursiveImprovementCycle } = require('./services/agent/recursive-imp
 const { runRelationshipGraphJob } = require('./services/relationship-graph');
 const { runSemanticSummaryWindow } = require('./services/agent/intelligence-engine');
 const { runWeeklyInsightJob } = require('./services/agent/intelligence-engine');
+// const performanceMonitor = require('./performance-monitor'); // Temporarily disabled to test startup
 
 // ── Summarizer services ──────────────────────────────────────────────────────
 const { runInitialSync, searchSummaries } = require('./services/summarizer/initialSync');
@@ -106,6 +107,14 @@ function debouncedStoreSet(key, value, delay = 2000) {
   }, delay);
   storeDebounceTimers.set(key, timer);
 }
+
+// ── Global safety net: prevent background job crashes from killing the IPC bridge ──
+process.on('uncaughtException', (err) => {
+  try { console.error('[Main] Uncaught exception (process kept alive):', err?.message || err, err?.stack || ''); } catch (_) {}
+});
+process.on('unhandledRejection', (reason) => {
+  try { console.error('[Main] Unhandled promise rejection (kept alive):', reason?.message || reason); } catch (_) {}
+});
 
 function withTimeout(promise, timeoutMs, label = 'operation') {
   let timer = null;
@@ -566,8 +575,10 @@ function persistRadarState(radarState = {}) {
     todoSignals: Array.isArray(radarState.todoSignals) ? radarState.todoSignals : [],
     sections: radarState.sections || {}
   });
-  store.set('radarState', clean);
-  store.set('suggestions', clean.allSignals.filter((item) => !item?.completed));
+  
+  // Use debounced store set to avoid blocking the main thread with large JSON writes
+  debouncedStoreSet('radarState', clean);
+  debouncedStoreSet('suggestions', clean.allSignals.filter((item) => !item?.completed));
   return clean;
 }
 
@@ -711,15 +722,17 @@ let suggestionRunQueued = false;
 let lastCaptureSuggestionTriggerAt = 0;
 const MAX_PRACTICAL_SUGGESTIONS = 7;
 const CAPTURE_TRIGGER_MIN_INTERVAL_MS = 60 * 60 * 1000;
-const SUGGESTION_REFRESH_INTERVAL_MINUTES = 20;
-const PERIODIC_SCREENSHOT_INTERVAL_MS = 30 * 1000;
-const PERIODIC_SCREENSHOT_WAKE_DELAY_MS = 2500;
-const LOW_POWER_OCR_MIN_INTERVAL_MS = 5 * 60 * 1000;
+// EMERGENCY CPU THROTTLING - Disable most background processes
+const EMERGENCY_THROTTLE_ENABLED = true;
+const PERIODIC_SCREENSHOT_INTERVAL_MS = EMERGENCY_THROTTLE_ENABLED ? 5 * 60 * 1000 : 45 * 1000; // 5 minutes when throttled
+const SUGGESTION_REFRESH_INTERVAL_MINUTES = EMERGENCY_THROTTLE_ENABLED ? 60 : 30; // 1 hour when throttled
+const PERIODIC_SCREENSHOT_WAKE_DELAY_MS = 15 * 1000;       // 15s after wake before first capture
+const LOW_POWER_OCR_MIN_INTERVAL_MS = 15 * 60 * 1000; // INCREASED from 5 min
 const LOW_POWER_HEAVY_JOB_MIN_GAP_MS = 60 * 60 * 1000;
-const CAPTURE_STALE_LOCK_MS = 2 * 60 * 1000;
+const CAPTURE_STALE_LOCK_MS = 30 * 1000;  // 30s — clear hung OCR/screencapture fast
 const APP_ACTIVE_CAPTURE_COOLDOWN_MS = 3 * 60 * 1000;
 const SCREENSHOT_WATCHDOG_INTERVAL_MS = 60 * 1000;
-const CAPTURE_VISUAL_DIFF_THRESHOLD = Number(process.env.CAPTURE_VISUAL_DIFF_THRESHOLD || 0.05);
+const CAPTURE_VISUAL_DIFF_THRESHOLD = Number(process.env.CAPTURE_VISUAL_DIFF_THRESHOLD || 0.15); // INCREASED from 0.05
 const STARTUP_HEAVY_JOB_DELAY_MS = Math.max(5 * 60 * 1000, Number(process.env.STARTUP_HEAVY_JOB_DELAY_MS || 10 * 60 * 1000));
 const STARTUP_INITIAL_SYNC_DELAY_MS = Math.max(10 * 60 * 1000, Number(process.env.STARTUP_INITIAL_SYNC_DELAY_MS || 20 * 60 * 1000));
 const GSUITE_SYNC_INTERVAL_MS = Math.max(5 * 60 * 1000, Number(process.env.GSUITE_SYNC_INTERVAL_MS || 5 * 60 * 1000));
@@ -780,25 +793,47 @@ function isReducedLoadMode() {
 }
 
 function getPeriodicScreenshotIntervalMs(mode = getPerformanceMode()) {
-  return PERIODIC_SCREENSHOT_INTERVAL_MS;
+  if (mode === 'deep-idle') return 45 * 60 * 1000;   // 45 min when idle - INCREASED
+  if (mode === 'reduced')   return 20 * 60 * 1000;    // 20 min on battery/thermal - INCREASED
+  return PERIODIC_SCREENSHOT_INTERVAL_MS;             // 45 sec normal - USER REQUESTED
 }
 
 function getPeriodicScreenshotWakeDelayMs(mode = getPerformanceMode()) {
-  return PERIODIC_SCREENSHOT_WAKE_DELAY_MS;
+  if (mode === 'deep-idle') return 60 * 1000; // 1 min after wake in idle
+  if (mode === 'reduced')   return 30 * 1000; // 30s after wake in reduced
+  return PERIODIC_SCREENSHOT_WAKE_DELAY_MS;   // 15s after wake in normal
 }
 
 function canRunHeavyJob(lastRunAt = 0) {
   const idleTime = (powerMonitor && typeof powerMonitor.getSystemIdleTime === 'function') ? powerMonitor.getSystemIdleTime() : 0;
-  if (idleTime < 180) return false;
-  if (!isReducedLoadMode()) return true;
-  return (Date.now() - Number(lastRunAt || 0)) >= LOW_POWER_HEAVY_JOB_MIN_GAP_MS;
+  const mode = getPerformanceMode();
+  
+  // More aggressive throttling in reduced modes
+  if (mode === 'deep-idle') {
+    return idleTime > 600 && (Date.now() - lastRunAt) > (4 * 60 * 60 * 1000); // 4 hours in deep idle
+  }
+  if (mode === 'reduced') {
+    return idleTime > 180 && (Date.now() - lastRunAt) > (2 * 60 * 60 * 1000); // 2 hours in reduced mode
+  }
+  
+  // Even in normal mode, be more conservative
+  return idleTime > 60 && (Date.now() - lastRunAt) > LOW_POWER_HEAVY_JOB_MIN_GAP_MS;
 }
 
 function shouldDeferBackgroundWork(label = 'background') {
   const idleTime = (powerMonitor && typeof powerMonitor.getSystemIdleTime === 'function') ? powerMonitor.getSystemIdleTime() : 0;
-const appBusy = isAppInteractionHot() || (activeChatRequestRegistry && activeChatRequestRegistry.size > 0);
-  const defer = idleTime < 180 || appBusy;
-  if (defer) console.log(`[${label}] Deferring heavy work until idle; idle=${idleTime}s`);
+  const appBusy = isAppInteractionHot() || (activeChatRequestRegistry && activeChatRequestRegistry.size > 0);
+  const mode = getPerformanceMode();
+  
+  // More aggressive deferral based on performance mode
+  let deferThreshold = 30; // default 30 seconds
+  if (mode === 'reduced') deferThreshold = 120; // 2 minutes
+  if (mode === 'deep-idle') deferThreshold = 300; // 5 minutes
+  
+  const defer = idleTime < deferThreshold || appBusy || mode === 'reduced';
+  
+  // Only log sporadically to avoid console thrashing (log at most once per minute per label)
+  if (defer && Math.random() < 0.01) console.log(`[${label}] Deferring heavy work; idle=${idleTime}s appBusy=${appBusy} mode=${mode}`);
   return defer;
 }
 
@@ -964,6 +999,11 @@ function updatePerformanceState(next = {}) {
     if (periodicScreenshotRunning && !screenshotsPausedForDisplayOff) {
       startPeriodicScreenshotCapture(newMode);
     }
+    
+    // Notify renderer so it can disable expensive CSS effects like blurs
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('performance-mode-changed', newMode);
+    }
   }
 }
 
@@ -1019,6 +1059,34 @@ function startScreenshotCleanupLoop() {
   const runCleanup = () => {
     // Keep the cleanup loop lightweight; we only clear stale temp references now.
     pendingAITasks = [];
+    
+    // Clean up old screenshot files to prevent disk space bloat
+    const screenshotsDir = path.join(app.getPath('userData'), 'screenshots');
+    const maxAge = 7 * 24 * 60 * 60 * 1000; // 7 days
+    const now = Date.now();
+    
+    fs.readdir(screenshotsDir, (err, files) => {
+      if (err) return;
+      
+      files.forEach(file => {
+        if (file.endsWith('.png')) {
+          const filePath = path.join(screenshotsDir, file);
+          fs.stat(filePath, (statErr, stats) => {
+            if (!statErr && (now - stats.mtime.getTime()) > maxAge) {
+              fs.unlink(filePath, () => {}); // Async delete, ignore errors
+            }
+          });
+        }
+      });
+    });
+    
+    // Force garbage collection if available
+    if (global.gc) {
+      global.gc();
+    }
+    
+    // Clear any stale timers
+    clearStaleTimers();
   };
 
   runCleanup();
@@ -1026,20 +1094,56 @@ function startScreenshotCleanupLoop() {
     clearInterval(screenshotCleanupTimer);
     screenshotCleanupTimer = null;
   }
-  screenshotCleanupTimer = setInterval(runCleanup, 6 * 60 * 60 * 1000);
+  // Run cleanup every 12 hours instead of 6 hours to reduce disk I/O
+  screenshotCleanupTimer = setInterval(runCleanup, 12 * 60 * 60 * 1000);
+}
+
+function clearStaleTimers() {
+  // Clear any potentially stuck timers to prevent memory leaks
+  const now = Date.now();
+  const staleThreshold = 30 * 60 * 1000; // 30 minutes
+  
+  // Check for stale sensor capture
+  if (sensorCaptureInProgress && (now - sensorCaptureStartedAt) > CAPTURE_STALE_LOCK_MS) {
+    console.warn('[Cleanup] Clearing stale sensor capture lock');
+    sensorCaptureInProgress = false;
+    sensorCaptureStartedAt = 0;
+  }
+  
+  // Clear pending AI tasks that are too old
+  pendingAITasks = pendingAITasks.filter(task => {
+    return (now - task.createdAt) < staleThreshold;
+  });
 }
 
 // ── Graph Helpers ──────────────────────────────────────────────────────────
+let memoryGraphCache = null;
+
 function getGraph() {
-  return {
-    nodes: store.get('graphNodes') || [],
-    edges: store.get('graphEdges') || []
-  };
+  if (!memoryGraphCache) {
+    // Only load from legacy store if SQLite transition is not complete or for small caches
+    const legacyNodes = store.get('graphNodes');
+    const legacyEdges = store.get('graphEdges');
+    
+    // Safety check: if legacy data is massive, it will crash Electron Main process
+    // We prefer the SQLite DB for large datasets now.
+    if (Array.isArray(legacyNodes) && legacyNodes.length > 2000) {
+      console.warn(`[Graph] Legacy store contains ${legacyNodes.length} nodes. Skipping to save memory. Use SQLite DB.`);
+      memoryGraphCache = { nodes: [], edges: [] };
+    } else {
+      memoryGraphCache = {
+        nodes: legacyNodes || [],
+        edges: legacyEdges || []
+      };
+    }
+  }
+  return memoryGraphCache;
 }
 
 function saveGraph(nodes, edges) {
-  store.set('graphNodes', nodes);
-  store.set('graphEdges', edges);
+  memoryGraphCache = { nodes, edges };
+  debouncedStoreSet('graphNodes', nodes, 5000);
+  debouncedStoreSet('graphEdges', edges, 5000);
 }
 
 function addNode(node) {
@@ -1662,9 +1766,11 @@ async function deleteSensitiveCapture(imagePath, eventId, reason) {
 
 function runVisionOCR(imagePath) {
   const scriptPath = path.join(__dirname, 'ocr_vision.swift');
-  const timeoutMs = Number(process.env.VISION_OCR_TIMEOUT_MS || 15000);
+  const timeoutMs = Number(process.env.VISION_OCR_TIMEOUT_MS || 12000); // must be < outer 25s cap
+  const accuracy = (getPerformanceMode() === 'reduced' || getPerformanceMode() === 'deep-idle') ? 'fast' : 'accurate';
+  
   return new Promise((resolve) => {
-    execFile('/usr/bin/xcrun', ['swift', scriptPath, imagePath], { timeout: timeoutMs }, (error, stdout, stderr) => {
+    execFile('/usr/bin/xcrun', ['swift', scriptPath, imagePath, accuracy], { timeout: timeoutMs }, (error, stdout, stderr) => {
       if (error) {
         resolve({
           text: '',
@@ -1799,6 +1905,21 @@ function getFrontmostWindowContext() {
 
 async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   const captureReason = String(reason || 'scheduled');
+  
+  // Check performance monitor for throttling
+  // if (performanceMonitor.shouldThrottleOperation('desktop_capture')) {
+  //   const delay = performanceMonitor.getRecommendedDelay('desktop_capture');
+  //   if (delay > 0) {
+  //     console.log(`[SensorCapture] Throttling capture for ${delay}ms due to system load`);
+  //     return {
+  //       skipped: true,
+  //       reason: 'performance_throttled',
+  //       screenshot_present: false,
+  //       performance_report: performanceMonitor.getPerformanceReport()
+  //     };
+  //   }
+  // }
+  
   if (shouldDeferBackgroundWork("SensorCapture")) return { skipped: true, reason: "active_use" };
   const captureStartedAt = Date.now();
   if (screenshotsPausedForDisplayOff) {
@@ -1874,20 +1995,23 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
       }
     } catch (_) {}
   }
-  console.log(`[SensorCapture] windowContext status=${windowContext.status} app=${windowContext.appName} title=${windowContext.windowTitle} windowId=${windowContext.windowId}`);
+  // windowContext logged at capture start (verbose; omitted from hot path)
 
   if (!String(captureMode).startsWith('frontmost-window')) {
     const primary = screen.getPrimaryDisplay();
     const fullSize = primary?.size || { width: 1920, height: 1080 };
     const reducedLoad = isReducedLoadMode();
-    const maxWidth = reducedLoad ? 960 : 1440;
+    
+    // Further reduce resolution to minimize GPU load
+    const maxWidth = reducedLoad ? 640 : 960; // REDUCED from 960/1440
     const scale = Math.min(1, maxWidth / Math.max(1, Number(fullSize.width || 1920)));
-    const thumbWidth = Math.max(640, Math.floor((fullSize.width || 1920) * scale));
-    const thumbHeight = Math.max(360, Math.floor((fullSize.height || 1080) * scale));
+    const thumbWidth = Math.max(480, Math.floor((fullSize.width || 1920) * scale)); // REDUCED from 640
+    const thumbHeight = Math.max(270, Math.floor((fullSize.height || 1080) * scale)); // REDUCED from 360
 
-    // Request both window and screen sources and try to prefer the frontmost window
+    // Request only screen sources for the fallback to minimize GPU/WindowServer load.
+    // Capturing all windows via desktopCapturer just to find a title match is extremely expensive.
     const sources = await desktopCapturer.getSources({
-      types: ['window', 'screen'],
+      types: ['screen'],
       thumbnailSize: { width: thumbWidth, height: thumbHeight }
     });
 
@@ -1907,14 +2031,10 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
       }
     } catch (_) { matchedSource = null; }
 
-  console.log('[SensorCapture] desktopCapturer sources:', sources.map(s => ({ id: s.id, name: s.name })).slice(0,10));
-
     // Prefer matched window source; otherwise fall back to the first screen source
     const screenSource = sources.find((s) => String(s.id || '').toLowerCase().startsWith('screen:')) || sources.find((s) => String(s.id || '').toLowerCase().includes('screen'));
-  const source = matchedSource || screenSource || sources[0];
-  if (matchedSource) console.log('[SensorCapture] matchedSource selected:', { id: matchedSource.id, name: matchedSource.name });
-  else if (screenSource) console.log('[SensorCapture] falling back to screenSource:', { id: screenSource.id, name: screenSource.name });
-  else console.log('[SensorCapture] using first available source:', { id: source.id, name: source.name });
+    const source = matchedSource || screenSource || sources[0];
+
     if (!source) {
       throw new Error('No screen or window source available for capture');
     }
@@ -1966,6 +2086,14 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
 
   const axText = String(windowContext.extractedText || '').trim();
   const canUseAxOnly = !forceCapture && axText.length >= 80;
+  
+  // Throttle OCR to prevent CPU overload
+  const now = Date.now();
+  const ocrThrottled = !forceCapture && (now - lastLowPowerOCRAt) < LOW_POWER_OCR_MIN_INTERVAL_MS;
+  
+  // Check performance monitor for OCR throttling
+  // const performanceThrottled = !canUseAxOnly && !ocrThrottled && performanceMonitor.shouldThrottleOperation('ocr');
+  
   let ocrStartTime = Date.now();
   const ocr = canUseAxOnly
     ? {
@@ -1974,8 +2102,28 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
         confidence: 0,
         status: 'skipped_ax_text_available'
       }
+    : ocrThrottled
+    ? {
+        text: '',
+        lines: [],
+        confidence: 0,
+        status: 'throttled_for_performance'
+      }
+    : performanceThrottled
+    ? {
+        text: '',
+        lines: [],
+        confidence: 0,
+        status: 'performance_throttled'
+      }
     : await runVisionOCR(imagePath);
+  
   const ocrDuration = Date.now() - ocrStartTime;
+  
+  // Update last OCR timestamp only when OCR actually runs
+  if (!canUseAxOnly && !ocrThrottled && !performanceThrottled) {
+    lastLowPowerOCRAt = now;
+  }
 
   const ocrText = String(ocr.text || '').trim();
   const mergedText = [axText, ocrText].filter(Boolean).join('\n').trim();
@@ -2075,7 +2223,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   eventPersistenceDurationMs = Date.now() - persistStartedAt;
 
   if (isPeriodicScreenshot) {
-    // The 30s screenshot cadence must not be blocked by DB/vector ingestion.
+    // Release the capture lock promptly so DB/vector ingestion doesn't block the next capture cycle.
     sensorCaptureInProgress = false;
     captureLockReleased = true;
   }
@@ -2141,7 +2289,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
       event.text ? `text_chars: ${event.text.length}` : 'no_text'
     ].filter(Boolean).join(', ');
 
-    console.log(`[OCRIngestion] Saved to memory | app=${event.activeApp} | ${ocrSummary}`);
+    // OCR ingestion saved (verbose logging omitted from hot path)
 
     updateMemoryGraphHealth({
       lastDesktopCaptureAt: new Date().toISOString(),
@@ -2154,7 +2302,8 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
       lastUrlAssociationDurationMs: urlAssociationDurationMs,
       lastEventPersistenceDurationMs: eventPersistenceDurationMs
     });
-    console.log(`[SensorCaptureTiming] total=${Date.now() - captureStartedAt}ms ocr=${ocrDuration}ms urls=${urlAssociationDurationMs}ms persist=${eventPersistenceDurationMs}ms app=${event.activeApp || 'unknown'}`);
+    // Timing summary omitted from hot path; uncomment for profiling:
+    // console.log(`[SensorCaptureTiming] total=${Date.now() - captureStartedAt}ms ocr=${ocrDuration}ms urls=${urlAssociationDurationMs}ms persist=${eventPersistenceDurationMs}ms`);
 
     // Throttle expensive background suggestion generation to avoid UI slowdown.
     const triggerInterval = isReducedLoadMode()
@@ -2200,23 +2349,37 @@ function startSensorCaptureLoop(mode = null) {
   }
   if (!settings.enabled) return;
 
-  // Startup capture is handled by the periodic 30-second screenshot loop.
-  // Skip duplicate immediate capture here to reduce launch-time load.
+  // Startup capture is handled by the periodic screenshot loop (startPeriodicScreenshotCapture).
 
-  const currentMode = mode || getPerformanceMode();
-  let intervalMs;
-  if (currentMode === 'deep-idle') intervalMs = 60 * 60 * 1000;
-  else if (currentMode === 'reduced') intervalMs = 30 * 60 * 1000;
-  else intervalMs = intervalMinutesToMs(settings.intervalMinutes);
-
-  console.log(`[SensorCapture] Starting loop with interval: ${intervalMs / 60000}m (Reduced mode: ${currentMode === 'reduced'})`);
-
+  const intervalMs = getPeriodicScreenshotIntervalMs(mode || getPerformanceMode());
   sensorCaptureTimer = setInterval(() => {
-    if (periodicScreenshotRunning) return;
-    // Fire-and-forget scheduled capture to keep it in the background
-    captureDesktopSensorSnapshot("scheduled").catch((error) => {
-      console.warn("Scheduled sensor capture failed:", error && error.message ? error.message : error);
-    });
+    // Prevent overlapping captures and add additional throttling
+    if (periodicScreenshotRunning || sensorCaptureInProgress || screenshotsPausedForDisplayOff) return;
+    
+    // Emergency throttling if system is under extreme load
+    // const perfReport = performanceMonitor.getPerformanceReport();
+    // if (perfReport.cpuUsage > 90 || perfReport.memoryUsage > 90) {
+    //   console.log(`[SensorCapture] Emergency throttling due to extreme load: CPU=${perfReport.cpuUsage.toFixed(1)}% Memory=${perfReport.memoryUsage.toFixed(1)}%`);
+    //   return;
+    // }
+    
+    // Add extra delay if system is under heavy load
+    const idleTime = (powerMonitor && typeof powerMonitor.getSystemIdleTime === 'function') ? powerMonitor.getSystemIdleTime() : 0;
+    if (idleTime < 30 && !shouldDeferBackgroundWork("SensorCapture")) {
+      // System is active, delay capture to reduce interference
+      setTimeout(() => {
+        if (!periodicScreenshotRunning && !sensorCaptureInProgress && !screenshotsPausedForDisplayOff) {
+          captureDesktopSensorSnapshot("scheduled").catch((error) => {
+            console.error("[SensorCapture] Scheduled capture failed:", error?.message || error);
+          });
+        }
+      }, Math.random() * 30000); // Random delay up to 30s
+    } else {
+      // Fire-and-forget scheduled capture to keep it in the background
+      captureDesktopSensorSnapshot("scheduled").catch((error) => {
+        console.error("[SensorCapture] Scheduled capture failed:", error?.message || error);
+      });
+    }
   }, intervalMs);
 }
 
@@ -2278,9 +2441,13 @@ async function runPeriodicScreenshotTick() {
     periodicScreenshotNextDueAt = (periodicScreenshotNextDueAt || now) + (missedIntervals * intervalMs);
   }
 
-  console.log("[Screenshot] Taking periodic screenshot...");
+  // Periodic screenshot tick (silent)
   try {
-    const result = await captureDesktopSensorSnapshot('periodic-screenshot');
+    const result = await withTimeout(
+      captureDesktopSensorSnapshot('periodic-screenshot'),
+      25000,
+      'periodic-screenshot'
+    );
     if (result?.imagePath) {
       console.log(result?.filtered ? "[Screenshot] Periodic screenshot filtered:" : "[Screenshot] Periodic screenshot captured:", {
         file: result.screenshot_filename,
@@ -2294,7 +2461,15 @@ async function runPeriodicScreenshotTick() {
       console.warn("[Screenshot] Periodic screenshot skipped:", result?.reason || "unknown");
     }
   } catch (error) {
-    console.error("[Screenshot] Periodic screenshot failed:", error?.message || error);
+    // Force-release the lock if the capture timed out or crashed, so next cycle isn't blocked.
+    sensorCaptureInProgress = false;
+    sensorCaptureStartedAt = 0;
+    const msg = error?.message || String(error || '');
+    if (/timed out/i.test(msg)) {
+      console.warn('[Screenshot] Periodic screenshot timed out — lock released for next cycle');
+    } else {
+      console.error('[Screenshot] Periodic screenshot failed:', msg);
+    }
   } finally {
     if (!screenshotsPausedForDisplayOff && periodicScreenshotRunning) {
       const nextIntervalMs = getPeriodicScreenshotIntervalMs();
@@ -3086,35 +3261,40 @@ function startMemoryGraphProcessing() {
     processorTimersActive: true
   });
 
-  // Episode generation every 15 minutes
-  // Episode generation & semantic window summaries aligned to wall-clock quarter-hours (:00, :15, :30, :45)
-  try {
-    const quarterHourMs = 15 * 60 * 1000;
-    // clear any previous timers
-    if (episodeGenerationTimer) try { clearInterval(episodeGenerationTimer); } catch (_) {}
-    if (semanticsTimer) try { clearInterval(semanticsTimer); } catch (_) {}
+  function scheduleAlignedJobs() {
+    // EMERGENCY THROTTLING - Disable most background jobs
+    if (EMERGENCY_THROTTLE_ENABLED) {
+      console.log('[Emergency] Background jobs disabled due to CPU throttling');
+      return;
+    }
+  
+    try {
+      const quarterHourMs = 15 * 60 * 1000;
+      // clear any previous timers
+      if (episodeGenerationTimer) try { clearInterval(episodeGenerationTimer); } catch (_) {}
+      if (semanticsTimer) try { clearInterval(semanticsTimer); } catch (_) {}
 
-    const now = Date.now();
-    // compute next quarter-hour boundary
-    const nextBoundary = Math.ceil(now / quarterHourMs) * quarterHourMs;
-    const delay = Math.max(1000, nextBoundary - now);
+      const now = Date.now();
+      // compute next quarter-hour boundary
+      const nextBoundary = Math.ceil(now / quarterHourMs) * quarterHourMs;
+      const delay = Math.max(1000, nextBoundary - now);
 
-    // schedule first aligned run, then set repeating intervals
-    setTimeout(() => {
-      runEpisodeGeneration().catch((e) => console.warn('[MemoryGraph] Aligned episode generation failed:', e?.message || e));
-      try { episodeGenerationTimer = setInterval(runEpisodeGeneration, 15 * 60 * 1000); } catch (_) {}
-      // also kick off semantic window at same boundary
-      runSemanticWindowGeneration().catch((e) => console.warn('[MemoryGraph] Aligned semantic window failed:', e?.message || e));
-      try { semanticsTimer = setInterval(runSemanticWindowGeneration, quarterHourMs); } catch (_) {}
-    }, delay);
-    console.log('[MemoryGraph] Aligned episode (15m) & semantic (15m) scheduling, first run in', Math.round(delay / 1000), 's');
-  } catch (e) {
-    console.warn('[MemoryGraph] Failed to schedule aligned quarter-hour jobs, falling back to interval timers:', e?.message || e);
-    if (episodeGenerationTimer) clearInterval(episodeGenerationTimer);
-    episodeGenerationTimer = setInterval(runEpisodeGeneration, 15 * 60 * 1000);
-    if (semanticsTimer) clearInterval(semanticsTimer);
-    semanticsTimer = setInterval(runSemanticWindowGeneration, 15 * 60 * 1000);
-  }
+      // schedule first aligned run, then set repeating intervals
+      setTimeout(() => {
+        runEpisodeGeneration().catch((e) => console.warn('[MemoryGraph] Aligned episode generation failed:', e?.message || e));
+        try { episodeGenerationTimer = setInterval(runEpisodeGeneration, 30 * 60 * 1000); } catch (_) {} // INCREASED from 15min
+        // also kick off semantic window at same boundary
+        runSemanticWindowGeneration().catch((e) => console.warn('[MemoryGraph] Aligned semantic window failed:', e?.message || e));
+        try { semanticsTimer = setInterval(runSemanticWindowGeneration, 30 * 60 * 1000); } catch (_) {} // INCREASED from 15min
+      }, delay);
+      console.log('[MemoryGraph] Aligned episode (30m) & semantic (30m) scheduling, first run in', Math.round(delay / 1000), 's');
+    } catch (e) {
+      console.warn('[MemoryGraph] Failed to schedule aligned quarter-hour jobs, falling back to interval timers:', e?.message || e);
+      if (episodeGenerationTimer) clearInterval(episodeGenerationTimer);
+      episodeGenerationTimer = setInterval(runEpisodeGeneration, 30 * 60 * 1000); // INCREASED from 15min
+      if (semanticsTimer) clearInterval(semanticsTimer);
+      semanticsTimer = setInterval(runSemanticWindowGeneration, 30 * 60 * 1000); // INCREASED from 15min
+    }
 
 
     // Hourly semantic pulse aligned to the hour boundary (:00)
@@ -3134,33 +3314,46 @@ function startMemoryGraphProcessing() {
   // Suggestion engine hourly; each run only fills missing slots up to 7.
   if (suggestionEngineTimer) clearInterval(suggestionEngineTimer);
   // Aligned relationship suggestion engine
-  try {
-    if (suggestionEngineTimer) clearInterval(suggestionEngineTimer);
-    const suggestionIntervalMs = SUGGESTION_REFRESH_INTERVAL_MINUTES * 60 * 1000;
-    const nextBoundary = Math.ceil(Date.now() / suggestionIntervalMs) * suggestionIntervalMs;
-    const suggestionDelay = Math.max(10 * 60 * 1000, nextBoundary - Date.now());
-    setTimeout(() => {
-      runSuggestionEngineJob().catch((e) => console.warn('[MemoryGraph] Aligned suggestion generation failed:', e?.message || e));
-      try { suggestionEngineTimer = setInterval(runSuggestionEngineJob, suggestionIntervalMs); } catch (_) {}
-    }, suggestionDelay);
-  } catch (e) {
-    console.warn('[MemoryGraph] Failed to schedule aligned suggestion job:', e?.message || e);
-    suggestionEngineTimer = setInterval(runSuggestionEngineJob, SUGGESTION_REFRESH_INTERVAL_MINUTES * 60 * 1000);
+  function scheduleSuggestionEngineJob() {
+    // EMERGENCY THROTTLING - Disable suggestion engine
+    if (EMERGENCY_THROTTLE_ENABLED) {
+      console.log('[Emergency] Suggestion engine disabled due to CPU throttling');
+      return;
+    }
+  
+    try {
+      if (suggestionEngineTimer) try { clearInterval(suggestionEngineTimer); } catch (_) {}
+      const suggestionIntervalMs = SUGGESTION_REFRESH_INTERVAL_MINUTES * 60 * 1000;
+      const nextBoundary = Math.ceil(Date.now() / suggestionIntervalMs) * suggestionIntervalMs;
+      const suggestionDelay = Math.max(10 * 60 * 1000, nextBoundary - Date.now());
+      setTimeout(() => {
+        runSuggestionEngineJob().catch((e) => console.warn('[MemoryGraph] Aligned suggestion generation failed:', e?.message || e));
+        try { suggestionEngineTimer = setInterval(runSuggestionEngineJob, suggestionIntervalMs); } catch (_) {}
+      }, suggestionDelay);
+    } catch (e) {
+      console.warn('[MemoryGraph] Failed to schedule aligned suggestion job:', e?.message || e);
+      suggestionEngineTimer = setInterval(runSuggestionEngineJob, SUGGESTION_REFRESH_INTERVAL_MINUTES * 60 * 1000);
+    }
   }
+  scheduleSuggestionEngineJob();
 
   if (relationshipGraphTimer) clearInterval(relationshipGraphTimer);
-  if (RELATIONSHIP_FEATURE_ENABLED) {
+  if (RELATIONSHIP_FEATURE_ENABLED && !EMERGENCY_THROTTLE_ENABLED) {
     relationshipGraphTimer = setInterval(() => {
       runRelationshipGraphUpdate({ backfill: false }).catch((e) => console.warn('[RelationshipGraph] Scheduled update failed:', e?.message || e));
     }, 12 * 60 * 60 * 1000);
   }
 
   // Schedule weekly insights for Sunday 11:59 PM
-  scheduleWeeklyInsights();
+  if (!EMERGENCY_THROTTLE_ENABLED) {
+    scheduleWeeklyInsights();
+  }
 
   // Schedule daily insights (every day at 23:00 local time by default)
-  scheduleDailyInsights();
-  scheduleLivingCore();
+  if (!EMERGENCY_THROTTLE_ENABLED) {
+    scheduleDailyInsights();
+    scheduleLivingCore();
+  }
 
   // Avoid heavy graph work during initial UI load; rely on scheduled aligned runs.
 
@@ -11821,6 +12014,22 @@ ipcMain.handle('execute-todo', async (event, todo) => {
 });
 
 app.whenReady().then(async () => {
+  // Emergency CPU throttling - set process priority to low
+  if (EMERGENCY_THROTTLE_ENABLED) {
+    try {
+      // Set process priority to low on macOS to prevent system unresponsiveness
+      const { exec } = require('child_process');
+      exec(`renice +10 -p ${process.pid}`, (error, stdout, stderr) => {
+        if (error) {
+          console.log('[Emergency] Could not set process priority:', error.message);
+        } else {
+          console.log('[Emergency] Process priority set to low for CPU throttling');
+        }
+      });
+    } catch (e) {
+      console.log('[Emergency] Failed to set process priority:', e.message);
+    }
+  }
   try {
     await db.ensureDB();
     await ingestion.initIngestion();
@@ -11912,28 +12121,17 @@ app.whenReady().then(async () => {
   const syncDone = store.get('initialSyncDone') || false;
   if (!syncDone) {
     console.log(`[initialSync] First launch detected — scheduling initial historical sync in ${Math.round(STARTUP_INITIAL_SYNC_DELAY_MS / 60000)}m...`);
-    setTimeout(async () => {
-      try {
-        if (mainWindow && mainWindow.webContents) {
-          mainWindow.webContents.send('initial-sync-started');
-        }
-        const googleData     = store.get('googleData') || await getGoogleData();
-        const browserHistory = await refreshBrowserHistory({ reason: 'startup_initial_sync', force: true });
-
-        const result = await runInitialSync({
-          userId:         'local',
-          messages:       googleData.gmail    || [],
-          docs:           googleData.drive    || [],
-          calendarEvents: googleData.calendar || [],
-          pageVisits:     browserHistory,
-          apiKey:         process.env.DEEPSEEK_API_KEY,
-          onProgress: (progress) => {
-            if (mainWindow && mainWindow.webContents) {
-              mainWindow.webContents.send('initial-sync-progress', progress);
-            }
+    setTimeout(() => {
+      fullGoogleSync({
+        pageVisits: browserHistory,
+        apiKey: process.env.DEEPSEEK_API_KEY,
+        onProgress: (progress) => {
+          if (mainWindow && mainWindow.webContents) {
+            mainWindow.webContents.send('initial-sync-progress', progress);
           }
-  , store });
-
+        }
+      }, store).then(async (result) => {
+        console.log('[initialSync] Initial sync completed');
         const daysCount = await processSyncResult(result);
         console.log(`[initialSync] Scheduled sync complete: ${daysCount} days summarised.`);
 
@@ -11943,8 +12141,8 @@ app.whenReady().then(async () => {
         const existingProfile = store.get('userProfile') || {};
         store.set('userProfile', {
           ...existingProfile,
-          patterns:            [...new Set([...(existingProfile.patterns    || []), ...result.userPatterns])].slice(0, 40),
-          preferences:         [...new Set([...(existingProfile.preferences || []), ...result.userPreferences])].slice(0, 40),
+          patterns: [...new Set([...(existingProfile.patterns    || []), ...result.userPatterns])].slice(0, 40),
+          preferences: [...new Set([...(existingProfile.preferences || []), ...result.userPreferences])].slice(0, 40),
           top_intent_clusters: result.topIntentClusters || []
         });
 
@@ -11954,14 +12152,18 @@ app.whenReady().then(async () => {
             daysProcessed: Object.keys(result.summaries).length
           });
         }
-      } catch (err) {
-        console.error('[initialSync] Auto-sync failed:', err.message);
-        if (mainWindow && mainWindow.webContents) {
-          mainWindow.webContents.send('initial-sync-error', { error: err.message });
-        }
-      }
+      }).catch((err) => {
+        console.error('[initialSync] Initial sync failed:', err?.message || err);
+      });
     }, STARTUP_INITIAL_SYNC_DELAY_MS);
   }
+
+  // ── Periodic sync every 5 minutes ───────────────────────────────────────
+  setInterval(() => {
+    fullGoogleSync().catch((err) => {
+      console.error('[PeriodicSync] Sync failed:', err?.message || err);
+    });
+  }, GSUITE_SYNC_INTERVAL_MS);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -11996,3 +12198,5 @@ app.on('before-quit', () => {
   stopPeriodicScreenshotCapture();
   globalShortcut.unregisterAll();
 });
+
+}

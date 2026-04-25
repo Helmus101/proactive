@@ -100,6 +100,20 @@ class WeaveApp {
             this.loadGoogleStatus().catch(() => {});
             if (RELATIONSHIP_FEATURE_ENABLED) this.loadContacts().catch(() => {});
         });
+        window.electronAPI.onPerformanceModeChanged?.((mode) => {
+            console.log(`[Renderer] Performance mode changed to: ${mode}`);
+            if (mode === 'reduced' || mode === 'deep-idle') {
+                document.body.classList.add('performance-reduced');
+            } else {
+                document.body.classList.remove('performance-reduced');
+            }
+        });
+        // Initial check for performance mode if available
+        window.electronAPI.getSensorStatus?.().then(status => {
+            if (status?.performance_mode === 'reduced' || status?.performance_mode === 'deep-idle') {
+                document.body.classList.add('performance-reduced');
+            }
+        }).catch(() => {});
         window.electronAPI.onPlannerStep?.((payload) => this.handlePlannerStep(payload));
         window.electronAPI.onMemoryGraphUpdate?.((payload) => this.handleMemoryGraphUpdate(payload));
         window.electronAPI.onVoiceCommandToggle?.((payload) => this.handleVoiceCommandToggle(payload));

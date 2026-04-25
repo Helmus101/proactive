@@ -84,7 +84,11 @@ function formatContext({
 }
 
 const embeddingCache = new Map();
-const EMBEDDING_CACHE_LIMIT = 2000;
+const EMBEDDING_CACHE_LIMIT = 5000;
+
+function yieldToEventLoop() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
 
 function getEmbedding(row) {
   if (!row) return [];
@@ -1075,6 +1079,7 @@ async function loadMemoryNodeCandidates(filters = {}) {
 async function vectorSearchNodes(nodeRows, semanticQueries = [], perQueryLimit = 30) {
   const rankings = [];
   for (const query of semanticQueries || []) {
+    await yieldToEventLoop();
     const queryEmbedding = await generateEmbedding(query, process.env.OPENAI_API_KEY);
     const ranked = nodeRows
       .map((row) => {
@@ -1207,6 +1212,7 @@ async function vectorSearchTextChunks(filters = {}, semanticQueries = [], perQue
   if (!chunkRows.length) return [];
   const rankings = [];
   for (const query of semanticQueries || []) {
+    await yieldToEventLoop();
     const queryEmbedding = await generateEmbedding(query, process.env.OPENAI_API_KEY);
     const ranked = chunkRows
       .map((row) => {
@@ -1686,6 +1692,7 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
   const effectiveHopLimit = Math.min(4, Math.max(1, hopLimit || DEFAULT_HOP_LIMIT));
 
   while (queue.length && expanded.length < maxExpanded) {
+    await yieldToEventLoop();
     const current = queue.shift();
     if (current.depth >= effectiveHopLimit) continue;
 

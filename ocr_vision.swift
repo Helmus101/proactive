@@ -94,14 +94,11 @@ func runOCR(imagePath: String, languageHint: String?) throws -> OCRResult {
         }
     }
 
-    request.recognitionLevel = .accurate
-    request.usesLanguageCorrection = true
-    let lang = (languageHint ?? "en").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    if lang == "en" {
-        request.recognitionLanguages = ["en-US"]
-    } else {
-        request.recognitionLanguages = [lang, "en-US"]
-    }
+    let accuracy = CommandLine.arguments.count >= 3 ? CommandLine.arguments[2].lowercased() : "accurate"
+    request.recognitionLevel = (accuracy == "fast") ? .fast : .accurate
+    request.usesLanguageCorrection = (accuracy != "fast")
+    request.recognitionLanguages = ["en-US"]
+
     // Capture smaller UI text as well (menus, sidebars, fine-print labels).
     request.minimumTextHeight = 0.005
 
