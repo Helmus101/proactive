@@ -106,7 +106,7 @@ function withTimeout(promise, timeoutMs, label = 'operation') {
   });
 }
 
-const DEFAULT_CHAT_TIMEOUT_MS = 20000;
+const DEFAULT_CHAT_TIMEOUT_MS = 40000;
 const CHAT_STEP_EMIT_INTERVAL_MS = 250;
 const activeChatRequestsBySender = new Map();
 const activeChatRequestRegistry = new Map();
@@ -759,7 +759,7 @@ function canRunHeavyJob(lastRunAt = 0) {
 
 function shouldDeferBackgroundWork(label = 'background') {
   const idleTime = (powerMonitor && typeof powerMonitor.getSystemIdleTime === 'function') ? powerMonitor.getSystemIdleTime() : 0;
-  const appBusy = isAppInteractionHot();
+const appBusy = isAppInteractionHot() || (activeChatRequestRegistry && activeChatRequestRegistry.size > 0);
   const defer = idleTime < 180 || appBusy;
   if (defer) console.log(`[${label}] Deferring heavy work until idle; idle=${idleTime}s`);
   return defer;
@@ -5009,7 +5009,7 @@ async function readChromiumHistoryDB(dbPath, browserName) {
   // Copy first to avoid the browser's exclusive lock
   const tmpPath = path.join(os.tmpdir(), `chromium_hist_${Date.now()}_${Math.random().toString(36).slice(2)}.db`);
   try {
-    fs.copyFileSync(dbPath, tmpPath);
+    await fs.promises.copyFile(dbPath, tmpPath);
   } catch (e) {
     console.warn(`Could not copy ${browserName} DB at ${dbPath}:`, e.message);
     return [];
@@ -5037,7 +5037,7 @@ async function readChromiumHistoryDB(dbPath, browserName) {
          LIMIT 500`,
         [sevenDaysAgo_us],
         (err, rows) => {
-          db.close(() => { try { fs.unlinkSync(tmpPath); } catch (_) {} });
+          db.close(async () => { try { await fs.promises.unlink(tmpPath); } catch (_) {} });
           if (err) {
             console.warn(`${browserName} query error:`, err.message);
             resolve([]);
@@ -5064,7 +5064,7 @@ async function readChromiumHistoryDB(dbPath, browserName) {
       );
     });
   } catch (sqlErr) {
-    try { fs.unlinkSync(tmpPath); } catch (_) {}
+    try { await fs.promises.unlink(tmpPath); } catch (_) {}
     console.warn(`sqlite3 unavailable for ${browserName}:`, sqlErr.message);
     return [];
   }
@@ -5104,7 +5104,7 @@ async function getChromiumHistory() {
     // Try Default profile + numbered profiles (Profile 1, Profile 2 ...)
     let profileDirs;
     try {
-      profileDirs = ['Default', ...fs.readdirSync(base).filter(d => /^Profile \d+$/.test(d))];
+      profileDirs = ['Default', ...(await fs.promises.readdir(base)).filter(d => /^Profile \d+$/.test(d))];
     } catch (_) {
       profileDirs = ['Default'];
     }
@@ -5135,7 +5135,7 @@ async function getSafariHistory() {
     // Safari also locks its DB while open — copy it first
     const tmpPath = path.join(os.tmpdir(), `safari_history_${Date.now()}.db`);
     try {
-      fs.copyFileSync(safariHistoryPath, tmpPath);
+      await fs.promises.copyFile(safariHistoryPath, tmpPath);
     } catch (e) {
       if (e.code === 'EPERM') {
         if (!safariFullDiskAccessWarned) {
@@ -5177,8 +5177,8 @@ async function getSafariHistory() {
         `;
 
         db.all(query, [sevenDaysAgo_apple], (err, rows) => {
-          db.close(() => {
-            try { fs.unlinkSync(tmpPath); } catch (_) {}
+          db.close(async () => {
+            try { await fs.promises.unlink(tmpPath); } catch (_) {}
           });
 
           if (err) {
@@ -5204,7 +5204,7 @@ async function getSafariHistory() {
       });
     } catch (sqliteError) {
       console.log('sqlite3 not available for Safari:', sqliteError.message);
-      try { fs.unlinkSync(tmpPath); } catch (_) {}
+      try { await fs.promises.unlink(tmpPath); } catch (_) {}
       return [];
     }
   } catch (error) {
@@ -11512,11 +11512,11 @@ ipcMain.handle('delete-all-settings', async () => {
   try {
     const userDataPath = app.getPath('userData');
     if (fs.existsSync(userDataPath)) {
-      const entries = fs.readdirSync(userDataPath);
+      const entries = await fs.promises.readdir(userDataPath);
       for (const name of entries) {
         const abs = path.join(userDataPath, name);
         try {
-          fs.rmSync(abs, { recursive: true, force: true });
+          await fs.promises.rm(abs, { recursive: true, force: true });
         } catch (innerErr) {
           console.warn('[delete-all-settings] Failed removing userData entry:', abs, innerErr?.message || innerErr);
         }
