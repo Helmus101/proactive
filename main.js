@@ -5768,8 +5768,8 @@ async function repairEmailEventTimestamps() {
     }
 
     let updated = 0;
-    await db.runQuery('BEGIN TRANSACTION').catch(() => {});
     try {
+      await db.runQuery('BEGIN TRANSACTION');
       for (const row of rows) {
         let meta = {};
         try { meta = JSON.parse(row.metadata || '{}'); } catch (_) { meta = {}; }
@@ -5786,9 +5786,9 @@ async function repairEmailEventTimestamps() {
         );
         updated += 1;
       }
-      await db.runQuery('COMMIT').catch(() => {});
+      await db.runQuery('COMMIT');
     } catch (err) {
-      await db.runQuery('ROLLBACK').catch(() => {});
+      try { await db.runQuery('ROLLBACK'); } catch (_) {}
       throw err;
     }
 
@@ -5801,6 +5801,7 @@ async function repairEmailEventTimestamps() {
     console.warn('[EmailTimestampRepair] Failed:', error?.message || error);
   }
 }
+
 
 
 // Get Google data (Gmail, Calendar) using real APIs for ALL accounts
@@ -12029,7 +12030,6 @@ ipcMain.handle('execute-todo', async (event, todo) => {
 async function initializeBackgroundServices() {
   try {
     // Call initDB early so the db object is available for IPC handlers
-    await db.initDB().catch(err => console.log('[DB] Early init catch:', err.message));
 
     await db.ensureDB();
     await ingestion.initIngestion();
@@ -12048,6 +12048,10 @@ async function initializeBackgroundServices() {
 }
 
 app.whenReady().then(async () => {
+  createWindow();
+  createVoiceHudWindow();
+  db.initDB().catch(err => console.log('[DB] Early init catch:', err.message));
+
   // Emergency CPU throttling - set process priority to low
   if (EMERGENCY_THROTTLE_ENABLED) {
     try {
@@ -12064,8 +12068,7 @@ app.whenReady().then(async () => {
       console.log('[Emergency] Failed to set process priority:', e.message);
     }
   }
-  createWindow();
-  createVoiceHudWindow();
+
   initializeBackgroundServices();
   registerVoiceShortcut();
   hydrateStudySessionFromStore();
@@ -12141,7 +12144,7 @@ app.whenReady().then(async () => {
     setTimeout(() => startRecursiveImprovementLoop(), STARTUP_RECURSIVE_DELAY_MS);
   }
 
-  // ── Auto-trigger initial sync on first launch ──────────────────────────
+  // Auto-trigger initial sync on first launch
   const syncDone = store.get('initialSyncDone') || false;
   if (!syncDone) {
     console.log(`[initialSync] First launch detected — scheduling initial historical sync in ${Math.round(STARTUP_INITIAL_SYNC_DELAY_MS / 60000)}m...`);
@@ -12182,7 +12185,7 @@ app.whenReady().then(async () => {
     }, STARTUP_INITIAL_SYNC_DELAY_MS);
   }
 
-  // ── Periodic sync every 5 minutes ───────────────────────────────────────
+  // Periodic sync every 5 minutes
   setInterval(() => {
     fullGoogleSync().catch((err) => {
       console.error('[PeriodicSync] Sync failed:', err?.message || err);
@@ -12222,5 +12225,4 @@ app.on('before-quit', () => {
   stopPeriodicScreenshotCapture();
   globalShortcut.unregisterAll();
 });
-
 }
