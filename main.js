@@ -24,6 +24,13 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const fsPromises = fs.promises;
+const STARTUP_TRACE_PATH = '/tmp/proactive-startup.log';
+function startupTrace(message, extra = '') {
+  try {
+    fs.appendFileSync(STARTUP_TRACE_PATH, `${new Date().toISOString()} ${message}${extra ? ` ${extra}` : ''}\n`);
+  } catch (_) {}
+}
+startupTrace('[Startup] main module loaded');
 
 async function existsAsync(path) {
   try {
@@ -37,15 +44,18 @@ const { execFile } = require('child_process');
 const axios = require('axios');
 const Store = require('electron-store');
 const sqlite3 = (process.env.NODE_ENV === 'production') ? require('sqlite3') : require('sqlite3').verbose();
+startupTrace('[Startup] core modules loaded');
 const ingestion = require('./services/ingestion');
 const { ingestRawEvent } = ingestion;
 const express = require('express');
 const FormData = require('form-data');
 require('dotenv').config(); // Load environment variables
+startupTrace('[Startup] ingestion/dotenv loaded');
 const db = require('./services/db');
 const engine = require('./services/agent/intelligence-engine');
 const extractor = require('./services/extractors/openLoopExtractor');
 const scoring = require('./services/scoring');
+startupTrace('[Startup] db/intelligence/extractors loaded');
 const { answerChatQuery } = require('./services/agent/chat-engine');
 const { buildRadarState } = require('./services/agent/radar-engine');
 const { buildHybridGraphRetrieval } = require('./services/agent/hybrid-graph-retrieval');
@@ -54,6 +64,7 @@ const { upsertMemoryNode } = require('./services/agent/graph-store');
 const { generateEmbedding } = require('./services/embedding-engine');
 const { generateTopTodosFromMemoryQuery, generateAndPersistTasksFromLLM } = require('./services/agent/suggestion-engine');
 const { getLatestRecursiveImprovementLog } = require('./services/agent/recursive-improvement-engine');
+startupTrace('[Startup] agent modules loaded');
 const { getRelationshipContactDetail } = require('./services/relationship-graph');
 const { getRelationshipContacts } = require('./services/relationship-graph');
 const { syncAppleContactsIntoRelationshipGraph } = require('./services/relationship-graph');
@@ -68,15 +79,18 @@ const { runRecursiveImprovementCycle } = require('./services/agent/recursive-imp
 const { runRelationshipGraphJob } = require('./services/relationship-graph');
 const { runSemanticSummaryWindow } = require('./services/agent/intelligence-engine');
 const { runWeeklyInsightJob } = require('./services/agent/intelligence-engine');
+startupTrace('[Startup] relationship/intelligence jobs loaded');
 // const performanceMonitor = require('./performance-monitor'); // Temporarily disabled to test startup
 
 // ── Summarizer services ──────────────────────────────────────────────────────
 const { runInitialSync, searchSummaries } = require('./services/summarizer/initialSync');
 const { generateTodaySummaryWithContext } = require('./services/summarizer/aiDailySummary');
 const { buildDailySummaries } = require('./services/summarizer/dailySummary');
+startupTrace('[Startup] summarizer modules loaded');
 const { planNextAction, normalizeDesktopGoal } = require('./services/agent/agentPlanner');
 const { checkAccessibilityPermission, observeDesktopState, executeDesktopAction, openAccessibilitySettings, openScreenRecordingSettings } = require('./services/desktop-control');
 const { ensureManagedBrowser, observeManagedBrowserState, executeManagedBrowserAction, getManagedBrowserStatus } = require('./services/browser-driver');
+startupTrace('[Startup] desktop/browser modules loaded');
 const {
   buildGlobalGraph,
   detectTasks,
@@ -88,6 +102,7 @@ const {
   rankAndLimitSuggestions
 } = require('./services/agent/intent-first-suggestions');
 const { rebuildInvertedIndex } = require('./services/summarizer/indexing');
+startupTrace('[Startup] all top-level modules loaded');
 
 // Initialize electron-store for data persistence
 const store = new Store();
@@ -1305,6 +1320,8 @@ async function rebuildLayeredMemoryGraphFromEvents(events, apiKey) {
 }
 
 function createWindow() {
+  startupTrace('[Startup] createWindow begin');
+  console.log('[Startup] createWindow begin');
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -1315,7 +1332,30 @@ function createWindow() {
     }
   });
 
-  mainWindow.loadFile('renderer/index.html');
+  startupTrace('[Startup] BrowserWindow created');
+  console.log('[Startup] BrowserWindow created');
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    console.error('[Startup] renderer did-fail-load:', errorCode, errorDescription, validatedURL);
+  });
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error('[Startup] renderer process gone:', details);
+  });
+  mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    console.log(`[Renderer:${level}] ${message} (${sourceId}:${line})`);
+  });
+  mainWindow.webContents.on('did-finish-load', () => {
+    startupTrace('[Startup] renderer did-finish-load');
+    console.log('[Startup] renderer did-finish-load');
+  });
+  mainWindow.loadFile('renderer/index.html')
+    .then(() => {
+      startupTrace('[Startup] loadFile resolved');
+      console.log('[Startup] loadFile resolved');
+    })
+    .catch((error) => {
+      startupTrace('[Startup] loadFile failed', error?.message || String(error));
+      console.error('[Startup] loadFile failed:', error?.message || error);
+    });
 
   appInteractionState.focused = mainWindow.isFocused();
   appInteractionState.minimized = mainWindow.isMinimized();
@@ -12048,6 +12088,7 @@ async function initializeBackgroundServices() {
 }
 
 app.whenReady().then(async () => {
+  startupTrace('[Startup] app.whenReady callback');
   createWindow();
   createVoiceHudWindow();
   db.initDB().catch(err => console.log('[DB] Early init catch:', err.message));
