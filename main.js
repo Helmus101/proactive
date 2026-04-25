@@ -5802,40 +5802,6 @@ async function repairEmailEventTimestamps() {
   }
 }
 
-    let updated = 0;
-    await db.runQuery('BEGIN TRANSACTION').catch(() => {});
-    try {
-      for (const row of rows) {
-        let meta = {};
-        try { meta = JSON.parse(row.metadata || '{}'); } catch (_) { meta = {}; }
-        const sourceTs = toValidEventTimestamp(meta.sent_at, meta.internalDate, meta.date, meta.received_at, row.occurred_at, row.timestamp);
-        if (!Number.isFinite(sourceTs) || sourceTs <= 0) continue;
-        const iso = new Date(sourceTs).toISOString();
-        const day = iso.slice(0, 10);
-        if (String(row.timestamp || '') === iso && String(row.occurred_at || '') === iso && String(row.date || '') === day) continue;
-        await db.runQuery(
-          `UPDATE events
-           SET timestamp = ?, occurred_at = ?, date = ?
-           WHERE id = ?`,
-          [iso, iso, day, row.id]
-        );
-        updated += 1;
-      }
-      await db.runQuery('COMMIT').catch(() => {});
-    } catch (err) {
-      await db.runQuery('ROLLBACK').catch(() => {});
-      throw err;
-    }
-
-    store.set('emailTimestampRepairAt', new Date().toISOString());
-    store.set('emailTimestampRepairCount', updated);
-    if (updated > 0) {
-      console.log(`[EmailTimestampRepair] Corrected ${updated} email/message events to source-time timestamps`);
-    }
-  } catch (error) {
-    console.warn('[EmailTimestampRepair] Failed:', error?.message || error);
-  }
-}
 
 // Get Google data (Gmail, Calendar) using real APIs for ALL accounts
 async function getGoogleData({ since, includeContacts = true, includeDrive = false } = {}) {
