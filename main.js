@@ -889,6 +889,7 @@ function enqueueHeavyJob(jobName, runner, options = {}) {
 }
 
 function drainPendingHeavyJobs() {
+  if (activeChatRequestRegistry && activeChatRequestRegistry.size > 0) return false;
   if (heavyJobState.activeJob || !pendingHeavyJobs.size) return false;
   const queue = Array.from(pendingHeavyJobs.entries());
   const ordered = HEAVY_JOB_QUEUE_ORDER.map((name) => queue.find(([key]) => key === name)).filter(Boolean);
@@ -1798,8 +1799,7 @@ function getFrontmostWindowContext() {
 
 async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   const captureReason = String(reason || 'scheduled');
-  const isPeriodicScreenshot = /periodic-screenshot/i.test(captureReason);
-  if (!isPeriodicScreenshot && shouldDeferBackgroundWork('SensorCapture')) return { skipped: true, reason: 'active_use' };
+  if (shouldDeferBackgroundWork("SensorCapture")) return { skipped: true, reason: "active_use" };
   const captureStartedAt = Date.now();
   if (screenshotsPausedForDisplayOff) {
     return {
