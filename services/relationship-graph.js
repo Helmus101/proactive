@@ -965,9 +965,9 @@ async function backfillRelationshipContacts() {
         envelope: { app: row.app, title: row.title, occurred_at: row.occurred_at || row.timestamp },
         cachedKnown: known
       }).catch(() => {});
+      // Yield to main thread after every event
+      await new Promise(resolve => setImmediate(resolve));
     }
-    // Yield to main thread between batches
-    await new Promise(resolve => setImmediate(resolve));
   }
 }
 

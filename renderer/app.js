@@ -68,6 +68,7 @@ class WeaveApp {
         this.currentChatRequestId = null;
         this.updateIcons = this.debounce(this.updateIconsReal, 150);
         this.renderSuggestions = this.debounce(this.renderSuggestionsReal, 100);
+        this.renderLiveThinkingPanel = this.debounce(this.renderLiveThinkingPanelReal, 50);
         this.init();
     }
 
@@ -1606,7 +1607,7 @@ class WeaveApp {
         try {
             response = await window.electronAPI.askAIAssistant(message, {
                 requestId,
-                timeoutMs: 20000,
+                timeoutMs: 600000,
                 chat_session_id: this.activeChatId,
                 chat_history: contextWindow
             });
@@ -2052,7 +2053,7 @@ Would you like me to continue with more detail?` : content;
         return rows.length ? `<div class="thinking-stage-metrics">${rows.join('')}</div>` : '';
     }
 
-    renderLiveThinkingPanel(panel) {
+    renderLiveThinkingPanelReal(panel) {
         if (!panel?.isConnected) {
             if (panel?.__thinkingTimer) clearInterval(panel.__thinkingTimer);
             return;

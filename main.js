@@ -23,6 +23,16 @@ const crypto = require('crypto');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+const fsPromises = fs.promises;
+
+async function existsAsync(path) {
+  try {
+    await fsPromises.access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
 const { execFile } = require('child_process');
 const axios = require('axios');
 const Store = require('electron-store');
@@ -106,7 +116,7 @@ function withTimeout(promise, timeoutMs, label = 'operation') {
   });
 }
 
-const DEFAULT_CHAT_TIMEOUT_MS = 40000;
+const DEFAULT_CHAT_TIMEOUT_MS = 600000;
 const CHAT_STEP_EMIT_INTERVAL_MS = 250;
 const activeChatRequestsBySender = new Map();
 const activeChatRequestRegistry = new Map();
@@ -1530,7 +1540,7 @@ function mergeSuggestionQueues(existing = [], incoming = [], limit = MAX_PRACTIC
 
 async function ensureSensorStorageDir() {
   const capturesDir = path.join(app.getPath('userData'), 'screenshots');
-  if (!fs.existsSync(capturesDir)) {
+  if (!(await existsAsync(capturesDir))) {
     await fs.promises.mkdir(capturesDir, { recursive: true });
   }
   return capturesDir;
@@ -1759,6 +1769,7 @@ function getFrontmostWindowContext() {
 }
 
 async function captureDesktopSensorSnapshot(reason = 'scheduled') {
+  if (shouldDeferBackgroundWork('SensorCapture')) return { skipped: true, reason: 'active_use' };
   const captureStartedAt = Date.now();
   if (screenshotsPausedForDisplayOff) {
     return {
@@ -1803,7 +1814,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
           else resolve();
         });
       });
-      if (fs.existsSync(imagePath)) {
+      if (await existsAsync(imagePath)) {
         captureMode = 'frontmost-window';
         sourceName = windowContext.windowTitle || windowContext.appName || 'Window';
         capturePngBuffer = await fs.promises.readFile(imagePath).catch(() => null);
@@ -1825,7 +1836,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
             }
           );
         });
-        if (fs.existsSync(imagePath)) {
+        if (await existsAsync(imagePath)) {
           captureMode = 'frontmost-window-bounds';
           sourceName = windowContext.windowTitle || windowContext.appName || 'Window';
           capturePngBuffer = await fs.promises.readFile(imagePath).catch(() => null);
@@ -1891,7 +1902,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     sourceName = source.name || 'Screen';
   }
 
-  if (!capturePngBuffer && fs.existsSync(imagePath)) {
+  if (!capturePngBuffer && (await existsAsync(imagePath))) {
     capturePngBuffer = await fs.promises.readFile(imagePath).catch(() => null);
   }
 
@@ -1910,8 +1921,8 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     return {
       skipped: true,
       reason: 'low_visual_change',
-      screenshot_present: Boolean(fs.existsSync(imagePath)),
-      imagePath: fs.existsSync(imagePath) ? imagePath : null,
+      screenshot_present: Boolean(await existsAsync(imagePath)),
+      imagePath: (await existsAsync(imagePath)) ? imagePath : null,
       screenshot_filename: filename,
       activeApp: windowContext.appName || '',
       activeWindowTitle: windowContext.windowTitle || '',
@@ -2021,8 +2032,8 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
       filter_reason: filterCheck.reason,
       sensitive_category: filterCheck.category || null,
       retained_for_durability: Boolean(filterResult?.retained_for_durability),
-      screenshot_present: Boolean(fs.existsSync(imagePath)),
-      imagePath: fs.existsSync(imagePath) ? imagePath : null
+      screenshot_present: Boolean(await existsAsync(imagePath)),
+      imagePath: (await existsAsync(imagePath)) ? imagePath : null
     };
   }
 
@@ -5004,7 +5015,7 @@ async function getBrowserHistory() {
 // Read a single Chromium history DB file and return entries
 async function readChromiumHistoryDB(dbPath, browserName) {
 
-  if (!fs.existsSync(dbPath)) return [];
+  if (!(await existsAsync(dbPath))) return [];
 
   // Copy first to avoid the browser's exclusive lock
   const tmpPath = path.join(os.tmpdir(), `chromium_hist_${Date.now()}_${Math.random().toString(36).slice(2)}.db`);
@@ -5099,7 +5110,7 @@ async function getChromiumHistory() {
   }
 
   for (const { name, base } of browserBases) {
-    if (!fs.existsSync(base)) continue;
+    if (!(await existsAsync(base))) continue;
 
     // Try Default profile + numbered profiles (Profile 1, Profile 2 ...)
     let profileDirs;
@@ -5127,7 +5138,7 @@ async function getSafariHistory() {
 
     const safariHistoryPath = path.join(os.homedir(), 'Library/Safari/History.db');
 
-    if (!fs.existsSync(safariHistoryPath)) {
+    if (!(await existsAsync(safariHistoryPath))) {
       console.log('Safari history file not found');
       return [];
     }
@@ -11511,7 +11522,7 @@ ipcMain.handle('delete-all-settings', async () => {
 
   try {
     const userDataPath = app.getPath('userData');
-    if (fs.existsSync(userDataPath)) {
+    if (await existsAsync(userDataPath)) {
       const entries = await fs.promises.readdir(userDataPath);
       for (const name of entries) {
         const abs = path.join(userDataPath, name);
