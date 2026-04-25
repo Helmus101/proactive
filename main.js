@@ -2558,7 +2558,6 @@ function scheduleDailyTasks() {
     }
 
     // Schedule next day's summary
-    scheduleDailyTasks();
   }, summaryDelay);
 
   console.log(`Daily summary scheduled for: ${summaryTime.toLocaleString()}`);
@@ -2591,7 +2590,6 @@ function scheduleDailyTasks() {
     }
 
     // Schedule next day's pattern update
-    scheduleDailyTasks();
   }, patternDelay);
 
   console.log(`Pattern update scheduled for: ${patternTime.toLocaleString()}`);
@@ -5763,23 +5761,72 @@ async function repairEmailEventTimestamps() {
           OR LOWER(COALESCE(source_type, type, '')) LIKE '%message%'
        LIMIT 8000`
     ).catch(() => []);
-    let updated = 0;
-    for (const row of rows) {
-      let meta = {};
-      try { meta = JSON.parse(row.metadata || '{}'); } catch (_) { meta = {}; }
-      const sourceTs = toValidEventTimestamp(meta.sent_at, meta.internalDate, meta.date, meta.received_at, row.occurred_at, row.timestamp);
-      if (!Number.isFinite(sourceTs) || sourceTs <= 0) continue;
-      const iso = new Date(sourceTs).toISOString();
-      const day = iso.slice(0, 10);
-      if (String(row.timestamp || '') === iso && String(row.occurred_at || '') === iso && String(row.date || '') === day) continue;
-      await db.runQuery(
-        `UPDATE events
-         SET timestamp = ?, occurred_at = ?, date = ?
-         WHERE id = ?`,
-        [iso, iso, day, row.id]
-      ).catch(() => {});
-      updated += 1;
+
+    if (!rows || rows.length === 0) {
+      store.set('emailTimestampRepairAt', new Date().toISOString());
+      return;
     }
+
+    let updated = 0;
+    await db.runQuery('BEGIN TRANSACTION').catch(() => {});
+    try {
+      for (const row of rows) {
+        let meta = {};
+        try { meta = JSON.parse(row.metadata || '{}'); } catch (_) { meta = {}; }
+        const sourceTs = toValidEventTimestamp(meta.sent_at, meta.internalDate, meta.date, meta.received_at, row.occurred_at, row.timestamp);
+        if (!Number.isFinite(sourceTs) || sourceTs <= 0) continue;
+        const iso = new Date(sourceTs).toISOString();
+        const day = iso.slice(0, 10);
+        if (String(row.timestamp || '') === iso && String(row.occurred_at || '') === iso && String(row.date || '') === day) continue;
+        await db.runQuery(
+          `UPDATE events
+           SET timestamp = ?, occurred_at = ?, date = ?
+           WHERE id = ?`,
+          [iso, iso, day, row.id]
+        );
+        updated += 1;
+      }
+      await db.runQuery('COMMIT').catch(() => {});
+    } catch (err) {
+      await db.runQuery('ROLLBACK').catch(() => {});
+      throw err;
+    }
+
+    store.set('emailTimestampRepairAt', new Date().toISOString());
+    store.set('emailTimestampRepairCount', updated);
+    if (updated > 0) {
+      console.log(`[EmailTimestampRepair] Corrected ${updated} email/message events to source-time timestamps`);
+    }
+  } catch (error) {
+    console.warn('[EmailTimestampRepair] Failed:', error?.message || error);
+  }
+}
+
+    let updated = 0;
+    await db.runQuery('BEGIN TRANSACTION').catch(() => {});
+    try {
+      for (const row of rows) {
+        let meta = {};
+        try { meta = JSON.parse(row.metadata || '{}'); } catch (_) { meta = {}; }
+        const sourceTs = toValidEventTimestamp(meta.sent_at, meta.internalDate, meta.date, meta.received_at, row.occurred_at, row.timestamp);
+        if (!Number.isFinite(sourceTs) || sourceTs <= 0) continue;
+        const iso = new Date(sourceTs).toISOString();
+        const day = iso.slice(0, 10);
+        if (String(row.timestamp || '') === iso && String(row.occurred_at || '') === iso && String(row.date || '') === day) continue;
+        await db.runQuery(
+          `UPDATE events
+           SET timestamp = ?, occurred_at = ?, date = ?
+           WHERE id = ?`,
+          [iso, iso, day, row.id]
+        );
+        updated += 1;
+      }
+      await db.runQuery('COMMIT').catch(() => {});
+    } catch (err) {
+      await db.runQuery('ROLLBACK').catch(() => {});
+      throw err;
+    }
+
     store.set('emailTimestampRepairAt', new Date().toISOString());
     store.set('emailTimestampRepairCount', updated);
     if (updated > 0) {
@@ -11946,7 +11993,6 @@ ipcMain.handle('save-sensor-settings', async (_event, settings) => {
   };
   next.intervalMinutes = 15;
   store.set('sensorSettings', next);
-  startSensorCaptureLoop();
   return getSensorStatus();
 });
 
@@ -12013,6 +12059,28 @@ ipcMain.handle('execute-todo', async (event, todo) => {
   return { success: true, message: 'Todo executed successfully' };
 });
 
+
+async function initializeBackgroundServices() {
+  try {
+    // Call initDB early so the db object is available for IPC handlers
+    await db.initDB().catch(err => console.log('[DB] Early init catch:', err.message));
+
+    await db.ensureDB();
+    await ingestion.initIngestion();
+    console.log('SQLite Graph DB Initialized');
+    await repairEmailEventTimestamps();
+  } catch (err) {
+    console.error('Failed to initialize database or ingestion:', err);
+  }
+
+  try {
+    scheduleDailyTasks();
+    startSensorCaptureLoop();
+  } catch (err) {
+    console.error('Failed to start background services:', err);
+  }
+}
+
 app.whenReady().then(async () => {
   // Emergency CPU throttling - set process priority to low
   if (EMERGENCY_THROTTLE_ENABLED) {
@@ -12030,16 +12098,9 @@ app.whenReady().then(async () => {
       console.log('[Emergency] Failed to set process priority:', e.message);
     }
   }
-  try {
-    await db.ensureDB();
-    await ingestion.initIngestion();
-    console.log('SQLite Graph DB Initialized');
-    await repairEmailEventTimestamps();
-  } catch (err) {
-    console.error('Failed to initialize database or ingestion:', err);
-  }
   createWindow();
   createVoiceHudWindow();
+  initializeBackgroundServices();
   registerVoiceShortcut();
   hydrateStudySessionFromStore();
   startScreenshotCleanupLoop();
@@ -12102,9 +12163,6 @@ app.whenReady().then(async () => {
 
   startOAuthServer(Number(oauthPort) || 3002);
 
-  // Initialize daily task scheduling
-  scheduleDailyTasks();
-  startSensorCaptureLoop();
   setTimeout(() => startSourceWarmup(), STARTUP_SOURCE_WARMUP_DELAY_MS);
   setTimeout(() => startPeriodicScreenshotCapture(), Math.max(15000, getPeriodicScreenshotWakeDelayMs()));
 
