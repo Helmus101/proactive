@@ -894,9 +894,7 @@ function uniqById(items = []) {
 const oauthApp = express();
 let oauthPort = process.env.OAUTH_PORT || 3002; // Moved from 3001 to avoid overlap with WebSocket server
 
-let mainWindow;
 let authWindow;
-let voiceHudWindow = null;
 let pendingAITasks = [];
 let sensorCaptureTimer = null;
 let periodicScreenshotTimer = null;
@@ -973,12 +971,6 @@ let periodicScreenshotPauseReason = '';
 const performanceState = {
   onBattery: false,
   thermalState: 'unknown'
-};
-const appInteractionState = {
-  focused: false,
-  minimized: false,
-  lastInteractionAt: 0,
-  chatActive: false
 };
 const heavyJobState = {
   activeJob: null,
@@ -12471,5 +12463,3 @@ app.on('before-quit', () => {
   if (relationshipGraphTimer) clearInterval(relationshipGraphTimer);
   stopPeriodicScreenshotCapture();
   globalShortcut.unregisterAll();
-});
-}
