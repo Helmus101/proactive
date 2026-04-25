@@ -1,10 +1,19 @@
 'use strict';
 
 class WeaveApp {
-    updateIcons() {
+    updateIconsReal() {
         if (window.lucide) {
             window.lucide.createIcons();
         }
+    }
+
+    
+    debounce(func, wait) {
+        let timeout;
+        return (...args) => {
+            clearTimeout(timeout);
+            timeout = setTimeout(() => func.apply(this, args), wait);
+        };
     }
 
     constructor() {
@@ -57,6 +66,8 @@ class WeaveApp {
         this.chatRequestInFlight = false;
         this.chatRequestSettledAt = 0;
         this.currentChatRequestId = null;
+        this.updateIcons = this.debounce(this.updateIconsReal, 150);
+        this.renderSuggestions = this.debounce(this.renderSuggestionsReal, 100);
         this.init();
     }
 
@@ -638,14 +649,13 @@ class WeaveApp {
         console.log(`[RendererPerf] ${label} ${durationMs}ms${extra ? ` ${extra}` : ''}`);
     }
 
-    renderSuggestions() {
+    renderSuggestionsReal() {
         const renderStartedAt = Date.now();
         if (!this.remindersList) return;
 
         const visibleTodos = this.getVisibleTodos();
         this.remindersList.classList.remove('today-dissolve');
-        void this.remindersList.offsetWidth;
-        this.remindersList.classList.add('today-dissolve');
+        requestAnimationFrame(() => this.remindersList && this.remindersList.classList.add('today-dissolve'));
         this.updatePresenceSummary(visibleTodos);
 
         if (!visibleTodos.length) {
