@@ -53,6 +53,10 @@ class WeaveApp {
         this.settingsDataLoaded = false;
         this.settingsDataLoading = null;
         this.lastPerfLogAt = 0;
+        this.lastThinkingRenderAt = 0;
+        this.chatRequestInFlight = false;
+        this.chatRequestSettledAt = 0;
+        this.currentChatRequestId = null;
         this.init();
     }
 
@@ -1426,11 +1430,16 @@ class WeaveApp {
             if (isSyncing) {
                 statusEl.classList.add('syncing');
                 if (textEl) textEl.textContent = 'Updating relationship memory...';
-                this.setPresenceMode('remembering');
+                const recentlySettled = this.chatRequestSettledAt && (Date.now() - this.chatRequestSettledAt) < 2500;
+                if (!this.chatRequestInFlight && !recentlySettled) {
+                    this.setPresenceMode('remembering');
+                }
             } else {
                 statusEl.classList.remove('syncing');
                 if (textEl) textEl.textContent = 'Relationship memory updated';
-                this.setPresenceMode('waiting');
+                if (!this.chatRequestInFlight) {
+                    this.setPresenceMode('waiting');
+                }
             }
         } catch (e) {
             console.warn('Failed to update sync status:', e);
@@ -1538,6 +1547,16 @@ class WeaveApp {
     async sendChatMessage() {
         const message = this.chatInput?.value.trim();
         if (!message) return;
+        if (this.chatRequestInFlight) {
+            if (this.currentChatRequestId && window.electronAPI?.cancelAIAssistantRequest) {
+                try { await window.electronAPI.cancelAIAssistantRequest(this.currentChatRequestId); } catch (_) {}
+            }
+            return;
+        }
+        this.chatRequestInFlight = true;
+        this.chatRequestSettledAt = 0;
+        const requestId = `chatreq_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        this.currentChatRequestId = requestId;
         this.setPresenceMode('thinking');
 
         let chat = this.getActiveChat();
@@ -1566,28 +1585,35 @@ class WeaveApp {
         this.triggerSearchAnimation(true);
 
         const handleChatStep = (data) => {
+            if (data?.requestId && data.requestId !== requestId) return;
             this.updateThinkingPanel(thinkingPanel, data);
             this.scrollChatToBottom();
         };
 
         if (window.electronAPI?.onChatStep) window.electronAPI.onChatStep(handleChatStep);
 
+        let response = null;
         try {
-            const response = await window.electronAPI.askAIAssistant(message, {
+            response = await window.electronAPI.askAIAssistant(message, {
+                requestId,
+                timeoutMs: 20000,
                 chat_session_id: this.activeChatId,
                 chat_history: contextWindow
             });
-            if (window.electronAPI?.offChatStep) window.electronAPI.offChatStep();
-            this.triggerSearchAnimation(false);
             this.finalizeThinkingPanel(thinkingPanel, response);
-            await this.typeAssistantResponse(response, { includeThinkingTrace: true });
-            thinkingPanel?.remove?.();
-            this.setPresenceMode('waiting');
+            if (response?.status === 'cancelled') {
+                await this.typeAssistantResponse('I stopped the previous request to keep chat responsive.', { includeThinkingTrace: true });
+            } else if (response?.status === 'timed_out') {
+                await this.typeAssistantResponse(response, { includeThinkingTrace: true });
+            } else {
+                await this.typeAssistantResponse(response, { includeThinkingTrace: true });
+            }
         } catch (error) {
             console.error('Chat failed:', error);
-            this.triggerSearchAnimation(false);
-            if (window.electronAPI?.offChatStep) window.electronAPI.offChatStep();
-            this.finalizeThinkingPanel(thinkingPanel, {
+            response = {
+                requestId,
+                status: 'failed',
+                degraded: true,
                 thinking_trace: {
                     thinking_summary: 'The retrieval step failed before a full answer was ready.',
                     filters: [],
@@ -1595,9 +1621,17 @@ class WeaveApp {
                     results_summary: { headline: 'No retrieval results were available.', details: [] },
                     data_sources: []
                 }
-            });
+            };
+            this.finalizeThinkingPanel(thinkingPanel, response);
             await this.typeAssistantResponse('I ran into a problem while preparing that answer.', { includeThinkingTrace: true });
+        } finally {
+            this.triggerSearchAnimation(false);
+            if (window.electronAPI?.offChatStep) window.electronAPI.offChatStep();
+            if (thinkingPanel?.__thinkingTimer) clearInterval(thinkingPanel.__thinkingTimer);
             thinkingPanel?.remove?.();
+            this.chatRequestInFlight = false;
+            this.currentChatRequestId = null;
+            this.chatRequestSettledAt = Date.now();
             this.setPresenceMode('waiting');
         }
     }
@@ -1655,24 +1689,10 @@ class WeaveApp {
         this.chatMessages.appendChild(message);
         const contentArea = message.querySelector('.claude-message-content');
 
-        let i = 0;
         const maxChars = 2600;
         const bounded = content.length > maxChars ? `${content.slice(0, maxChars)}
 
 Would you like me to continue with more detail?` : content;
-        const chunkSize = bounded.length > 900 ? 10 : 4;
-        const frameDelay = bounded.length > 900 ? 6 : 12;
-        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-        while (i < bounded.length) {
-            const slice = bounded.slice(0, i + chunkSize);
-            contentArea.innerHTML = this.escapeHtml(slice).replace(/\n/g, '<br>');
-            i += chunkSize;
-            this.scrollChatToBottom();
-            await sleep(frameDelay);
-        }
-
-        // Final pass: render concise rich text (no markdown headings).
         const uiBlocks = typeof rawPayload === 'object' && rawPayload !== null ? (rawPayload.ui_blocks || []) : [];
         contentArea.innerHTML = this.renderAssistantHTML(bounded, retrieval, includeThinkingTrace ? thinkingTrace : null);
 
@@ -2267,7 +2287,11 @@ Would you like me to continue with more detail?` : content;
             trace: [...(currentState.trace || []), payload].slice(-80)
         };
         panel.__thinkingState = nextState;
-        this.renderLiveThinkingPanel(panel);
+        const now = Date.now();
+        if ((now - this.lastThinkingRenderAt) >= 180 || String(payload?.status || '').toLowerCase() === 'completed') {
+            this.lastThinkingRenderAt = now;
+            this.renderLiveThinkingPanel(panel);
+        }
     }
 
     finalizeThinkingPanel(panel, payload) {
@@ -2294,6 +2318,7 @@ Would you like me to continue with more detail?` : content;
         panel.__thinkingState = state;
         panel.classList.add('ready', 'complete');
         panel.classList.remove('live');
+        this.lastThinkingRenderAt = Date.now();
         this.renderLiveThinkingPanel(panel);
         this.scrollChatToBottom();
     }

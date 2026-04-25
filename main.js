@@ -106,6 +106,83 @@ function withTimeout(promise, timeoutMs, label = 'operation') {
   });
 }
 
+const DEFAULT_CHAT_TIMEOUT_MS = 20000;
+const CHAT_STEP_EMIT_INTERVAL_MS = 250;
+const activeChatRequestsBySender = new Map();
+const activeChatRequestRegistry = new Map();
+const queuedChatPersistenceKeys = new Set();
+let chatPersistenceQueue = Promise.resolve();
+
+function makeChatRequestKey(senderId, requestId) {
+  return `${senderId}:${requestId}`;
+}
+
+function startActiveChatRequest(senderId, requestId) {
+  const key = makeChatRequestKey(senderId, requestId);
+  const previousKey = activeChatRequestsBySender.get(senderId);
+  if (previousKey && previousKey !== key) {
+    const previous = activeChatRequestRegistry.get(previousKey);
+    if (previous) previous.cancelled = true;
+  }
+  const record = {
+    senderId,
+    requestId,
+    key,
+    cancelled: false,
+    startedAt: Date.now(),
+    lastStepEmitAt: 0
+  };
+  activeChatRequestsBySender.set(senderId, key);
+  activeChatRequestRegistry.set(key, record);
+  return record;
+}
+
+function getActiveChatRequest(senderId, requestId) {
+  return activeChatRequestRegistry.get(makeChatRequestKey(senderId, requestId)) || null;
+}
+
+function cancelActiveChatRequest(senderId, requestId) {
+  const record = getActiveChatRequest(senderId, requestId);
+  if (!record) return false;
+  record.cancelled = true;
+  return true;
+}
+
+function finishActiveChatRequest(senderId, requestId) {
+  const key = makeChatRequestKey(senderId, requestId);
+  const activeKey = activeChatRequestsBySender.get(senderId);
+  if (activeKey === key) activeChatRequestsBySender.delete(senderId);
+  activeChatRequestRegistry.delete(key);
+}
+
+function compactChatStepPayload(data = {}, requestId) {
+  const payload = { ...data, requestId };
+  if (Array.isArray(payload.preview_items)) payload.preview_items = payload.preview_items.slice(0, 3);
+  if (payload.trace && Array.isArray(payload.trace)) delete payload.trace;
+  if (payload.stage_trace) delete payload.stage_trace;
+  if (payload.thinking_trace) delete payload.thinking_trace;
+  return payload;
+}
+
+function enqueueChatPersistence(key, task) {
+  if (!key || typeof task !== 'function' || queuedChatPersistenceKeys.has(key)) return;
+  queuedChatPersistenceKeys.add(key);
+  chatPersistenceQueue = chatPersistenceQueue
+    .then(async () => {
+      try {
+        await task();
+      } catch (error) {
+        console.warn('[chat-memory] queued persistence failed:', error?.message || error);
+      } finally {
+        queuedChatPersistenceKeys.delete(key);
+      }
+    })
+    .catch((error) => {
+      queuedChatPersistenceKeys.delete(key);
+      console.warn('[chat-memory] queue failure:', error?.message || error);
+    });
+}
+
 const KNOWN_BROWSER_APPS = new Set([
   'google chrome',
   'chrome',
@@ -631,6 +708,19 @@ const heavyJobState = {
   startedAt: 0,
   perJobLastSkipAt: {}
 };
+const pendingHeavyJobs = new Map();
+const HEAVY_JOB_QUEUE_ORDER = [
+  'gsuite_sync',
+  'radar_generation',
+  'episode_generation',
+  'relationship_graph',
+  'relationship_graph_backfill',
+  'semantic_window',
+  'semantic_pulse',
+  'daily_insight',
+  'weekly_insight',
+  'living_core'
+];
 
 function getPerformanceMode() {
   const idleTime = (powerMonitor && typeof powerMonitor.getSystemIdleTime === 'function') ? powerMonitor.getSystemIdleTime() : 0;
@@ -727,7 +817,50 @@ function endHeavyJob(jobName, meta = {}) {
       duration_ms: durationMs,
       error: meta?.error || null
     });
+    setTimeout(() => {
+      drainPendingHeavyJobs();
+    }, 150);
   }
+}
+
+function enqueueHeavyJob(jobName, runner, options = {}) {
+  const name = String(jobName || 'heavy_job');
+  if (pendingHeavyJobs.has(name)) return false;
+  pendingHeavyJobs.set(name, {
+    runner,
+    source: options?.source || 'background',
+    queuedAt: Date.now()
+  });
+  updateMemoryGraphHealth({
+    pendingHeavyJobs: Array.from(pendingHeavyJobs.keys()),
+    lastQueuedHeavyJob: name,
+    lastQueuedHeavyJobAt: new Date().toISOString()
+  });
+  emitMemoryGraphUpdate({
+    type: 'job_status',
+    job: name,
+    status: 'queued',
+    source: options?.source || 'background'
+  });
+  return true;
+}
+
+function drainPendingHeavyJobs() {
+  if (heavyJobState.activeJob || !pendingHeavyJobs.size) return false;
+  const queue = Array.from(pendingHeavyJobs.entries());
+  const ordered = HEAVY_JOB_QUEUE_ORDER.map((name) => queue.find(([key]) => key === name)).filter(Boolean);
+  const fallback = queue.filter(([key]) => !HEAVY_JOB_QUEUE_ORDER.includes(key));
+  const next = [...ordered, ...fallback][0];
+  if (!next) return false;
+  const [jobName, job] = next;
+  pendingHeavyJobs.delete(jobName);
+  updateMemoryGraphHealth({
+    pendingHeavyJobs: Array.from(pendingHeavyJobs.keys())
+  });
+  Promise.resolve()
+    .then(() => job.runner())
+    .catch((error) => console.warn(`[${jobName}] Queued run failed:`, error?.message || error));
+  return true;
 }
 
 function looksRelationshipSuggestion(item = {}) {
@@ -2095,6 +2228,14 @@ async function runPeriodicScreenshotTick() {
     periodicScreenshotNextDueAt = (periodicScreenshotNextDueAt || now) + (missedIntervals * intervalMs);
   }
 
+  if (heavyJobState.activeJob && isAppInteractionHot()) {
+    const retryMs = Math.max(10000, Math.min(30000, Math.floor(intervalMs / 2)));
+    periodicScreenshotNextDueAt = Date.now() + retryMs;
+    console.log(`[Screenshot] Deferring periodic capture because ${heavyJobState.activeJob} is running during active use`);
+    scheduleNextPeriodicScreenshot(retryMs);
+    return;
+  }
+
   console.log("[Screenshot] Taking periodic screenshot...");
   try {
     const result = await captureDesktopSensorSnapshot('periodic-screenshot');
@@ -2261,6 +2402,7 @@ async function runMinutelySync() {
     return;
   }
   if (!beginHeavyJob('gsuite_sync')) {
+    enqueueHeavyJob('gsuite_sync', () => runMinutelySync(), { source: 'scheduler' });
     return;
   }
   global.__gsuite_sync_lock = true;
@@ -2453,11 +2595,14 @@ function startMinutelySyncLoop() {
 }
 
 function startSourceWarmup() {
-  refreshBrowserHistory({
-    reason: 'startup_warmup',
-    maxAgeMs: BACKGROUND_BROWSER_HISTORY_MAX_AGE_MS
-  }).catch((e) => console.warn('[Warmup] Browser history warmup failed:', e?.message || e));
-  runMinutelySync().catch((e) => console.warn('[Warmup] Minutely sync failed:', e?.message || e));
+  if (!heavyJobState.activeJob) {
+    refreshBrowserHistory({
+      reason: 'startup_warmup',
+      maxAgeMs: BACKGROUND_BROWSER_HISTORY_MAX_AGE_MS
+    }).catch((e) => console.warn('[Warmup] Browser history warmup failed:', e?.message || e));
+  }
+  enqueueHeavyJob('gsuite_sync', () => runMinutelySync(), { source: 'startup_warmup' });
+  drainPendingHeavyJobs();
 }
 
 // ── Memory Graph Processing Functions ───────────────────────────────
@@ -2486,6 +2631,7 @@ async function runRelationshipGraphUpdate(options = {}) {
   }
   const jobName = options?.backfill ? 'relationship_graph_backfill' : 'relationship_graph';
   if (!beginHeavyJob(jobName, { source: options?.force ? 'manual' : 'background' })) {
+    if (!options?.force) enqueueHeavyJob(jobName, () => runRelationshipGraphUpdate(options), { source: 'scheduler' });
     return { contacts: 0, deferred: true, blocked_by: heavyJobState.activeJob };
   }
   try {
@@ -2528,6 +2674,7 @@ async function runEpisodeGeneration() {
     return;
   }
   if (!beginHeavyJob('episode_generation')) {
+    enqueueHeavyJob('episode_generation', () => runEpisodeGeneration(), { source: 'scheduler' });
     return;
   }
   lastEpisodeHeavyRunAt = Date.now();
@@ -2582,7 +2729,10 @@ async function runSemanticWindowGeneration() {
       console.log('[SemanticWindow] Skipping to reduce system load');
       return;
     }
-    if (!beginHeavyJob('semantic_window')) return;
+    if (!beginHeavyJob('semantic_window')) {
+      enqueueHeavyJob('semantic_window', () => runSemanticWindowGeneration(), { source: 'scheduler' });
+      return;
+    }
     const startedAt = Date.now();
     console.log('[SemanticWindow] Running 15-minute semantic summary...');
     const result = await runSemanticSummaryWindow(15 * 60 * 1000, process.env.DEEPSEEK_API_KEY || null);
@@ -2637,6 +2787,7 @@ async function runSuggestionEngineJob(options = {}) {
   }
   if (!beginHeavyJob('radar_generation', { source: force ? 'manual' : 'background' })) {
     suggestionRunQueued = true;
+    if (!force) enqueueHeavyJob('radar_generation', () => runSuggestionEngineJob(options), { source: 'scheduler' });
     return { deferred: true, blocked_by: heavyJobState.activeJob };
   }
   lastSuggestionHeavyRunAt = Date.now();
@@ -2721,7 +2872,10 @@ async function runSuggestionEngineJob(options = {}) {
 
 async function runWeeklyInsightJobScheduled() {
   try {
-    if (!beginHeavyJob('weekly_insight')) return;
+    if (!beginHeavyJob('weekly_insight')) {
+      enqueueHeavyJob('weekly_insight', () => runWeeklyInsightJobScheduled(), { source: 'scheduler' });
+      return;
+    }
     const apiKey = process.env.DEEPSEEK_API_KEY;
     if (!apiKey) {
       console.warn('[WeeklyInsight] No DeepSeek API key, skipping weekly insights');
@@ -2756,7 +2910,10 @@ async function runWeeklyInsightJobScheduled() {
 async function runDailyInsightsScheduled() {
   try {
     if (shouldDeferBackgroundWork('DailyInsight')) return;
-    if (!beginHeavyJob('daily_insight')) return;
+    if (!beginHeavyJob('daily_insight')) {
+      enqueueHeavyJob('daily_insight', () => runDailyInsightsScheduled(), { source: 'scheduler' });
+      return;
+    }
     const apiKey = process.env.DEEPSEEK_API_KEY;
     if (!apiKey) {
       console.warn('[DailyInsight] No DeepSeek API key, skipping daily insights');
@@ -2785,7 +2942,10 @@ async function runDailyInsightsScheduled() {
 async function runHourlySemanticPulseJob() {
   try {
     if (shouldDeferBackgroundWork('SemanticPulse')) return;
-    if (!beginHeavyJob('semantic_pulse')) return;
+    if (!beginHeavyJob('semantic_pulse')) {
+      enqueueHeavyJob('semantic_pulse', () => runHourlySemanticPulseJob(), { source: 'scheduler' });
+      return;
+    }
     const apiKey = process.env.DEEPSEEK_API_KEY;
     if (!apiKey) {
       console.warn('[SemanticPulse] No DeepSeek API key, skipping hourly pulse');
@@ -2811,7 +2971,10 @@ async function runHourlySemanticPulseJob() {
 
 async function runLivingCoreJobScheduled() {
   try {
-    if (!beginHeavyJob('living_core')) return;
+    if (!beginHeavyJob('living_core')) {
+      enqueueHeavyJob('living_core', () => runLivingCoreJobScheduled(), { source: 'scheduler' });
+      return;
+    }
     const apiKey = process.env.DEEPSEEK_API_KEY;
     if (!apiKey) {
       console.warn("[LivingCore] No DeepSeek API key, skipping Living Core synthesis");
@@ -7950,6 +8113,10 @@ ipcMain.handle("get-full-memory-graph", async () => {
 
 // AI Assistant Chat Logic
 ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
+  const senderId = event?.sender?.id || 0;
+  const requestId = String(options?.requestId || `chatreq_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+  const timeoutMs = Math.max(4000, Number(options?.timeoutMs || DEFAULT_CHAT_TIMEOUT_MS));
+  const requestState = startActiveChatRequest(senderId, requestId);
   try {
     console.log('[ChatMemory] Using SQLite memory DB:', typeof db.getDbPath === 'function' ? db.getDbPath() : 'unknown');
     const proactiveMemory = store.get('proactiveMemory') || { core: '' };
@@ -7968,6 +8135,77 @@ ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
     const resolvedChatSessionId = String(options?.chat_session_id || `chat_${Date.now()}`);
     const localToolResponse = maybeHandleLocalChatToolQuery(query);
     if (localToolResponse) {
+      const toolResponse = {
+        ...localToolResponse,
+        requestId,
+        status: 'complete',
+        degraded: false
+      };
+      enqueueChatPersistence(`${resolvedChatSessionId}:${requestId}:tool`, async () => {
+        await persistChatTurnAsRawEvent({
+          chatSessionId: resolvedChatSessionId,
+          role: 'user',
+          content: query,
+          chatHistory: normalizedChatHistory
+        });
+        await appendChatMessageToDb({
+          sessionId: resolvedChatSessionId,
+          role: 'user',
+          content: query,
+          ts: Date.now()
+        }).catch((err) => console.warn('[chat-memory] Failed to append user tool turn:', err?.message || err));
+        await persistChatTurnAsRawEvent({
+          chatSessionId: resolvedChatSessionId,
+          role: 'assistant',
+          content: toolResponse.content || '',
+          chatHistory: normalizedChatHistory.concat([{ role: 'user', content: String(query || ''), ts: Date.now() }]),
+          retrieval: toolResponse.retrieval || null
+        });
+        await appendChatMessageToDb({
+          sessionId: resolvedChatSessionId,
+          role: 'assistant',
+          content: toolResponse.content || '',
+          ts: Date.now(),
+          retrieval: toolResponse.retrieval || null,
+          thinkingTrace: toolResponse.thinking_trace || null
+        }).catch((err) => console.warn('[chat-memory] Failed to append assistant tool turn:', err?.message || err));
+      });
+      try { event.sender.send('chat-step', { requestId, status: 'completed', step: 'terminal', label: 'Complete' }); } catch (_) {}
+      return toolResponse;
+    }
+
+    const response = await withTimeout(answerChatQuery({
+      apiKey: process.env.DEEPSEEK_API_KEY,
+      query,
+      options: {
+        ...options,
+        requestId,
+        timeoutMs,
+        chat_history: normalizedChatHistory,
+        standing_notes: proactiveMemory.core || '',
+        historical_summaries: historicalSummaries,
+        search_index: searchIndex,
+        cancellation: {
+          isCancelled: () => Boolean(requestState.cancelled)
+        }
+      },
+      onStep: (data) => {
+        if (requestState.cancelled) return;
+        const now = Date.now();
+        const normalizedStatus = String(data?.status || '').toLowerCase();
+        const terminal = normalizedStatus === 'completed' || normalizedStatus === 'failed' || normalizedStatus === 'cancelled' || normalizedStatus === 'timed_out';
+        if (!terminal && (now - requestState.lastStepEmitAt) < CHAT_STEP_EMIT_INTERVAL_MS) return;
+        requestState.lastStepEmitAt = now;
+        try { event.sender.send('chat-step', compactChatStepPayload(data, requestId)); } catch (_) {}
+      }
+    }), timeoutMs + 1000, 'ask-ai-assistant');
+    const finalResponse = {
+      ...response,
+      requestId,
+      status: response?.status || 'complete',
+      degraded: Boolean(response?.degraded)
+    };
+    enqueueChatPersistence(`${resolvedChatSessionId}:${requestId}:answer`, async () => {
       await persistChatTurnAsRawEvent({
         chatSessionId: resolvedChatSessionId,
         role: 'user',
@@ -7979,72 +8217,41 @@ ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
         role: 'user',
         content: query,
         ts: Date.now()
-      }).catch((err) => console.warn('[chat-memory] Failed to append user tool turn:', err?.message || err));
+      }).catch((err) => console.warn('[chat-memory] Failed to append user turn:', err?.message || err));
       await persistChatTurnAsRawEvent({
         chatSessionId: resolvedChatSessionId,
         role: 'assistant',
-        content: localToolResponse.content || '',
+        content: finalResponse?.content || '',
         chatHistory: normalizedChatHistory.concat([{ role: 'user', content: String(query || ''), ts: Date.now() }]),
-        retrieval: localToolResponse.retrieval || null
+        retrieval: finalResponse?.retrieval || null
       });
       await appendChatMessageToDb({
         sessionId: resolvedChatSessionId,
         role: 'assistant',
-        content: localToolResponse.content || '',
+        content: finalResponse?.content || '',
         ts: Date.now(),
-        retrieval: localToolResponse.retrieval || null,
-        thinkingTrace: localToolResponse.thinking_trace || null
-      }).catch((err) => console.warn('[chat-memory] Failed to append assistant tool turn:', err?.message || err));
-      return localToolResponse;
-    }
-
-    const response = await answerChatQuery({
-      apiKey: process.env.DEEPSEEK_API_KEY,
-      query,
-      options: {
-        ...options,
-        chat_history: normalizedChatHistory,
-        standing_notes: proactiveMemory.core || '',
-        historical_summaries: historicalSummaries,
-        search_index: searchIndex
-      },
-      onStep: (data) => {
-        try { event.sender.send('chat-step', data); } catch (_) {}
-      }
+        retrieval: finalResponse?.retrieval || null,
+        thinkingTrace: finalResponse?.thinking_trace || null
+      }).catch((err) => console.warn('[chat-memory] Failed to append assistant turn:', err?.message || err));
     });
-    await persistChatTurnAsRawEvent({
-      chatSessionId: resolvedChatSessionId,
-      role: 'user',
-      content: query,
-      chatHistory: normalizedChatHistory
-    });
-    await appendChatMessageToDb({
-      sessionId: resolvedChatSessionId,
-      role: 'user',
-      content: query,
-      ts: Date.now()
-    }).catch((err) => console.warn('[chat-memory] Failed to append user turn:', err?.message || err));
-    await persistChatTurnAsRawEvent({
-      chatSessionId: resolvedChatSessionId,
-      role: 'assistant',
-      content: response?.content || '',
-      chatHistory: normalizedChatHistory.concat([{ role: 'user', content: String(query || ''), ts: Date.now() }]),
-      retrieval: response?.retrieval || null
-    });
-    await appendChatMessageToDb({
-      sessionId: resolvedChatSessionId,
-      role: 'assistant',
-      content: response?.content || '',
-      ts: Date.now(),
-      retrieval: response?.retrieval || null,
-      thinkingTrace: response?.thinking_trace || null
-    }).catch((err) => console.warn('[chat-memory] Failed to append assistant turn:', err?.message || err));
-    return response;
+    try { event.sender.send('chat-step', { requestId, status: finalResponse.status === 'timed_out' ? 'timed_out' : 'completed', step: 'terminal', label: finalResponse.status }); } catch (_) {}
+    return finalResponse;
   } catch (e) {
-    console.error('Chat error:', e);
     const errorMessage = String(e?.message || e || 'Unknown chat error');
+    const timedOut = /timed out/i.test(errorMessage);
+    if (timedOut) {
+      console.warn('[Chat] Request timed out; returning bounded fallback.');
+    } else {
+      console.error('Chat error:', e);
+    }
+    try { event.sender.send('chat-step', { requestId, status: timedOut ? 'timed_out' : 'failed', step: 'terminal', label: timedOut ? 'timed_out' : 'failed', detail: errorMessage.slice(0, 200) }); } catch (_) {}
     return {
-      content: "I encountered an error while thinking. Please try again.",
+      requestId,
+      status: timedOut ? 'timed_out' : 'failed',
+      degraded: true,
+      content: timedOut
+        ? "I returned early to keep chat responsive. Try narrowing the timeframe or asking me to go deeper on one part."
+        : "I encountered an error while thinking. Please try again.",
       thinking_trace: {
         thinking_summary: `The assistant recovered from an internal error: ${errorMessage}`,
         filters: [],
@@ -8089,7 +8296,13 @@ ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
         }
       }
     };
+  } finally {
+    finishActiveChatRequest(senderId, requestId);
   }
+});
+
+ipcMain.handle('cancel-ai-assistant-request', async (event, requestId) => {
+  return { cancelled: cancelActiveChatRequest(event?.sender?.id || 0, String(requestId || '')) };
 });
 
 // Generate proactive todos — strictly AI generated from memory retrieval.

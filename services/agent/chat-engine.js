@@ -900,6 +900,7 @@ function suggestionToEvidence(item = {}, index = 0) {
 }
 
 async function buildActionableTodoEvidence({ query = '', apiKey = null, options = {} } = {}) {
+  if (options?.skip_radar_backfill || options?.internal_radar) return [];
   if (!isTaskCreationQuery(query)) return [];
   let suggestions = [];
   if (apiKey) {
@@ -1358,9 +1359,76 @@ async function executeParallelRetrieval(baseQuery, baseThought, options, onProgr
   };
 }
 
+function isExplicitDeepDiveQuery(query = '') {
+  return /\b(go deeper|deep dive|analyze|analysis|over time|pattern|patterns|long[-\s]?term|history|across|trend|themes?|why|how does this connect|brief me fully|full brief)\b/i.test(String(query || ''));
+}
+
+function buildDeadlineController(options = {}) {
+  const startedAt = Date.now();
+  const timeoutMs = Math.max(4000, Number(options?.timeoutMs || 20000));
+  const deadlineAt = startedAt + timeoutMs;
+  const cancellation = options?.cancellation || {};
+  return {
+    startedAt,
+    timeoutMs,
+    deadlineAt,
+    get timeLeftMs() {
+      return Math.max(0, deadlineAt - Date.now());
+    },
+    isCancelled() {
+      return Boolean(typeof cancellation?.isCancelled === 'function' && cancellation.isCancelled());
+    },
+    isExpired() {
+      return this.timeLeftMs <= 0;
+    },
+    shouldStop() {
+      return this.isCancelled() || this.isExpired();
+    },
+    status() {
+      if (this.isCancelled()) return 'cancelled';
+      if (this.isExpired()) return 'timed_out';
+      return 'complete';
+    }
+  };
+}
+
+function buildPartialChatResponse({ query, retrieval = {}, drilldownEvidence = [], thinkingTrace = null, status = 'partial', degraded = true, message = '' }) {
+  const content = sanitizeAssistantOutput(normalizeAssistantContent(
+    message || buildGroundedFallbackAnswer(query, retrieval, drilldownEvidence)
+  ));
+  return {
+    status,
+    degraded,
+    content,
+    ui_blocks: [],
+    thinking_trace: thinkingTrace || {
+      thinking_summary: status === 'timed_out'
+        ? 'Returned a bounded answer before the chat deadline expired.'
+        : status === 'cancelled'
+          ? 'Stopped the previous request so the chat could stay responsive.'
+          : 'Returned a partial answer from the evidence gathered so far.',
+      data_sources: Array.isArray(retrieval?.usedSources) ? retrieval.usedSources : [],
+      stage_trace: Array.isArray(retrieval?.stage_trace) ? retrieval.stage_trace : []
+    },
+    retrieval: {
+      ...(retrieval || {}),
+      mode: retrieval?.mode || 'memory-graph',
+      thinking_trace: thinkingTrace || retrieval?.thinking_trace || null
+    }
+  };
+}
+
+function llmStageTimeout(deadline, preferredMs, floorMs = 800) {
+  const remaining = Math.max(0, Number(deadline?.timeLeftMs || 0));
+  if (!remaining) return floorMs;
+  return Math.max(floorMs, Math.min(preferredMs, Math.max(floorMs, remaining - 500)));
+}
+
 async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   const stageTrace = [];
   const compatStageBuffer = [];
+  const deadline = buildDeadlineController(options);
+  const deepDive = Boolean(options?.internal_radar) || isExplicitDeepDiveQuery(query);
   const emit = (data) => {
     try {
       if (data && (data.step === 'primary_search_results' || data.step === 'iterative_expansion')) {
@@ -1412,17 +1480,34 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     };
   };
 
+  const stopIfNeeded = (retrieval = null, drilldownEvidence = [], thinkingTrace = null) => {
+    if (!deadline.shouldStop()) return null;
+    return buildPartialChatResponse({
+      query,
+      retrieval: retrieval || {},
+      drilldownEvidence,
+      thinkingTrace,
+      status: deadline.status(),
+      degraded: true
+    });
+  };
+
   // Persist user chat turn as a raw event
-  await ingestRawEvent({
-    type: 'ChatMessage',
-    source: 'Chat',
-    text: query,
-    metadata: {
-      role: 'user',
-      chat_session_id: options?.chat_session_id,
-      timestamp: new Date().toISOString()
-    }
-  }).catch(e => console.warn('Failed to persist user chat turn:', e));
+  if (!options?.internal_radar) {
+    await ingestRawEvent({
+      type: 'ChatMessage',
+      source: 'Chat',
+      text: query,
+      metadata: {
+        role: 'user',
+        chat_session_id: options?.chat_session_id,
+        timestamp: new Date().toISOString()
+      }
+    }).catch(e => console.warn('Failed to persist user chat turn:', e));
+  }
+
+  const preflightStop = stopIfNeeded();
+  if (preflightStop) return preflightStop;
 
   // 1. Router Stage
   emitStage('routing', 'started', { label: 'Hypothesis', detail: 'Deciding whether this query should use memory, web, or hybrid retrieval.' }, false);
@@ -1448,6 +1533,10 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     ].filter(Boolean)
   });
   emitThinkingStage('query_analysis', 15, 'Analyzing your question');
+  {
+    const stopped = stopIfNeeded();
+    if (stopped) return stopped;
+  }
 
   emitStage('query_generation', 'completed', {
     label: 'Search planning',
@@ -1469,7 +1558,16 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
 
   // 2. Planner Stage
   emitStage('planning', 'started', { label: 'Planner', detail: 'Generating a concise execution plan and refining key query terms.' }, false);
-  let plan = await runPlannerStage({ query: activeQuery, routerOutput: baseThought, apiKey });
+  let plan = await runPlannerStage({
+    query: activeQuery,
+    routerOutput: baseThought,
+    apiKey,
+    timeoutMs: llmStageTimeout(deadline, 1800)
+  });
+  {
+    const stopped = stopIfNeeded();
+    if (stopped) return stopped;
+  }
   emitStage('planning', 'completed', {
     label: 'Planner',
     detail: plan ? 'Created a formal execution plan with refined queries.' : 'Using default routing plan.',
@@ -1514,7 +1612,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   let drilldownEvidence = [];
   let judgment = { sufficient: false };
   let iteration = 0;
-  const maxIterations = 2;
+  const maxIterations = deepDive ? 2 : 1;
 
   while (!judgment.sufficient && iteration < maxIterations) {
     iteration++;
@@ -1536,7 +1634,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       passiveOnly: false
     }, emit);
 
-    if (iteration === 1 && retrievalLooksSparse(retrieval)) {
+    if (iteration === 1 && deepDive && retrievalLooksSparse(retrieval)) {
       retrieval = await executeParallelRetrieval(activeQuery, currentThought, {
         mode: 'chat',
         app: options?.app,
@@ -1549,7 +1647,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     }
 
     // Widen if still sparse
-    const canWiden = Boolean(currentThought?.initial_date_range || currentThought?.filters?.app) && !currentThought?.fallback_policy?.attempted;
+    const canWiden = deepDive && Boolean(currentThought?.initial_date_range || currentThought?.filters?.app) && !currentThought?.fallback_policy?.attempted;
     if (canWiden && retrievalLooksSparse(retrieval)) {
       const widenedRange = currentThought.initial_date_range ? widenTemporalWindow(currentThought.initial_date_range) : null;
       let widenedApps = null;
@@ -1582,7 +1680,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       }
     }
 
-    if (wantsActiveRawRetrieval(activeQuery, currentThought)) {
+    if (deepDive && wantsActiveRawRetrieval(activeQuery, currentThought)) {
       const directRawEvents = await lookupDirectRawEvents(activeQuery, currentThought, 8);
       if (directRawEvents.length) {
         const existingIds = new Set((retrieval.evidence || []).map((item) => item?.event_id || item?.id).filter(Boolean));
@@ -1634,8 +1732,9 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       }
     }
 
-    const relationshipEvidence = await lookupRelationshipEvidence(activeQuery, 8);
-    if (relationshipEvidence.length) {
+    if (/\b(relationship|reconnect|contact|person|people|intro|introduction|follow up|outreach|network)\b/i.test(activeQuery)) {
+      const relationshipEvidence = await lookupRelationshipEvidence(activeQuery, 8);
+      if (relationshipEvidence.length) {
       const existingIds = new Set((retrieval.evidence || []).map((item) => item?.id || item?.relationship_contact_id).filter(Boolean));
       const freshRelationshipEvidence = relationshipEvidence.filter((item) => !existingIds.has(item.id));
       if (freshRelationshipEvidence.length) {
@@ -1654,6 +1753,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
           preview_items: freshRelationshipEvidence.slice(0, 3).map((item) => item.title || item.id)
         });
       }
+    }
     }
 
     emitStage('memory_search', 'completed', { label: 'Phase 1: Initial memory search', detail: 'Completed memory retrieval pass.' });
@@ -1719,7 +1819,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       label: 'Web search',
       detail: `${webAssessment.reason} Searching the web using: ${webSearchQuery}`
     });
-    if (shouldSearchWeb) {
+    if (shouldSearchWeb && !deadline.shouldStop()) {
       webResults = await searchFreeWeb(webSearchQuery, 4);
       emitStage('web_search', 'completed', {
         label: 'Web search',
@@ -1735,9 +1835,13 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       });
     }
 
-    drilldownEvidence = (retrieval.drilldown_refs || []).length
+    drilldownEvidence = deepDive && (retrieval.drilldown_refs || []).length
       ? await fetchDrilldownEvidence(retrieval.drilldown_refs || [])
       : [];
+    {
+      const stopped = stopIfNeeded(retrieval, drilldownEvidence);
+      if (stopped) return stopped;
+    }
 
     // 4. Judge Stage
     emitStage('judging', 'started', { label: 'Evidence test', detail: 'Checking whether the current memory and web evidence supports the answer.' }, false);
@@ -1746,7 +1850,8 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       plan,
       retrieval,
       evidence: [...(retrieval.evidence || []), ...webResults],
-      apiKey
+      apiKey,
+      timeoutMs: llmStageTimeout(deadline, 1400)
     });
     emitStage('judging', 'completed', {
       label: 'Evidence test',
@@ -1754,7 +1859,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       status: judgment.sufficient ? 'completed' : 'retry'
     }, false);
 
-    if (judgment.sufficient || !apiKey) break;
+    if (judgment.sufficient || !apiKey || deadline.shouldStop()) break;
   }
 
   // Final metadata updates for retrieval object
@@ -1769,12 +1874,16 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
 
   const thinkingTrace = await buildThinkingTrace({ query, retrieval, drilldownEvidence });
   const standingNotes = String(options?.standing_notes || options?.core_memory || '').trim();
+  {
+    const stopped = stopIfNeeded(retrieval, drilldownEvidence, thinkingTrace);
+    if (stopped) return stopped;
+  }
 
   // 5. Synthesizer Stage (with Reflector loop)
   let content = '';
   let reflection = { approved: false };
   let synthIteration = 0;
-  const maxSynthIterations = 2;
+  const maxSynthIterations = deepDive ? 2 : 1;
 
   if (!apiKey) {
     emitThinkingStage('synthesis', 95, 'Generating response');
@@ -1794,20 +1903,32 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
         drilldownEvidence,
         webResults,
         apiKey,
-        reflectorFeedback: synthIteration > 1 ? reflection : null
+        reflectorFeedback: synthIteration > 1 ? reflection : null,
+        timeoutMs: llmStageTimeout(deadline, Math.min(6000, Math.max(1800, deadline.timeLeftMs - 700)), 1200)
       }));
 
       // 6. Reflector Stage (with confidence gating)
       emitStage('reflecting', 'started', { label: 'Critique', detail: 'Reviewing the draft for completeness, accuracy, and hallucination risk.' }, false);
-      reflection = await runReflectorStage({ query, evidence: [...(retrieval.evidence || []), ...webResults], answer: content, apiKey, confidenceScore: judgment?.confidence_score });
-      retrieval.reflection = reflection;
-      emitStage('reflecting', 'completed', {
-        label: 'Reflecting',
-        detail: reflection.reason,
-        status: reflection.approved ? 'completed' : 'retry'
-      }, false);
-
-      if (reflection.approved) break;
+      if (deepDive && !deadline.shouldStop() && deadline.timeLeftMs > 1500) {
+        reflection = await runReflectorStage({
+          query,
+          evidence: [...(retrieval.evidence || []), ...webResults],
+          answer: content,
+          apiKey,
+          confidenceScore: judgment?.confidence_score,
+          timeoutMs: llmStageTimeout(deadline, 1200)
+        });
+        retrieval.reflection = reflection;
+        emitStage('reflecting', 'completed', {
+          label: 'Reflecting',
+          detail: reflection.reason,
+          status: reflection.approved ? 'completed' : 'retry'
+        }, false);
+        if (reflection.approved) break;
+      } else {
+        reflection = { approved: true, reason: 'Skipped reflection to keep the chat responsive.' };
+        break;
+      }
     }
   }
 
@@ -1824,27 +1945,14 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   thinkingTrace.reflector = reflection;
   content = sanitizeAssistantOutput(normalizeAssistantContent(content));
 
-  // Persist assistant chat turn as a raw event
-  await ingestRawEvent({
-    type: 'ChatMessage',
-    source: 'Chat',
-    text: content,
-    metadata: {
-      role: 'assistant',
-      chat_session_id: options?.chat_session_id,
-      timestamp: new Date().toISOString()
-    }
-  }).catch(e => console.warn('Failed to persist assistant chat turn:', e));
-  emitStage('memory_writeback', 'completed', {
-    label: 'Write-back',
-    detail: 'Stored this chat turn back into memory as raw chat events.'
-  });
   emitThinkingStage('complete', 100, 'Done');
 
   const uiBlocks = [];
   content = sanitizeAssistantOutput(content);
 
   return {
+    status: deadline.status() === 'complete' ? 'complete' : deadline.status(),
+    degraded: false,
     content,
     ui_blocks: uiBlocks,
     thinking_trace: thinkingTrace,
@@ -1956,7 +2064,7 @@ async function runRouterStage({ query, options }) {
   };
 }
 
-async function runPlannerStage({ query, routerOutput, apiKey }) {
+async function runPlannerStage({ query, routerOutput, apiKey, timeoutMs = null }) {
   if (!apiKey) return null;
 
   if (isSimpleQuery(query)) {
@@ -1977,7 +2085,7 @@ ${JSON.stringify(routerOutput)}
 Return JSON: {"reasoning_plan": ["step1",...], "refined_queries": ["q1",...], "evidence_criteria": "string"}`;
 
   try {
-    const plan = await callLLM(prompt, apiKey, 0.22, { maxTokens: 600, task: 'routing' });
+    const plan = await callLLM(prompt, apiKey, 0.22, { maxTokens: 600, task: 'routing', timeoutMs });
     return plan;
   } catch (e) {
     console.error('[Planner] Stage failed:', e.message);
@@ -1985,7 +2093,7 @@ Return JSON: {"reasoning_plan": ["step1",...], "refined_queries": ["q1",...], "e
   }
 }
 
-async function runJudgeStage({ query, plan, retrieval = null, evidence, apiKey }) {
+async function runJudgeStage({ query, plan, retrieval = null, evidence, apiKey, timeoutMs = null }) {
   if (!evidence?.length) return { sufficient: false, reason: 'No evidence for judging.' };
 
   const heuristicResult = heuristicJudge(evidence, query, retrieval);
@@ -2005,14 +2113,14 @@ ${evidenceSnippet}
 Return JSON: {"sufficient": bool, "confidence_score": 0.5-1.0, "reason": "string"}`;
 
   try {
-    const judgment = await callLLM(prompt, apiKey, 0.1, { maxTokens: 400, task: 'routing' });
+    const judgment = await callLLM(prompt, apiKey, 0.1, { maxTokens: 400, task: 'routing', timeoutMs });
     return judgment || heuristicResult;
   } catch (e) {
     return heuristicResult;
   }
 }
 
-async function runReflectorStage({ query, evidence, answer, apiKey, confidenceScore = 0.5 }) {
+async function runReflectorStage({ query, evidence, answer, apiKey, confidenceScore = 0.5, timeoutMs = null }) {
   if (!apiKey) return { approved: true, reason: 'No API key for reflection.' };
 
   if (Number(confidenceScore || 0.5) > 0.85) {
@@ -2052,7 +2160,7 @@ ${answer.slice(0, 1000)}
 Return JSON: {"approved": bool, "critique": "string", "reason": "string"}`;
 
   try {
-    const reflection = await callLLM(prompt, apiKey, 0.1, { maxTokens: 500, task: 'routing' });
+    const reflection = await callLLM(prompt, apiKey, 0.1, { maxTokens: 500, task: 'routing', timeoutMs });
     return reflection || { approved: true, reason: 'LLM reflection parse failed, assuming approved.' };
   } catch (e) {
     return { approved: true, reason: 'Reflector fallback.' };
@@ -2113,7 +2221,7 @@ function buildSynthesisPolicy({ query = '', evidence = [], retrieval = null }) {
   };
 }
 
-async function runSynthesizerStage({ query, retrieval, chatHistory, standingNotes, drilldownEvidence, webResults, apiKey, reflectorFeedback = null }) {
+async function runSynthesizerStage({ query, retrieval, chatHistory, standingNotes, drilldownEvidence, webResults, apiKey, reflectorFeedback = null, timeoutMs = null }) {
   const policy = buildSynthesisPolicy({ query, evidence: retrieval?.evidence || [], retrieval });
   const budget = policy.contextBudget;
   let usedTokens = 0;
@@ -2226,7 +2334,7 @@ ${reflectorFeedback ? `[Reflector Feedback]\nRejected for: ${reflectorFeedback.c
 ${query}`;
 
   try {
-    let content = await callLLM(prompt, apiKey, policy.temperature, { task: 'synthesis', maxTokens: policy.maxTokens });
+    let content = await callLLM(prompt, apiKey, policy.temperature, { task: 'synthesis', maxTokens: policy.maxTokens, timeoutMs });
 
     // Handle tool calls
     const toolCallMatches = Array.from(content.matchAll(/<tool_call>(.*?)<\/tool_call>/gs));
@@ -2251,7 +2359,7 @@ ${query}`;
 ${JSON.stringify(toolResults, null, 2)}
 
 The tools above were executed based on your previous output. Now provide the final response to the user, incorporating these results if they are relevant. Do not output more tool calls.`;
-        content = await callLLM(feedbackPrompt, apiKey, policy.temperature, { task: 'synthesis', maxTokens: policy.maxTokens });
+        content = await callLLM(feedbackPrompt, apiKey, policy.temperature, { task: 'synthesis', maxTokens: policy.maxTokens, timeoutMs: Math.max(800, Math.min(Number(timeoutMs || 1500), 1500)) });
       }
     }
 

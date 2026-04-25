@@ -198,16 +198,20 @@ async function callDeepSeek(prompt, apiKey, temperature = 0.3, options = {}) {
       return JSON.parse(cachedRow.value);
     }
 
+    const timeoutMs = Math.max(1000, Number(options?.timeoutMs || process.env.LLM_HTTP_TIMEOUT_MS || 15000));
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error(`LLM request timed out after ${timeoutMs}ms`)), timeoutMs);
     const response = await fetch(DEEPSEEK_ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      signal: controller.signal,
       body: JSON.stringify({
         model: 'deepseek-chat',
         messages: [{ role: 'user', content: promptText }],
         temperature,
         max_tokens: getLLMMaxTokens(options, 1200)
       })
-    });
+    }).finally(() => clearTimeout(timeout));
     const responseText = await response.text();
     let data = null;
     try {
@@ -234,7 +238,7 @@ async function callDeepSeek(prompt, apiKey, temperature = 0.3, options = {}) {
     
     return finalValue;
   } catch (e) {
-    const msg = String(e?.message || e);
+    const msg = String(e?.name === 'AbortError' ? (e?.cause?.message || e?.message || 'LLM request timed out') : (e?.message || e));
     const now = Date.now();
     if ((now - lastAiParseLogAt) > (2 * 60 * 1000)) {
       console.error('[AI] Call failed:', msg);
@@ -279,9 +283,13 @@ async function callOllama(prompt, config = {}, temperature = 0.3, options = {}) 
     const headers = { 'Content-Type': 'application/json' };
     if (config.apiKey) headers.Authorization = `Bearer ${config.apiKey}`;
 
+    const timeoutMs = Math.max(1000, Number(options?.timeoutMs || process.env.LLM_HTTP_TIMEOUT_MS || 15000));
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error(`LLM request timed out after ${timeoutMs}ms`)), timeoutMs);
     const response = await fetch(endpoint, {
       method: 'POST',
       headers,
+      signal: controller.signal,
       body: JSON.stringify({
         model,
         stream: false,
@@ -294,7 +302,7 @@ async function callOllama(prompt, config = {}, temperature = 0.3, options = {}) 
           { role: 'user', content: prompt }
         ]
       })
-    });
+    }).finally(() => clearTimeout(timeout));
     const responseText = await response.text();
     let data = null;
     try {
@@ -322,7 +330,7 @@ async function callOllama(prompt, config = {}, temperature = 0.3, options = {}) 
     }
     return finalValue;
   } catch (e) {
-    const msg = String(e?.message || e);
+    const msg = String(e?.name === 'AbortError' ? (e?.cause?.message || e?.message || 'LLM request timed out') : (e?.message || e));
     const now = Date.now();
     if ((now - lastAiParseLogAt) > (2 * 60 * 1000)) {
       console.error('[AI] Ollama call failed:', msg);

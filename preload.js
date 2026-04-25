@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getDailySummary: () => ipcRenderer.invoke('get-daily-summary'),
   getDailySummaries: (query) => ipcRenderer.invoke('get-daily-summaries', query),
   askAIAssistant: (query, options = {}) => ipcRenderer.invoke('ask-ai-assistant', query, options),
+  cancelAIAssistantRequest: (requestId) => ipcRenderer.invoke('cancel-ai-assistant-request', requestId),
   onChatStep: (cb) => ipcRenderer.on('chat-step', (_, data) => cb(data)),
   offChatStep: () => ipcRenderer.removeAllListeners('chat-step'),
   runPuppeteerTest: () => ipcRenderer.invoke('run-puppeteer-test'),

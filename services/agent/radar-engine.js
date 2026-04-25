@@ -34,6 +34,19 @@ function trim(value = '', max = 220) {
   return text.length > max ? `${text.slice(0, Math.max(0, max - 1)).trim()}...` : text;
 }
 
+function safeLower(value = '') {
+  return String(value || '').trim().toLowerCase();
+}
+
+function formatEvidenceSnippet(item = {}, max = 220) {
+  const app = trim(item.app || item.source_app || item.source || item.layer || '', 40);
+  const timestamp = item.timestamp ? new Date(item.timestamp).toLocaleString() : '';
+  const title = trim(item.title || '', 80);
+  const text = trim(item.text || item.summary || item.description || item.title || '', max);
+  const prefix = [app, timestamp].filter(Boolean).join(' @ ');
+  return `${prefix ? `[${prefix}] ` : ''}${title && title !== text ? `${title} - ` : ''}${text}`.trim();
+}
+
 function makeTraceFromEvidence(evidence = [], limit = 3) {
   return (Array.isArray(evidence) ? evidence : []).slice(0, limit).map((item) => ({
     source: item.source || item.layer || item.type || 'memory',
@@ -348,6 +361,357 @@ ${evidenceDigest || 'None'}
   }).slice(0, limit) : [];
 }
 
+function buildRadarChatQuery(section, limit = 5) {
+  if (section === 'relationship') {
+    return `What are my top ${limit} relationship moves right now? Use my captured context and relationship memory. For each move, reason in terms of: the person or context, why now, the evidence that makes this timely, and the concrete next move I should make. Avoid generic reminders.`;
+  }
+  if (section === 'todo') {
+    return `What are the top ${limit} to-dos I should do next? Use my captured context and current memory. Focus on the strongest concrete productive moves, with why now and the next step. Avoid generic productivity advice.`;
+  }
+  return `What are the top ${limit} signals right now from my current memory and captured context?`;
+}
+
+async function runChatBackedSection({ section, llmConfig, relationshipCandidates = [], manualTodos = [], limit = 5, existingSignals = [] }) {
+  if (!llmConfig?.apiKey) return { answer: null, retrieval: null, thinking_trace: null, took_ms: 0, signals: [] };
+  const startedAt = Date.now();
+  const { answerChatQuery } = require('./chat-engine');
+  const query = buildRadarChatQuery(section, limit);
+  const chatResult = await answerChatQuery({
+    apiKey: llmConfig.apiKey,
+    query,
+    options: {
+      mode: 'chat',
+      economy: true,
+      internal_radar: true,
+      skip_radar_backfill: true
+    }
+  }).catch((error) => ({
+    content: '',
+    retrieval: null,
+    thinking_trace: null,
+    error: error?.message || String(error)
+  }));
+
+  const evidenceDigest = (chatResult?.retrieval?.evidence || []).slice(0, 10).map((item, index) => (
+    `${index + 1}. [${item.layer || item.type || 'memory'}] ${trim(item.text || item.title || '', 220)}`
+  )).join('\n');
+  const relationshipDigest = relationshipCandidates.slice(0, 8).map((item) => (
+    `- ${item.display_name}: ${item.status}; ${trim(item.relationship_summary || '', 140)}`
+  )).join('\n');
+  const manualDigest = (manualTodos || []).filter((todo) => todo && !todo.completed).slice(0, 8).map((todo) => (
+    `- ${trim(todo.title || '', 90)}${todo.description ? `: ${trim(todo.description, 140)}` : ''}`
+  )).join('\n');
+  const existingDigest = (existingSignals || []).map((s) => (
+    `- ${s.title}${s.person ? ` (with ${s.person})` : ''}`
+  )).join('\n');
+
+  const prompt = `[System]
+Convert this grounded Weave answer into a strict JSON array with up to ${limit} ${section} signal cards.
+
+Every item must include:
+- title
+- person
+- why_now
+- evidence
+- move
+- priority
+- suggestion_type
+
+Rules:
+- JSON only.
+- Preserve the assistant's actual judgment. Do not invent extra moves.
+- Relationship items must match: person/context, why now, supporting evidence, concrete next move.
+- Todo items must match: strongest concrete productive move, why now, supporting evidence, concrete next step.
+- Keep wording specific and grounded in the provided answer/evidence.
+- Avoid duplicates of these existing signals:
+${existingDigest || 'None'}
+
+[Assistant answer]
+${String(chatResult?.content || '').trim() || 'None'}
+
+[Relationship candidates]
+${relationshipDigest || 'None'}
+
+[Manual todos]
+${manualDigest || 'None'}
+
+[Grounding evidence]
+${evidenceDigest || 'None'}
+`;
+
+  const raw = await callLLM(prompt, llmConfig, 0.12, { maxTokens: 700, economy: true, task: 'suggestion' }).catch(() => null);
+  const parsed = safeJsonParse(raw, []);
+  const signals = Array.isArray(parsed)
+    ? parsed.map((row, index) => {
+        const normalized = normalizeSignal(section, row, index);
+        if (row.suggestion_type) normalized.suggestion_type = row.suggestion_type;
+        return normalized;
+      }).slice(0, limit)
+    : [];
+
+  return {
+    answer: chatResult?.content || '',
+    retrieval: chatResult?.retrieval || null,
+    thinking_trace: chatResult?.thinking_trace || chatResult?.retrieval?.thinking_trace || null,
+    took_ms: Date.now() - startedAt,
+    signals,
+    error: chatResult?.error || null
+  };
+}
+
+function buildGoldSetContext(evidence = [], limit = 5) {
+  return (Array.isArray(evidence) ? evidence : [])
+    .slice(0, Math.max(1, limit))
+    .map((item, index) => `${index + 1}. ${formatEvidenceSnippet(item, 260)}`)
+    .join('\n');
+}
+
+function buildRecentInterestsDigest(primaryEvidence = [], secondaryEvidence = [], limit = 6) {
+  const seen = new Set();
+  const values = [];
+  [...(primaryEvidence || []), ...(secondaryEvidence || [])].forEach((item) => {
+    const candidate = trim(item.title || item.text || '', 120);
+    const key = safeLower(candidate);
+    if (!candidate || seen.has(key)) return;
+    seen.add(key);
+    values.push(candidate);
+  });
+  return values.slice(0, limit).map((item) => `- ${item}`).join('\n');
+}
+
+async function fetchProjectNodes(limit = 8) {
+  const rows = await db.allQuery(
+    `SELECT title, summary, created_at
+     FROM memory_nodes
+     WHERE layer = 'semantic'
+       AND subtype IN ('task', 'fact', 'decision')
+       AND status NOT IN ('done', 'archived')
+     ORDER BY datetime(COALESCE(updated_at, created_at)) DESC
+     LIMIT ?`,
+    [Math.max(1, Math.min(12, Number(limit || 8)))]
+  ).catch(() => []);
+  return (rows || []).map((row) => trim(row.title || row.summary || '', 120)).filter(Boolean);
+}
+
+function buildRelationshipScore(candidate = {}) {
+  const parts = [];
+  if (candidate.status) parts.push(`status=${candidate.status}`);
+  if (candidate.warmth_score !== undefined && candidate.warmth_score !== null) parts.push(`warmth=${Number(candidate.warmth_score).toFixed(2)}`);
+  if (candidate.strength_score !== undefined && candidate.strength_score !== null) parts.push(`strength=${Number(candidate.strength_score).toFixed(2)}`);
+  if (candidate.depth_score !== undefined && candidate.depth_score !== null) parts.push(`depth=${Number(candidate.depth_score).toFixed(2)}`);
+  return parts.join(', ') || 'unknown';
+}
+
+function filterEvidenceForContact(evidence = [], contactName = '', limit = 5) {
+  const lowerName = safeLower(contactName);
+  const byName = (Array.isArray(evidence) ? evidence : []).filter((item) => {
+    const haystack = safeLower(`${item.title || ''} ${item.text || ''}`);
+    return lowerName && haystack.includes(lowerName);
+  });
+  const selected = byName.length ? byName : (Array.isArray(evidence) ? evidence : []);
+  return selected.slice(0, Math.max(1, limit));
+}
+
+function parseRelationalNudge(raw = '') {
+  const text = String(raw || '').trim();
+  const nudgeMatch = text.match(/\*\*The Nudge:\*\*\s*([\s\S]*?)(?:\n\*\*Draft:\*\*|$)/i);
+  const draftMatch = text.match(/\*\*Draft:\*\*\s*"?([\s\S]*?)"?\s*$/i);
+  return {
+    nudge: trim((nudgeMatch?.[1] || '').replace(/\s+/g, ' ').trim(), 220),
+    draft: trim((draftMatch?.[1] || '').replace(/\s+/g, ' ').trim(), 240)
+  };
+}
+
+function parseRelationalNudgeArray(raw = '') {
+  const parsed = safeJsonParse(raw, []);
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed && Array.isArray(parsed.items)) return parsed.items;
+  return [];
+}
+
+function parseActionableContextTable(raw = '') {
+  const lines = String(raw || '').split('\n').map((line) => line.trim()).filter(Boolean);
+  return lines
+    .filter((line) => line.startsWith('|'))
+    .filter((line) => !/^\|\s*:?-+:?\s*\|/i.test(line))
+    .filter((line) => !/^\|\s*Priority\s*\|/i.test(line))
+    .map((line) => line.split('|').slice(1, -1).map((cell) => cell.trim()))
+    .filter((cells) => cells.length >= 4)
+    .map(([priority, task, context, source]) => ({
+      priority: safeLower(priority) || 'medium',
+      task: trim(task, 120),
+      context: trim(context, 220),
+      source: trim(source, 120)
+    }))
+    .filter((row) => row.task);
+}
+
+async function generateRelationshipSignalsFromPrompt({
+  llmConfig,
+  relationshipCandidates = [],
+  relationshipRetrieval = null,
+  recentInterestEvidence = [],
+  limit = 5,
+  existingSignals = []
+}) {
+  if (!llmConfig) return [];
+  const existingPeople = new Set(existingSignals.map((item) => safeLower(item.person || item.display?.person || item.title)).filter(Boolean));
+  const candidates = relationshipCandidates
+    .filter((item) => !existingPeople.has(safeLower(item.display_name)))
+    .slice(0, Math.max(limit, 5));
+  const recentInterests = buildRecentInterestsDigest(recentInterestEvidence, relationshipRetrieval?.evidence || [], 6) || 'None';
+  const candidateBundles = candidates.map((candidate, index) => {
+    const contactName = trim(candidate.display_name || '', 80);
+    const goldSet = filterEvidenceForContact(relationshipRetrieval?.evidence || [], contactName, 5);
+    return {
+      rank: index + 1,
+      person: contactName,
+      relationship_score: buildRelationshipScore(candidate),
+      status: candidate.status || '',
+      gold_set_context: buildGoldSetContext(goldSet.length ? goldSet : [{
+        title: contactName,
+        text: candidate.relationship_summary || `${contactName} is currently a relationship candidate in Weave.`,
+        source: 'relationship_graph',
+        timestamp: candidate.last_interaction_at || null
+      }], 5),
+      evidence_line: formatEvidenceSnippet(goldSet[0] || {
+        text: candidate.relationship_summary || '',
+        source: 'relationship_graph',
+        timestamp: candidate.last_interaction_at || null
+      }, 220),
+      epistemic_trace: makeTraceFromEvidence(goldSet, 2)
+    };
+  }).filter((item) => item.person);
+
+  if (!candidateBundles.length) return [];
+
+  const prompt = `### TASK
+You are generating batched Proactive Nudges for multiple relationship candidates.
+
+### USER'S CURRENT FOCUS
+${recentInterests}
+
+### CANDIDATES
+${candidateBundles.map((bundle) => `## ${bundle.rank}. ${bundle.person}
+Relationship Score: ${bundle.relationship_score}
+Context Evidence:
+${bundle.gold_set_context}`).join('\n\n')}
+
+### INSTRUCTIONS
+1. For each candidate, identify the best "Shared Context" between the user's recent focus and that person's known interests or past conversations.
+2. Determine urgency from the provided Relationship Score.
+3. Draft the outreach:
+   - Must be < 3 sentences.
+   - Must mention a SPECIFIC detail from the context.
+   - Must provide a "Value Add" tied to the context when possible.
+4. Avoid "Just checking in," "How are things?", and "It's been a while."
+5. Return only the strongest ${limit} candidates.
+
+### OUTPUT FORMAT
+Return strict JSON array. Each item must include:
+- person
+- nudge
+- draft
+- priority
+- suggestion_type`;
+
+  const raw = await callLLM(prompt, llmConfig, 0.18, { maxTokens: 900, economy: true, task: 'suggestion' }).catch(() => null);
+  const parsedItems = parseRelationalNudgeArray(raw).slice(0, limit);
+  return parsedItems.map((item, index) => {
+    const person = trim(item.person || '', 80);
+    const bundle = candidateBundles.find((candidate) => safeLower(candidate.person) === safeLower(person)) || candidateBundles[index];
+    const nudge = trim(item.nudge || item.why_now || '', 220);
+    const draft = trim(item.draft || item.move || '', 240);
+    if (!person || !nudge || !draft) return null;
+    return {
+      id: stableId('radar_relationship_prompt', `${person}|${nudge}`),
+      title: `${person} relationship move`,
+      person,
+      category: 'relationship_intelligence',
+      signal_type: 'relationship',
+      priority: ['high', 'medium', 'low'].includes(safeLower(item.priority)) ? safeLower(item.priority) : (bundle?.status === 'needs_followup' ? 'high' : 'medium'),
+      why_now: nudge,
+      evidence: bundle?.evidence_line || '',
+      move: draft,
+      recommended_action: draft,
+      suggestion_type: trim(item.suggestion_type || (bundle?.status === 'needs_followup' ? 'Critical Follow-up' : 'Casual Re-engagement'), 60),
+      primary_action: { label: 'Draft opener' },
+      suggested_actions: [{ label: 'Draft opener' }, { label: 'View relationship' }, { label: 'Snooze' }],
+      display: {
+        person,
+        headline: `${person} relationship move`,
+        summary: trim(nudge, 180)
+      },
+      epistemic_trace: bundle?.epistemic_trace || [],
+      createdAt: Date.now(),
+      ai_generated: true,
+      prompt_native: true
+    };
+  }).filter(Boolean);
+}
+
+async function generateTodoSignalsFromPrompt({
+  llmConfig,
+  todoRetrieval = null,
+  projectNodes = [],
+  limit = 5,
+  timeWindow = '6 hours',
+  existingSignals = []
+}) {
+  if (!llmConfig) return [];
+  const goldSet = Array.isArray(todoRetrieval?.evidence) ? todoRetrieval.evidence.slice(0, 7) : [];
+  if (!goldSet.length) return [];
+  const existingTitles = new Set(existingSignals.map((item) => safeLower(item.title)).filter(Boolean));
+  const prompt = `### TASK
+Identify unresolved tasks and blockers from the last ${timeWindow} of activity.
+
+### PROJECT HIERARCHY
+${(projectNodes || []).map((item) => `- ${item}`).join('\n') || 'None'}
+
+### EVIDENCE STREAM
+${buildGoldSetContext(goldSet, 7)}
+
+### INSTRUCTIONS
+1. FILTER THE NOISE: Ignore passive consumption. Focus on intent-heavy apps like Slack, Terminal, VS Code, and Gmail.
+2. DETECT "GHOST TASKS": Look for:
+   - Unanswered questions in Slack/Email.
+   - Errors or "TODO" comments in code files viewed.
+   - Mentioned deadlines in project docs.
+3. PRIORITIZE: Rank tasks based on their alignment with the Project Hierarchy.
+4. PROVIDE RECEIPTS: Every suggested task must be accompanied by a "Source Link" (the App and Timestamp from the metadata).
+
+### OUTPUT FORMAT
+| Priority | Task | Context / "Why" | Source (App + Time) |
+| :--- | :--- | :--- | :--- |`;
+
+  const raw = await callLLM(prompt, llmConfig, 0.14, { maxTokens: 520, economy: true, task: 'suggestion' }).catch(() => null);
+  const rows = parseActionableContextTable(raw).filter((row) => !existingTitles.has(safeLower(row.task))).slice(0, limit);
+  return rows.map((row, index) => ({
+    id: stableId('radar_todo_prompt', `${row.task}|${row.source}|${index}`),
+    title: row.task,
+    person: '',
+    category: 'work',
+    signal_type: 'todo',
+    priority: ['high', 'medium', 'low'].includes(row.priority) ? row.priority : 'medium',
+    why_now: row.context,
+    evidence: row.source,
+    move: row.task,
+    recommended_action: row.task,
+    suggestion_type: 'Task',
+    primary_action: { label: 'Handle task' },
+    suggested_actions: [{ label: 'Handle task' }, { label: 'Mark done' }, { label: 'Snooze' }],
+    display: {
+      person: '',
+      headline: row.task,
+      summary: trim(row.context, 180)
+    },
+    epistemic_trace: makeTraceFromEvidence(goldSet.filter((item) => formatEvidenceSnippet(item, 220).includes(row.source)).slice(0, 2), 2),
+    createdAt: Date.now(),
+    ai_generated: true,
+    prompt_native: true
+  }));
+}
+
 async function deepenSignals({ section, llmConfig, signals = [], context }) {
   if (!signals.length || !llmConfig) return signals;
   const prompt = `[System]
@@ -390,32 +754,39 @@ ${(context?.evidence || []).slice(0, 10).map((item, index) => `${index + 1}. ${t
 async function buildRadarState({ llmConfig = null, manualTodos = [], maxCentralSignals = 5, maxRelationshipSignals = 5, maxTodoSignals = 5, existingState = null } = {}) {
   const timings = {};
   const relationshipCandidates = await fetchRelationshipCandidates(8);
+  const projectNodes = await fetchProjectNodes(8);
 
   const existingCentral = (existingState?.centralSignals || []).slice(0, 10);
   const existingRelationship = (existingState?.relationshipSignals || []).slice(0, 10);
   const existingTodo = (existingState?.todoSignals || []).slice(0, 10);
 
-  const [centralContext, relationshipContext, todoContext] = await Promise.all([
+  const [centralContext, relationshipChat, todoChat] = await Promise.all([
     retrieveBoundedContext('What are the top high-level insights or patterns from recent activity?', {
       seedLimit: 8,
       hopLimit: 4,
       evidenceLimit: 10
     }),
-    retrieveBoundedContext('What are the top relationship moves right now?', {
-      seedLimit: 8,
-      hopLimit: 4,
-      evidenceLimit: 10
+    runChatBackedSection({
+      section: 'relationship',
+      llmConfig,
+      relationshipCandidates,
+      manualTodos,
+      limit: maxRelationshipSignals,
+      existingSignals: existingRelationship
     }),
-    retrieveBoundedContext('What are the top productive to-dos right now?', {
-      seedLimit: 8,
-      hopLimit: 4,
-      evidenceLimit: 10
+    runChatBackedSection({
+      section: 'todo',
+      llmConfig,
+      relationshipCandidates,
+      manualTodos,
+      limit: maxTodoSignals,
+      existingSignals: existingTodo
     })
   ]);
 
   timings.central_retrieval_ms = centralContext.took_ms;
-  timings.relationship_retrieval_ms = relationshipContext.took_ms;
-  timings.todo_retrieval_ms = todoContext.took_ms;
+  timings.relationship_chat_ms = relationshipChat.took_ms;
+  timings.todo_chat_ms = todoChat.took_ms;
 
   const results = await Promise.all([
     (async () => {
@@ -444,67 +815,85 @@ async function buildRadarState({ llmConfig = null, manualTodos = [], maxCentralS
     })(),
     (async () => {
       try {
-        let signals = await runSectionLLM({
-          section: 'relationship',
+        let signals = await generateRelationshipSignalsFromPrompt({
           llmConfig,
-          context: relationshipContext,
           relationshipCandidates,
-          manualTodos,
+          relationshipRetrieval: relationshipChat?.retrieval || null,
+          recentInterestEvidence: [
+            ...(centralContext?.evidence || []),
+            ...((todoChat?.retrieval?.evidence) || [])
+          ],
           limit: maxRelationshipSignals,
           existingSignals: existingRelationship
         });
+        timings.relationship_prompt_ms = relationshipChat?.took_ms || 0;
+        if (!signals.length) {
+          signals = Array.isArray(relationshipChat?.signals) ? relationshipChat.signals.slice(0, maxRelationshipSignals) : [];
+        }
         if (!signals.length) {
           signals = makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals, existingRelationship);
         }
         if (!signals.length) {
-          signals = makeRelationshipEvidenceFallback(relationshipContext.retrieval, maxRelationshipSignals, existingRelationship);
+          signals = makeRelationshipEvidenceFallback(relationshipChat?.retrieval, maxRelationshipSignals, existingRelationship);
         }
-        signals = await deepenSignals({
-          section: 'relationship',
-          llmConfig,
-          signals,
-          context: relationshipContext
-        });
+        if (signals.length && !signals.every((item) => item.prompt_native)) {
+          signals = await deepenSignals({
+            section: 'relationship',
+            llmConfig,
+            signals,
+            context: {
+              evidence: relationshipChat?.retrieval?.evidence || [],
+              retrieval: relationshipChat?.retrieval || null
+            }
+          });
+        }
         if (!signals.length) {
-          signals = makeRelationshipEvidenceFallback(relationshipContext.retrieval, maxRelationshipSignals, existingRelationship);
+          signals = makeRelationshipEvidenceFallback(relationshipChat?.retrieval, maxRelationshipSignals, existingRelationship);
         }
-        return { section: 'relationship', signals, error: null };
+        return { section: 'relationship', signals, error: relationshipChat?.error || null };
       } catch (error) {
         return {
           section: 'relationship',
           signals: makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals, existingRelationship).length
             ? makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals, existingRelationship)
-            : makeRelationshipEvidenceFallback(relationshipContext.retrieval, maxRelationshipSignals, existingRelationship),
+            : makeRelationshipEvidenceFallback(relationshipChat?.retrieval, maxRelationshipSignals, existingRelationship),
           error: String(error?.message || error)
         };
       }
     })(),
     (async () => {
       try {
-        let signals = await runSectionLLM({
-          section: 'todo',
+        let signals = await generateTodoSignalsFromPrompt({
           llmConfig,
-          context: todoContext,
-          relationshipCandidates,
-          manualTodos,
+          todoRetrieval: todoChat?.retrieval || null,
+          projectNodes,
           limit: maxTodoSignals,
           existingSignals: existingTodo
         });
+        timings.todo_prompt_ms = todoChat?.took_ms || 0;
         if (!signals.length) {
-          signals = makeTodoFallback(manualTodos, todoContext.retrieval, maxTodoSignals, existingTodo);
+          signals = Array.isArray(todoChat?.signals) ? todoChat.signals.slice(0, maxTodoSignals) : [];
         }
-        signals = await deepenSignals({
-          section: 'todo',
-          llmConfig,
-          signals,
-          context: todoContext
-        });
         if (!signals.length) {
-          signals = makeTodoFallback(manualTodos, todoContext.retrieval, maxTodoSignals, existingTodo);
+          signals = makeTodoFallback(manualTodos, todoChat?.retrieval, maxTodoSignals, existingTodo);
         }
-        return { section: 'todo', signals, error: null };
+        if (signals.length && !signals.every((item) => item.prompt_native)) {
+          signals = await deepenSignals({
+            section: 'todo',
+            llmConfig,
+            signals,
+            context: {
+              evidence: todoChat?.retrieval?.evidence || [],
+              retrieval: todoChat?.retrieval || null
+            }
+          });
+        }
+        if (!signals.length) {
+          signals = makeTodoFallback(manualTodos, todoChat?.retrieval, maxTodoSignals, existingTodo);
+        }
+        return { section: 'todo', signals, error: todoChat?.error || null };
       } catch (error) {
-        return { section: 'todo', signals: makeTodoFallback(manualTodos, todoContext.retrieval, maxTodoSignals, existingTodo), error: String(error?.message || error) };
+        return { section: 'todo', signals: makeTodoFallback(manualTodos, todoChat?.retrieval, maxTodoSignals, existingTodo), error: String(error?.message || error) };
       }
     })()
   ]);
@@ -521,12 +910,12 @@ async function buildRadarState({ llmConfig = null, manualTodos = [], maxCentralS
   const relationshipSignals = relationshipResult.signals.map((item) => ({
     ...item,
     signal_type: 'relationship',
-    epistemic_trace: item.epistemic_trace?.length ? item.epistemic_trace : makeTraceFromEvidence(relationshipContext.evidence, 2)
+    epistemic_trace: item.epistemic_trace?.length ? item.epistemic_trace : makeTraceFromEvidence(relationshipChat?.retrieval?.evidence || [], 2)
   }));
   const todoSignals = todoResult.signals.map((item) => ({
     ...item,
     signal_type: 'todo',
-    epistemic_trace: item.epistemic_trace?.length ? item.epistemic_trace : makeTraceFromEvidence(todoContext.evidence, 2)
+    epistemic_trace: item.epistemic_trace?.length ? item.epistemic_trace : makeTraceFromEvidence(todoChat?.retrieval?.evidence || [], 2)
   }));
 
   const allSignals = [...centralSignals, ...relationshipSignals, ...todoSignals]
