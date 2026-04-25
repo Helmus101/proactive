@@ -2235,6 +2235,13 @@ async function runPeriodicScreenshotTick() {
 
   if (!periodicScreenshotRunning) return;
 
+  if (shouldDeferBackgroundWork('PeriodicScreenshot')) {
+    const retryMs = 30000;
+    periodicScreenshotNextDueAt = Date.now() + retryMs;
+    scheduleNextPeriodicScreenshot(retryMs);
+    return;
+  }
+
   if (screenshotsPausedForDisplayOff) {
     console.log('[Screenshot] Paused because display/system is asleep');
     return;
@@ -2680,6 +2687,7 @@ async function runRelationshipGraphUpdate(options = {}) {
 
 
 async function runEpisodeGeneration() {
+  if (shouldDeferBackgroundWork('EpisodeJob')) return;
   if (episodeJobLock) {
     console.log('[EpisodeJob] Already running, skipping this cycle');
     return;
@@ -2892,6 +2900,7 @@ async function runSuggestionEngineJob(options = {}) {
 
 async function runWeeklyInsightJobScheduled() {
   try {
+    if (shouldDeferBackgroundWork('WeeklyInsight')) return;
     if (!beginHeavyJob('weekly_insight')) {
       enqueueHeavyJob('weekly_insight', () => runWeeklyInsightJobScheduled(), { source: 'scheduler' });
       return;
@@ -2991,6 +3000,7 @@ async function runHourlySemanticPulseJob() {
 
 async function runLivingCoreJobScheduled() {
   try {
+    if (shouldDeferBackgroundWork('LivingCore')) return;
     if (!beginHeavyJob('living_core')) {
       enqueueHeavyJob('living_core', () => runLivingCoreJobScheduled(), { source: 'scheduler' });
       return;
