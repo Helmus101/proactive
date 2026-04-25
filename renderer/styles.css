@@ -873,6 +873,244 @@ body.compact-mode .suggestion-card {
     color: #065f46;
 }
 
+/* ── Relationship card variant ──────────────────────────────────────────────── */
+.suggestion-card.rel-card {
+    border-color: rgba(99, 102, 241, 0.3);
+    background: linear-gradient(135deg, var(--bg2, #f8fafc) 0%, rgba(99, 102, 241, 0.03) 100%);
+}
+
+[data-theme="dark"] .suggestion-card.rel-card {
+    border-color: rgba(129, 140, 248, 0.28);
+    background: linear-gradient(135deg, var(--bg2, #1e293b) 0%, rgba(129, 140, 248, 0.05) 100%);
+}
+
+.rel-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+}
+
+.rel-card-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.rel-type-badge {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: #6366f1;
+    background: rgba(99, 102, 241, 0.1);
+    border: 1px solid rgba(99, 102, 241, 0.22);
+    border-radius: 999px;
+    padding: 2px 8px;
+}
+
+[data-theme="dark"] .rel-type-badge {
+    color: #a5b4fc;
+    background: rgba(99, 102, 241, 0.15);
+}
+
+.rel-trigger-badge {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-tertiary, #94a3b8);
+    background: var(--bg3, #f1f5f9);
+    border: 1px solid var(--border-color, #e2e8f0);
+    border-radius: 999px;
+    padding: 2px 7px;
+}
+
+.rel-days-badge {
+    font-size: 10px;
+    font-weight: 600;
+    color: #f59e0b;
+    background: rgba(245, 158, 11, 0.08);
+    border: 1px solid rgba(245, 158, 11, 0.22);
+    border-radius: 999px;
+    padding: 2px 7px;
+}
+
+.rel-person-name {
+    font-size: 17px;
+    font-weight: 700;
+    color: var(--text-primary, #0f172a);
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    letter-spacing: -0.2px;
+}
+
+[data-theme="dark"] .rel-person-name {
+    color: var(--text-primary, #f1f5f9);
+}
+
+.rel-priority-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.rel-why-now {
+    font-size: 12.5px;
+    color: var(--text-secondary, #475569);
+    margin-bottom: 4px;
+    line-height: 1.5;
+}
+
+.rel-evidence {
+    font-size: 11.5px;
+    color: var(--text-tertiary, #94a3b8);
+    font-style: italic;
+    margin-bottom: 8px;
+    line-height: 1.45;
+}
+
+/* Draft opener box */
+.rel-draft-box {
+    background: var(--bg3, #f8fafc);
+    border: 1px solid var(--border-color, #e2e8f0);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin: 10px 0 12px;
+}
+
+[data-theme="dark"] .rel-draft-box {
+    background: rgba(255,255,255,0.04);
+    border-color: rgba(255,255,255,0.1);
+}
+
+.rel-draft-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 5px;
+}
+
+.rel-draft-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--text-tertiary, #94a3b8);
+}
+
+.rel-draft-ai-badge {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    color: #7c3aed;
+    background: rgba(124, 58, 237, 0.1);
+    border: 1px solid rgba(124, 58, 237, 0.25);
+    border-radius: 999px;
+    padding: 1px 5px;
+    display: none;
+}
+
+.rel-draft-refresh {
+    margin-left: auto;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-tertiary, #94a3b8);
+    font-size: 13px;
+    padding: 0 2px;
+    line-height: 1;
+    border-radius: 4px;
+    transition: color 0.15s;
+}
+.rel-draft-refresh:hover { color: #6366f1; }
+
+.rel-draft-text {
+    font-size: 13px;
+    color: var(--text-primary, #1e293b);
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+[data-theme="dark"] .rel-draft-text {
+    color: var(--text-primary, #e2e8f0);
+}
+
+.rel-draft-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 8px;
+}
+
+.rel-draft-generate-btn {
+    font-size: 12px;
+    font-weight: 600;
+    color: #6366f1;
+    background: none;
+    border: 1px dashed rgba(99, 102, 241, 0.4);
+    border-radius: 6px;
+    padding: 6px 14px;
+    cursor: pointer;
+    width: 100%;
+    transition: background 0.15s, border-color 0.15s;
+}
+.rel-draft-generate-btn:hover {
+    background: rgba(99, 102, 241, 0.06);
+    border-color: rgba(99, 102, 241, 0.6);
+}
+
+/* Quick action row */
+.rel-quick-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.rel-action-btn {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 5px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color, #e2e8f0);
+    background: var(--bg2, #ffffff);
+    color: var(--text-primary, #1e293b);
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+    white-space: nowrap;
+}
+.rel-action-btn:hover {
+    background: var(--bg3, #f1f5f9);
+    border-color: #cbd5e1;
+}
+
+.rel-action-copy {
+    color: #6366f1;
+    border-color: rgba(99, 102, 241, 0.3);
+    background: rgba(99, 102, 241, 0.06);
+}
+.rel-action-copy:hover {
+    background: rgba(99, 102, 241, 0.12);
+    border-color: rgba(99, 102, 241, 0.5);
+}
+
+.rel-action-snooze {
+    color: var(--text-tertiary, #94a3b8);
+    margin-left: auto;
+}
+
+[data-theme="dark"] .rel-action-btn {
+    background: rgba(255,255,255,0.05);
+    border-color: rgba(255,255,255,0.1);
+    color: var(--text-primary, #e2e8f0);
+}
+[data-theme="dark"] .rel-action-btn:hover {
+    background: rgba(255,255,255,0.1);
+}
+
 /* Type label + auto badge row */
 .suggestion-title-row {
     display: flex;
@@ -8293,5 +8531,19 @@ body {
 }
 
 .chat-suggestions-panel .suggestion-remove-btn {
+    display: none;
+}
+
+.relationship-feature-disabled #nav-contacts,
+.relationship-feature-disabled #contacts-view,
+.relationship-feature-disabled [data-filter="relationships"],
+.relationship-feature-disabled #focus-mode-select option[value="relationships"],
+.relationship-feature-disabled #sync-apple-contacts-btn,
+.relationship-feature-disabled .settings-group-heading:has(#sync-apple-contacts-btn),
+.relationship-feature-disabled .suggestion-card.rel-card {
+    display: none !important;
+}
+
+.relationship-feature-disabled .today-snapshot-item:nth-child(2) {
     display: none;
 }

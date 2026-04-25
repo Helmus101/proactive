@@ -287,7 +287,6 @@ async function fetchRelationshipCandidates(limit = 8) {
   const rows = await db.allQuery(
     `SELECT id, display_name, status, relationship_summary, last_interaction_at, strength_score, warmth_score, depth_score
      FROM relationship_contacts
-     WHERE json_extract(COALESCE(metadata, '{}'), '$.apple_contacts') = 1
      ORDER BY CASE status WHEN 'decaying' THEN 0 WHEN 'cooling' THEN 1 WHEN 'needs_followup' THEN 2 ELSE 3 END,
               depth_score DESC,
               strength_score DESC
@@ -753,27 +752,31 @@ ${(context?.evidence || []).slice(0, 10).map((item, index) => `${index + 1}. ${t
 
 async function buildRadarState({ llmConfig = null, manualTodos = [], maxCentralSignals = 5, maxRelationshipSignals = 5, maxTodoSignals = 5, existingState = null } = {}) {
   const timings = {};
-  const relationshipCandidates = await fetchRelationshipCandidates(8);
+  const relationshipsEnabled = Number(maxRelationshipSignals || 0) > 0;
+  const relationshipCandidates = relationshipsEnabled ? await fetchRelationshipCandidates(8) : [];
   const projectNodes = await fetchProjectNodes(8);
 
   const existingCentral = (existingState?.centralSignals || []).slice(0, 10);
   const existingRelationship = (existingState?.relationshipSignals || []).slice(0, 10);
   const existingTodo = (existingState?.todoSignals || []).slice(0, 10);
 
-  const [centralContext, relationshipChat, todoChat] = await Promise.all([
+  const runRelationshipSuggestionsEngine = relationshipsEnabled
+    ? require('./relationship-suggestions-engine').runRelationshipSuggestionsEngine
+    : null;
+  const [centralContext, relationshipChat, todoChat, deterministicRelSignals] = await Promise.all([
     retrieveBoundedContext('What are the top high-level insights or patterns from recent activity?', {
       seedLimit: 8,
       hopLimit: 4,
       evidenceLimit: 10
     }),
-    runChatBackedSection({
+    relationshipsEnabled ? runChatBackedSection({
       section: 'relationship',
       llmConfig,
       relationshipCandidates,
       manualTodos,
       limit: maxRelationshipSignals,
       existingSignals: existingRelationship
-    }),
+    }) : Promise.resolve({ took_ms: 0, retrieval: null, signals: [], error: null }),
     runChatBackedSection({
       section: 'todo',
       llmConfig,
@@ -781,7 +784,12 @@ async function buildRadarState({ llmConfig = null, manualTodos = [], maxCentralS
       manualTodos,
       limit: maxTodoSignals,
       existingSignals: existingTodo
-    })
+    }),
+    relationshipsEnabled ? runRelationshipSuggestionsEngine({
+      llmConfig,
+      limit: maxRelationshipSignals,
+      deepScan: false
+    }).catch(() => []) : Promise.resolve([])
   ]);
 
   timings.central_retrieval_ms = centralContext.took_ms;
@@ -815,18 +823,36 @@ async function buildRadarState({ llmConfig = null, manualTodos = [], maxCentralS
     })(),
     (async () => {
       try {
-        let signals = await generateRelationshipSignalsFromPrompt({
-          llmConfig,
-          relationshipCandidates,
-          relationshipRetrieval: relationshipChat?.retrieval || null,
-          recentInterestEvidence: [
-            ...(centralContext?.evidence || []),
-            ...((todoChat?.retrieval?.evidence) || [])
-          ],
-          limit: maxRelationshipSignals,
-          existingSignals: existingRelationship
-        });
+        if (!relationshipsEnabled) {
+          return { section: 'relationship', signals: [], error: null };
+        }
         timings.relationship_prompt_ms = relationshipChat?.took_ms || 0;
+
+        // Use deterministic signals from the relationship engine as the primary source.
+        // They have specific day counts, trigger events, and pre-written draft openers.
+        let signals = Array.isArray(deterministicRelSignals) && deterministicRelSignals.length
+          ? deterministicRelSignals.slice(0, maxRelationshipSignals)
+          : [];
+
+        // Supplement with LLM-generated signals when deterministic ones don't fill the quota
+        if (signals.length < maxRelationshipSignals) {
+          const existing = new Set(signals.map(s => safeLower(s.person || s.title)));
+          const llmSignals = await generateRelationshipSignalsFromPrompt({
+            llmConfig,
+            relationshipCandidates,
+            relationshipRetrieval: relationshipChat?.retrieval || null,
+            recentInterestEvidence: [
+              ...(centralContext?.evidence || []),
+              ...((todoChat?.retrieval?.evidence) || [])
+            ],
+            limit: maxRelationshipSignals - signals.length,
+            existingSignals: existingRelationship
+          }).catch(() => []);
+          const deduped = (llmSignals || []).filter(s => !existing.has(safeLower(s.person || s.title)));
+          signals = [...signals, ...deduped].slice(0, maxRelationshipSignals);
+        }
+
+        // Final fallbacks when still empty
         if (!signals.length) {
           signals = Array.isArray(relationshipChat?.signals) ? relationshipChat.signals.slice(0, maxRelationshipSignals) : [];
         }
@@ -836,27 +862,14 @@ async function buildRadarState({ llmConfig = null, manualTodos = [], maxCentralS
         if (!signals.length) {
           signals = makeRelationshipEvidenceFallback(relationshipChat?.retrieval, maxRelationshipSignals, existingRelationship);
         }
-        if (signals.length && !signals.every((item) => item.prompt_native)) {
-          signals = await deepenSignals({
-            section: 'relationship',
-            llmConfig,
-            signals,
-            context: {
-              evidence: relationshipChat?.retrieval?.evidence || [],
-              retrieval: relationshipChat?.retrieval || null
-            }
-          });
-        }
-        if (!signals.length) {
-          signals = makeRelationshipEvidenceFallback(relationshipChat?.retrieval, maxRelationshipSignals, existingRelationship);
-        }
+
         return { section: 'relationship', signals, error: relationshipChat?.error || null };
       } catch (error) {
         return {
           section: 'relationship',
-          signals: makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals, existingRelationship).length
-            ? makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals, existingRelationship)
-            : makeRelationshipEvidenceFallback(relationshipChat?.retrieval, maxRelationshipSignals, existingRelationship),
+          signals: deterministicRelSignals?.length
+            ? deterministicRelSignals.slice(0, maxRelationshipSignals)
+            : makeRelationshipFallback(relationshipCandidates, maxRelationshipSignals, existingRelationship),
           error: String(error?.message || error)
         };
       }
@@ -907,11 +920,11 @@ async function buildRadarState({ llmConfig = null, manualTodos = [], maxCentralS
     signal_type: 'central',
     epistemic_trace: item.epistemic_trace?.length ? item.epistemic_trace : makeTraceFromEvidence(centralContext.evidence, 2)
   }));
-  const relationshipSignals = relationshipResult.signals.map((item) => ({
+  const relationshipSignals = relationshipsEnabled ? relationshipResult.signals.map((item) => ({
     ...item,
     signal_type: 'relationship',
     epistemic_trace: item.epistemic_trace?.length ? item.epistemic_trace : makeTraceFromEvidence(relationshipChat?.retrieval?.evidence || [], 2)
-  }));
+  })) : [];
   const todoSignals = todoResult.signals.map((item) => ({
     ...item,
     signal_type: 'todo',
@@ -934,7 +947,7 @@ async function buildRadarState({ llmConfig = null, manualTodos = [], maxCentralS
     todoSignals,
     sections: {
       central: { status: centralResult.error ? 'partial' : 'ready', error: centralResult.error, count: centralSignals.length },
-      relationship: { status: relationshipResult.error ? 'partial' : 'ready', error: relationshipResult.error, count: relationshipSignals.length },
+      relationship: { status: relationshipsEnabled ? (relationshipResult.error ? 'partial' : 'ready') : 'disabled', error: relationshipResult.error, count: relationshipSignals.length },
       todo: { status: todoResult.error ? 'partial' : 'ready', error: todoResult.error, count: todoSignals.length }
     },
     timings

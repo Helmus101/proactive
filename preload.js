@@ -4,7 +4,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Google OAuth
   startGoogleAuth: () => ipcRenderer.invoke('start-google-auth'),
   getGoogleTokens: () => ipcRenderer.invoke('get-google-tokens'),
-  syncGoogleData: () => ipcRenderer.invoke('sync-google-data'),
+  syncGoogleData: (payload = {}) => ipcRenderer.invoke('sync-google-data', payload),
+  getGoogleSyncStatus: () => ipcRenderer.invoke('get-google-sync-status'),
 
   // Data storage
   storeUserData: (data) => ipcRenderer.invoke('store-user-data', data),
@@ -107,6 +108,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getRelationshipContactDetail: (contactId) => ipcRenderer.invoke('get-relationship-contact-detail', contactId),
   updatePersonProfile: (payload = {}) => ipcRenderer.invoke('update-person-profile', payload),
   generateRelationshipDraft: (payload = {}) => ipcRenderer.invoke('generate-relationship-draft', payload),
+  openUrl: (url) => ipcRenderer.invoke('open-url', url),
   syncAppleContacts: (payload = {}) => ipcRenderer.invoke('sync-apple-contacts', payload),
 
   // Chat sessions: allow renderer to push sessions to main for long-term memory ingestion

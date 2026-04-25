@@ -1,5 +1,7 @@
 'use strict';
 
+const RELATIONSHIP_FEATURE_ENABLED = false;
+
 class WeaveApp {
     updateIconsReal() {
         if (window.lucide) {
@@ -53,7 +55,7 @@ class WeaveApp {
                 return [];
             }
         })());
-        this.showPeopleSection = localStorage.getItem('showPeopleSection') !== 'false';
+        this.showPeopleSection = false;
         this.chatHistoryCollapsed = localStorage.getItem('chatHistoryCollapsed') === 'true';
         this.presenceMode = 'waiting';
         this.contactsLoaded = false;
@@ -74,6 +76,7 @@ class WeaveApp {
 
     async init() {
         this.cacheDom();
+        this.applyFeatureVisibility();
         this.setPresenceMode('waiting');
         this.applyCompactMode();
         this.applyTheme(localStorage.getItem('theme') || 'light');
@@ -89,6 +92,13 @@ class WeaveApp {
             this.applyRadarState(payload);
             this.renderSuggestions();
             this.updateIcons();
+        });
+        window.electronAPI.onAuthSuccess?.(() => {
+            this.loadGoogleStatus().catch(() => {});
+        });
+        window.electronAPI.onGSuiteSyncComplete?.(() => {
+            this.loadGoogleStatus().catch(() => {});
+            if (RELATIONSHIP_FEATURE_ENABLED) this.loadContacts().catch(() => {});
         });
         window.electronAPI.onPlannerStep?.((payload) => this.handlePlannerStep(payload));
         window.electronAPI.onMemoryGraphUpdate?.((payload) => this.handleMemoryGraphUpdate(payload));
@@ -122,6 +132,10 @@ class WeaveApp {
         this.newChatButton = document.getElementById('new-chat-btn');
         this.previewMessage = document.getElementById('preview-message');
         this.googleStatus = document.getElementById('google-status');
+        this.googleSyncStatus = document.getElementById('google-sync-status');
+        this.googleConnectButton = document.getElementById('google-connect-btn');
+        this.googleBackfillButton = document.getElementById('google-backfill-btn');
+        this.googleSyncNowButton = document.getElementById('google-sync-now-btn');
         this.historyList = document.getElementById('settings-history-list');
         this.historyMeta = document.getElementById('settings-history-meta');
         this.screenCapturesList = document.getElementById('screen-captures-list');
@@ -182,6 +196,27 @@ class WeaveApp {
         this.deleteAllDataButton = document.getElementById('delete-all-data-btn');
     }
 
+    applyFeatureVisibility() {
+        if (RELATIONSHIP_FEATURE_ENABLED) return;
+        document.body.classList.add('relationship-feature-disabled');
+        document.querySelectorAll([
+            '#nav-contacts',
+            '#contacts-view',
+            '[data-filter="relationships"]',
+            '#focus-mode-select option[value="relationships"]',
+            '#sync-apple-contacts-btn'
+        ].join(',')).forEach((el) => {
+            el.hidden = true;
+            el.setAttribute('aria-hidden', 'true');
+        });
+        if (this.focusModeSelect && this.focusModeSelect.value === 'relationships') {
+            this.focusModeSelect.value = 'all';
+        }
+        if (this.activeView === 'contacts-view') {
+            this.activeView = 'presence-view';
+        }
+    }
+
     nextFrame() {
         return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
     }
@@ -227,19 +262,28 @@ class WeaveApp {
     applyRadarState(payload = {}) {
         const state = payload && !Array.isArray(payload) ? payload : { allSignals: payload || [] };
         const centralSignals = this.normalizeTodos(state.centralSignals || (state.allSignals || []).filter((item) => String(item.signal_type || '').toLowerCase() === 'central'));
-        const relationshipSignals = this.normalizeTodos(state.relationshipSignals || (state.allSignals || []).filter((item) => String(item.signal_type || '').toLowerCase() === 'relationship'));
+        const relationshipSignals = RELATIONSHIP_FEATURE_ENABLED
+            ? this.normalizeTodos(state.relationshipSignals || (state.allSignals || []).filter((item) => String(item.signal_type || '').toLowerCase() === 'relationship'))
+            : [];
         const todoSignals = this.normalizeTodos(state.todoSignals || (state.allSignals || []).filter((item) => String(item.signal_type || '').toLowerCase() === 'todo'));
         const allSignals = this.normalizeTodos(state.allSignals || [...centralSignals, ...relationshipSignals, ...todoSignals])
-            .filter((item) => !this.dismissedSuggestionIds.has(String(item.id || '')));
+            .filter((item) => !this.dismissedSuggestionIds.has(String(item.id || '')))
+            .filter((item) => RELATIONSHIP_FEATURE_ENABLED || !this.isRelationshipSignal(item));
         this.radarState = {
             generated_at: state.generated_at || null,
             allSignals,
-            centralSignals: centralSignals.filter((item) => !this.dismissedSuggestionIds.has(String(item.id || ''))),
-            relationshipSignals: relationshipSignals.filter((item) => !this.dismissedSuggestionIds.has(String(item.id || ''))),
-            todoSignals: todoSignals.filter((item) => !this.dismissedSuggestionIds.has(String(item.id || ''))),
+            centralSignals: centralSignals.filter((item) => !this.dismissedSuggestionIds.has(String(item.id || '')) && (RELATIONSHIP_FEATURE_ENABLED || !this.isRelationshipSignal(item))),
+            relationshipSignals: RELATIONSHIP_FEATURE_ENABLED ? relationshipSignals.filter((item) => !this.dismissedSuggestionIds.has(String(item.id || ''))) : [],
+            todoSignals: todoSignals.filter((item) => !this.dismissedSuggestionIds.has(String(item.id || '')) && (RELATIONSHIP_FEATURE_ENABLED || !this.isRelationshipSignal(item))),
             sections: state.sections || {}
         };
         this.todos = allSignals.filter((todo) => !todo.completed);
+    }
+
+    isRelationshipSignal(item = {}) {
+        const signalType = String(item.signal_type || '').toLowerCase();
+        const category = String(item.category || item.type || '').toLowerCase();
+        return signalType === 'relationship' || ['followup', 'relationship', 'relationship_intelligence', 'nurture', 'life_event', 'checkin'].includes(category);
     }
 
     persistDismissedSuggestionIds() {
@@ -266,6 +310,9 @@ class WeaveApp {
     }
 
     switchView(viewId) {
+        if (!RELATIONSHIP_FEATURE_ENABLED && viewId === 'contacts-view') {
+            viewId = 'presence-view';
+        }
         this.activeView = viewId;
         this.views.forEach((view) => {
             const isActive = view.id === viewId;
@@ -283,7 +330,7 @@ class WeaveApp {
             this.updateChatSyncStatus();
             this.scrollChatToBottom();
         }
-        if (viewId === 'contacts-view') {
+        if (RELATIONSHIP_FEATURE_ENABLED && viewId === 'contacts-view') {
             if (!this.contactsLoaded) {
                 this.loadContacts();
             }
@@ -316,8 +363,8 @@ class WeaveApp {
         this.presencePrimaryAction?.addEventListener('click', triggerRefresh);
         this.focusModeSelect?.addEventListener('change', async () => {
             const value = this.focusModeSelect.value || 'all';
-            this.currentFilter = value;
-            this.filterChips.forEach((chip) => chip.classList.toggle('active', chip.dataset.filter === value));
+            this.currentFilter = (!RELATIONSHIP_FEATURE_ENABLED && value === 'relationships') ? 'all' : value;
+            this.filterChips.forEach((chip) => chip.classList.toggle('active', chip.dataset.filter === this.currentFilter));
             this.showExtendedToday = false;
             localStorage.setItem('showExtendedToday', 'false');
             this.renderSuggestions();
@@ -368,6 +415,44 @@ class WeaveApp {
             if (action === 'done') {
                 event.stopPropagation();
                 await this.completeSuggestion(taskId);
+                return;
+            }
+
+            if (action === 'copy-draft') {
+                event.stopPropagation();
+                const todo = this.todos.find(t => t.id === taskId);
+                const text = todo?.draft_opener || '';
+                if (text) {
+                    try {
+                        await navigator.clipboard.writeText(text);
+                        this.showToast('Draft copied to clipboard');
+                    } catch (_) {
+                        this.showToast('Copy failed — please try again');
+                    }
+                }
+                return;
+            }
+
+            if (action === 'open-gmail') {
+                event.stopPropagation();
+                const todo = this.todos.find(t => t.id === taskId);
+                if (todo) {
+                    const url = this.buildGmailComposeUrl({
+                        body: todo.draft_is_context ? '' : (todo.draft_opener || ''),
+                        subject: todo.draft_is_context ? (todo.why_now || '') : ''
+                    });
+                    if (window.electronAPI?.openUrl) {
+                        window.electronAPI.openUrl(url);
+                    } else {
+                        window.open(url, '_blank');
+                    }
+                }
+                return;
+            }
+
+            if (action === 'request-draft') {
+                event.stopPropagation();
+                await this.requestRelationshipDraft(taskId);
                 return;
             }
 
@@ -464,8 +549,8 @@ class WeaveApp {
         if (!silent) {
             this.remindersList.innerHTML = this.emptyStateHTML(
                 'refresh',
-                'Refreshing relationship radar...',
-                'Reviewing recent conversations, follow-ups, and meeting context.'
+                'Refreshing radar...',
+                'Reviewing recent work context, tasks, and open loops.'
             );
         }
 
@@ -485,9 +570,8 @@ class WeaveApp {
                     this.updateIcons();
                     this.setPresenceMode('suggesting');
                     if (!silent) {
-                        const relCount = Number(this.radarState?.relationshipSignals?.length || 0);
                         const todoCount = Number(this.radarState?.todoSignals?.length || 0);
-                        this.showToast(`Radar refreshed: ${relCount} relationship, ${todoCount} to-do`);
+                        this.showToast(`Radar refreshed: ${todoCount} to-do`);
                     }
                     return;
                 }
@@ -610,7 +694,18 @@ class WeaveApp {
                     candidate_score: Number(item.candidate_score || 0),
                     action_plan: Array.isArray(item.action_plan) && item.action_plan.length
                         ? item.action_plan
-                        : mappedActionPlan
+                        : mappedActionPlan,
+                    // Relationship-specific fields for specialized card rendering
+                    suggestion_type: (item.suggestion_type || '').trim(),
+                    person: (item.person || item.display?.person || '').trim(),
+                    contact_id: (item.contact_id || '').trim(),
+                    contact_id_b: (item.contact_id_b || '').trim(),
+                    days_since_contact: typeof item.days_since_contact === 'number' ? item.days_since_contact : null,
+                    trigger_event: item.trigger_event || null,
+                    draft_opener: (item.draft_opener || item.ai_draft || '').trim(),
+                    draft_ai_generated: Boolean(item.draft_ai_generated),
+                    draft_is_context: Boolean(item.draft_is_context),
+                    relationship_score: typeof item.relationship_score === 'number' ? item.relationship_score : null
                 };
             })
             .filter((item) => item.title && item.primary_action && this.isConcreteActionLabel(item.primary_action?.label));
@@ -663,7 +758,7 @@ class WeaveApp {
             this.remindersList.innerHTML = this.emptyStateHTML(
                 'task_alt',
                 'No signals surfaced yet',
-                'Refresh the radar, sync Apple Contacts, or ask Weave what matters now.'
+                'Refresh the radar, sync Google, or ask Weave what matters now.'
             ) + this.renderRegularTodosSection();
             this.setPresenceMode('waiting');
             return;
@@ -698,7 +793,7 @@ class WeaveApp {
                 button.addEventListener('click', () => {
                     const todo = this.todos.find((item) => item.id === button.dataset.chatCommandId);
                     if (!todo) return;
-                    const prompt = String(todo.signal_type || '').toLowerCase() === 'relationship'
+                    const prompt = RELATIONSHIP_FEATURE_ENABLED && String(todo.signal_type || '').toLowerCase() === 'relationship'
                         ? `Help me execute this relationship move: ${todo.title}. Why now: ${todo.why_now || todo.reason || ''}`
                         : `Help me act on this signal: ${todo.title}. Context: ${todo.why_now || todo.reason || ''}`;
                     if (this.chatInput) {
@@ -711,11 +806,12 @@ class WeaveApp {
 
         if (this.currentFilter === 'all') {
             const centralSignals = (this.radarState.centralSignals || []).filter((todo) => !todo.completed && (!todo.snoozedUntil || Number(todo.snoozedUntil) <= Date.now())).slice(0, this.showExtendedToday ? 4 : 2);
-            const relationshipSignals = (this.radarState.relationshipSignals || []).filter((todo) => !todo.completed && (!todo.snoozedUntil || Number(todo.snoozedUntil) <= Date.now())).slice(0, this.showExtendedToday ? 5 : 3);
+            const relationshipSignals = RELATIONSHIP_FEATURE_ENABLED
+                ? (this.radarState.relationshipSignals || []).filter((todo) => !todo.completed && (!todo.snoozedUntil || Number(todo.snoozedUntil) <= Date.now())).slice(0, this.showExtendedToday ? 5 : 3)
+                : [];
             const todoSignals = (this.radarState.todoSignals || []).filter((todo) => !todo.completed && (!todo.snoozedUntil || Number(todo.snoozedUntil) <= Date.now())).slice(0, this.showExtendedToday ? 5 : 3);
             this.remindersList.innerHTML = `
                 ${section('What stands out', centralSignals, 0)}
-                ${section('Top relationship moves', relationshipSignals, centralSignals.length)}
                 ${section('Top to-dos', todoSignals, centralSignals.length + relationshipSignals.length)}
                 ${regularTasks}
             `;
@@ -725,7 +821,7 @@ class WeaveApp {
         }
 
         this.remindersList.innerHTML = `
-            ${section(this.currentFilter === 'relationships' ? 'Relationship signals' : 'To-do signals', visibleTodos, 0)}
+            ${section('To-do signals', visibleTodos, 0)}
             ${regularTasks}
         `;
         renderChatCommandList();
@@ -756,7 +852,124 @@ class WeaveApp {
         `;
     }
 
+    buildGmailComposeUrl({ to = '', subject = '', body = '' } = {}) {
+        const params = new URLSearchParams();
+        if (to) params.set('to', to);
+        if (subject) params.set('su', subject);
+        if (body) params.set('body', body);
+        return `https://mail.google.com/mail/u/0/?view=cm&fs=1&${params.toString()}`;
+    }
+
+    async requestRelationshipDraft(taskId) {
+        const todo = this.todos.find(t => t.id === taskId);
+        if (!todo?.contact_id) return;
+        const card = this.remindersList?.querySelector(`.suggestion-card[data-id="${taskId}"]`);
+        const draftBox = card?.querySelector('.rel-draft-text');
+        if (draftBox) draftBox.textContent = 'Generating draft…';
+        try {
+            const result = await window.electronAPI.generateRelationshipDraft({
+                contactId: todo.contact_id,
+                triggerType: todo.trigger_event?.type || 'dormancy',
+                triggerContext: todo.trigger_event || {}
+            });
+            if (result?.draft) {
+                todo.draft_opener = result.draft;
+                todo.draft_ai_generated = Boolean(result.ai_generated);
+                if (draftBox) {
+                    draftBox.textContent = result.draft;
+                    const badge = card?.querySelector('.rel-draft-ai-badge');
+                    if (badge && result.ai_generated) badge.style.display = 'inline';
+                }
+            }
+        } catch (_) {
+            if (draftBox) draftBox.textContent = todo.draft_opener || 'Draft generation failed.';
+        }
+    }
+
+    renderRelationshipCard(todo, index = 0) {
+        const compact = (value, limit = 90) => {
+            const text = String(value || '').replace(/\s+/g, ' ').trim();
+            return text.length > limit ? `${text.slice(0, Math.max(0, limit - 1)).trim()}…` : text;
+        };
+
+        const te = todo.trigger_event || {};
+        const triggerBadge = te.description || todo.time_anchor || '';
+        const suggestionTypeBadge = todo.suggestion_type || 'Relationship';
+        const draftText = todo.draft_opener || '';
+        const isContextCard = Boolean(todo.draft_is_context);
+        const primaryLabel = todo.primary_action?.label || 'Draft reply';
+        const daysLabel = todo.days_since_contact != null && !isContextCard
+            ? `${todo.days_since_contact}d since contact`
+            : '';
+        const personName = todo.person || todo.display?.person || todo.title || '';
+        const whyNow = compact(todo.why_now || todo.description || '', 120);
+        const evidenceText = compact(todo.evidence || todo.evidence_line || '', 100);
+
+        // Priority colour: high=red, medium=amber, low=muted
+        const priorityDot = { high: '#ef4444', medium: '#f59e0b', low: '#94a3b8' }[todo.priority] || '#94a3b8';
+
+        const actionButtons = (() => {
+            if (isContextCard) {
+                return `
+                    <button class="rel-action-btn" type="button" data-action="open-gmail">Open Gmail</button>
+                    <button class="rel-action-btn" type="button" data-action="done">Handled</button>
+                    <button class="rel-action-btn rel-action-snooze" type="button" data-action="snooze">Snooze</button>
+                `;
+            }
+            return `
+                <button class="rel-action-btn rel-action-copy" type="button" data-action="copy-draft" title="Copy draft to clipboard">Copy draft</button>
+                <button class="rel-action-btn" type="button" data-action="open-gmail">Open Gmail</button>
+                <button class="rel-action-btn" type="button" data-action="done">Done</button>
+                <button class="rel-action-btn rel-action-snooze" type="button" data-action="snooze">Snooze</button>
+            `;
+        })();
+
+        const draftSection = draftText ? `
+            <div class="rel-draft-box">
+                <div class="rel-draft-header">
+                    <span class="rel-draft-label">${isContextCard ? 'Context' : 'Draft opener'}</span>
+                    ${todo.draft_ai_generated ? '<span class="rel-draft-ai-badge">AI</span>' : ''}
+                    ${!isContextCard ? `<button class="rel-draft-refresh" type="button" data-action="request-draft" title="Regenerate with AI">↺</button>` : ''}
+                </div>
+                <div class="rel-draft-text">${this.escapeHtml(draftText)}</div>
+            </div>
+        ` : `
+            <div class="rel-draft-box rel-draft-empty">
+                <button class="rel-draft-generate-btn" type="button" data-action="request-draft">Generate draft opener</button>
+            </div>
+        `;
+
+        return `
+            <article class="suggestion-card conversation-entry suggestion-client rel-card" data-id="${this.escapeHtml(todo.id)}" tabindex="0" style="animation-delay:${index * 40}ms;">
+                <div class="rel-card-header">
+                    <div class="rel-card-meta">
+                        <span class="rel-type-badge">${this.escapeHtml(suggestionTypeBadge)}</span>
+                        ${triggerBadge ? `<span class="rel-trigger-badge">${this.escapeHtml(triggerBadge)}</span>` : ''}
+                        ${daysLabel ? `<span class="rel-days-badge">${this.escapeHtml(daysLabel)}</span>` : ''}
+                    </div>
+                    <button class="suggestion-remove-btn" type="button" data-action="remove" aria-label="Remove suggestion">Remove</button>
+                </div>
+                <div class="rel-person-name">
+                    <span class="rel-priority-dot" style="background:${priorityDot};"></span>
+                    ${this.escapeHtml(personName)}
+                </div>
+                ${whyNow ? `<div class="rel-why-now">${this.escapeHtml(whyNow)}</div>` : ''}
+                ${evidenceText && !isContextCard ? `<div class="rel-evidence">${this.escapeHtml(evidenceText)}</div>` : ''}
+                ${draftSection}
+                <div class="rel-quick-actions">
+                    ${actionButtons}
+                </div>
+            </article>
+        `;
+    }
+
     renderSuggestionCard(todo, index = 0) {
+        // Delegate to the specialized relationship card renderer for relationship signals
+        const relTypes = ['Nurture', 'Life Event', 'Meeting Prep', 'Warm Intro', 'Strategic'];
+        if (todo.suggestion_type && relTypes.includes(todo.suggestion_type)) {
+            return this.renderRelationshipCard(todo, index);
+        }
+
         const expanded = this.expandedCards.has(todo.id);
         const suggestionCategory = todo.suggestion_category || todo.category || 'work';
         const isStudy = suggestionCategory === 'study';
@@ -1009,8 +1222,9 @@ class WeaveApp {
         const filtered = this.todos.filter((todo) => {
             if (todo.completed) return false;
             if (todo.snoozedUntil && Number(todo.snoozedUntil) > now) return false;
+            if (!RELATIONSHIP_FEATURE_ENABLED && this.isRelationshipSignal(todo)) return false;
             if (this.currentFilter === 'all') return true;
-            if (this.currentFilter === 'relationships') return String(todo.signal_type || '').toLowerCase() === 'relationship' || ['followup', 'relationship_intelligence'].includes(todo.category);
+            if (RELATIONSHIP_FEATURE_ENABLED && this.currentFilter === 'relationships') return String(todo.signal_type || '').toLowerCase() === 'relationship' || ['followup', 'relationship_intelligence'].includes(todo.category);
             if (this.currentFilter === 'todos') return String(todo.signal_type || '').toLowerCase() === 'todo' || ['work', 'creative', 'study'].includes(todo.category);
             return todo.category === this.currentFilter;
         });
@@ -1053,6 +1267,11 @@ class WeaveApp {
     }
 
     async loadContacts() {
+        if (!RELATIONSHIP_FEATURE_ENABLED) {
+            this.contacts = [];
+            this.contactsLoaded = true;
+            return;
+        }
         try {
             const contacts = await window.electronAPI.getRelationshipContacts();
             this.contacts = (contacts || []).map(c => ({
@@ -1409,6 +1628,7 @@ class WeaveApp {
     }
 
     async setupContactsView() {
+        if (!RELATIONSHIP_FEATURE_ENABLED) return;
         // Setup search
         const searchInput = document.getElementById('contacts-search');
         if (searchInput) {
@@ -1440,14 +1660,14 @@ class WeaveApp {
             
             if (isSyncing) {
                 statusEl.classList.add('syncing');
-                if (textEl) textEl.textContent = 'Updating relationship memory...';
+                if (textEl) textEl.textContent = 'Updating memory...';
                 const recentlySettled = this.chatRequestSettledAt && (Date.now() - this.chatRequestSettledAt) < 2500;
                 if (!this.chatRequestInFlight && !recentlySettled) {
                     this.setPresenceMode('remembering');
                 }
             } else {
                 statusEl.classList.remove('syncing');
-                if (textEl) textEl.textContent = 'Relationship memory updated';
+                if (textEl) textEl.textContent = 'Memory updated';
                 if (!this.chatRequestInFlight) {
                     this.setPresenceMode('waiting');
                 }
@@ -1475,7 +1695,7 @@ class WeaveApp {
             if (this.toggleChatHistoryButton) this.toggleChatHistoryButton.textContent = this.chatHistoryCollapsed ? 'Show threads' : 'Hide threads';
         });
         this.chatSyncStatus?.addEventListener('click', () => {
-            this.showToast('Relationship memory is updating in the background');
+            this.showToast('Memory is updating in the background');
         });
 
         this.sendChatButton?.addEventListener('click', () => this.sendChatMessage());
@@ -1747,7 +1967,7 @@ Would you like me to continue with more detail?` : content;
 
     handleChatCardAction(action, data) {
         if (action === 'view_contact') {
-            this.switchView('contacts-view');
+            if (RELATIONSHIP_FEATURE_ENABLED) this.switchView('contacts-view');
         } else if (action === 'view_automations') {
             this.switchView('settings-view');
         } else if (action === 'open_url' && data.url) {
@@ -2751,7 +2971,7 @@ Would you like me to continue with more detail?` : content;
             return `
                 <button class="chat-history-item ${session.id === this.activeChatId ? 'active' : ''}" data-chat-id="${this.escapeHtml(session.id)}">
                     <span class="chat-history-dot" aria-hidden="true"></span>
-                    <div class="chat-history-title" title="${this.escapeHtml(session.title || 'New relationship thread')}">${this.escapeHtml(session.title || 'New relationship thread')}</div>
+                    <div class="chat-history-title" title="${this.escapeHtml(session.title || 'New work thread')}">${this.escapeHtml(session.title || 'New work thread')}</div>
                     <div class="chat-history-preview">${this.escapeHtml((last?.content || 'No messages yet').slice(0, 60))}</div>
                     <div class="chat-history-time">${this.escapeHtml(this.relativeTime(updatedAt))}</div>
                 </button>
@@ -2770,7 +2990,7 @@ Would you like me to continue with more detail?` : content;
             const prompts = Array.isArray(this.chatDraftPrompts) && this.chatDraftPrompts.length
                 ? this.chatDraftPrompts
                 : this.getChatStarterPrompts();
-            if (this.chatThreadTitle) this.chatThreadTitle.textContent = 'New relationship thread';
+            if (this.chatThreadTitle) this.chatThreadTitle.textContent = 'New work thread';
             this.chatMessages.innerHTML = `
                 <div class="empty-state chat-empty-state">
                     <div class="empty-icon chat-empty-icon">
@@ -2796,7 +3016,7 @@ Would you like me to continue with more detail?` : content;
             this.updateChatCommandBarVisibility();
             return;
         }
-        if (this.chatThreadTitle) this.chatThreadTitle.textContent = chat.title || 'Current relationship thread';
+        if (this.chatThreadTitle) this.chatThreadTitle.textContent = chat.title || 'Current work thread';
 
         this.chatMessages.innerHTML = '';
         if (!chat.messages?.length) {
@@ -2838,15 +3058,13 @@ Would you like me to continue with more detail?` : content;
         const prompts = [];
         const todos = this.getVisibleTodos().slice(0, 4);
         const topTodo = todos[0];
-        const clientTodo = todos.find((todo) => String(todo.signal_type || '').toLowerCase() === 'relationship' || ['followup', 'relationship_intelligence'].includes(todo.category));
         const deliveryTodo = todos.find((todo) => String(todo.signal_type || '').toLowerCase() === 'todo' || ['work', 'creative', 'study'].includes(todo.category));
         if (topTodo?.title) prompts.push(`What is the best next move for "${topTodo.title}" right now?`);
-        if (clientTodo?.title) prompts.push(`Draft the right outreach or follow-up for "${clientTodo.title}".`);
-        if (deliveryTodo?.title) prompts.push(`Brief me on the conversation context behind "${deliveryTodo.title}".`);
-        prompts.push('What are my top five relationship moves?');
+        if (deliveryTodo?.title) prompts.push(`Brief me on the work context behind "${deliveryTodo.title}".`);
+        prompts.push('What are my top five moves?');
         prompts.push('What are the top to-dos I should do next?');
-        prompts.push('Go deeper on the first relationship move.');
-        prompts.push('Brief me on this person.');
+        prompts.push('Go deeper on the first move.');
+        prompts.push('Brief me on the current work context.');
         return Array.from(new Set(prompts.filter(Boolean))).slice(0, 4);
     }
 
@@ -2868,6 +3086,15 @@ Would you like me to continue with more detail?` : content;
         });
         this.appleContactsSyncButton?.addEventListener('click', async () => {
             await this.syncAppleContactsFromSettings();
+        });
+        this.googleConnectButton?.addEventListener('click', async () => {
+            await this.connectGoogleFromSettings();
+        });
+        this.googleBackfillButton?.addEventListener('click', async () => {
+            await this.syncGoogleFromSettings({ mode: 'initial_backfill', forceHistoricalBackfill: true });
+        });
+        this.googleSyncNowButton?.addEventListener('click', async () => {
+            await this.syncGoogleFromSettings({ mode: 'incremental_sync' });
         });
         this.suggestionProviderSelect?.addEventListener('change', () => {
             if (this.suggestionBaseUrlInput) {
@@ -2958,6 +3185,10 @@ Would you like me to continue with more detail?` : content;
     }
 
     async syncAppleContactsFromSettings() {
+        if (!RELATIONSHIP_FEATURE_ENABLED) {
+            this.showToast('People features are disabled');
+            return;
+        }
         if (!window.electronAPI?.syncAppleContacts) {
             this.showToast('Apple Contacts sync is unavailable');
             return;
@@ -2980,6 +3211,76 @@ Would you like me to continue with more detail?` : content;
             if (button) {
                 button.disabled = false;
                 button.textContent = 'Sync Apple Contacts';
+            }
+        }
+    }
+
+    renderGoogleSyncStatus(status = null) {
+        if (!this.googleSyncStatus) return;
+        if (!status?.connected) {
+            this.googleSyncStatus.textContent = 'Google is not connected. Connect Gmail and Calendar to start the historical backfill.';
+            if (this.googleConnectButton) this.googleConnectButton.textContent = 'Connect Google';
+            if (this.googleBackfillButton) this.googleBackfillButton.disabled = true;
+            if (this.googleSyncNowButton) this.googleSyncNowButton.disabled = true;
+            return;
+        }
+        const account = status.accounts?.[0]?.email || 'Connected account';
+        const lastSync = status.lastSync ? this.friendlyTime(status.lastSync) : 'not synced yet';
+        const health = status.health || {};
+        const checks = health.checks || {};
+        const counts = status.counts || {};
+        const phase = health.phase ? `${health.phase}` : 'Connected';
+        this.googleSyncStatus.textContent = `${account} • ${phase} • Last sync ${lastSync} • Gmail ${counts.gmail || 0}, Calendar ${counts.calendar || 0}${checks.newEmails || checks.newEvents ? ` • +${checks.newEmails || 0} emails, +${checks.newEvents || 0} events` : ''}`;
+        if (this.googleConnectButton) this.googleConnectButton.textContent = 'Reconnect';
+        if (this.googleBackfillButton) this.googleBackfillButton.disabled = false;
+        if (this.googleSyncNowButton) this.googleSyncNowButton.disabled = false;
+    }
+
+    async connectGoogleFromSettings() {
+        if (!window.electronAPI?.startGoogleAuth) {
+            this.showToast('Google auth is unavailable');
+            return;
+        }
+        const button = this.googleConnectButton;
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Connecting...';
+        }
+        try {
+            await window.electronAPI.startGoogleAuth();
+            await this.loadGoogleStatus();
+            this.showToast('Google connected');
+        } catch (error) {
+            console.error('Google connect failed:', error);
+            this.showToast('Google connect failed');
+        } finally {
+            if (button) button.disabled = false;
+        }
+    }
+
+    async syncGoogleFromSettings(payload = {}) {
+        if (!window.electronAPI?.syncGoogleData) {
+            this.showToast('Google sync is unavailable');
+            return;
+        }
+        const mode = payload?.mode || 'incremental_sync';
+        const button = mode === 'initial_backfill' ? this.googleBackfillButton : this.googleSyncNowButton;
+        if (button) {
+            button.disabled = true;
+            button.textContent = mode === 'initial_backfill' ? 'Backfilling...' : 'Syncing...';
+        }
+        try {
+            await window.electronAPI.syncGoogleData(payload);
+            await this.loadGoogleStatus();
+            if (RELATIONSHIP_FEATURE_ENABLED) await this.loadContacts();
+            this.showToast(mode === 'initial_backfill' ? 'Google backfill started' : 'Google sync completed');
+        } catch (error) {
+            console.error('Google sync failed:', error);
+            this.showToast('Google sync failed');
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.textContent = mode === 'initial_backfill' ? 'Run initial backfill' : 'Sync now';
             }
         }
     }
@@ -3846,15 +4147,16 @@ Would you like me to continue with more detail?` : content;
 
     async loadGoogleStatus() {
         try {
-            const tokens = await window.electronAPI.getGoogleTokens();
-            if (this.googleStatus) {
-                this.googleStatus.textContent = tokens ? 'Connected' : 'Not connected';
-            }
-            const button = document.getElementById('google-connect-btn');
-            if (button) button.textContent = tokens ? 'Reconnect' : 'Connect';
+            const [tokens, status] = await Promise.all([
+                window.electronAPI.getGoogleTokens(),
+                window.electronAPI.getGoogleSyncStatus?.()
+            ]);
+            if (this.googleStatus) this.googleStatus.textContent = tokens ? 'Connected' : 'Not connected';
+            this.renderGoogleSyncStatus(status || { connected: Boolean(tokens) });
         } catch (error) {
             console.error('Failed to load Google status:', error);
             if (this.googleStatus) this.googleStatus.textContent = 'Unavailable';
+            if (this.googleSyncStatus) this.googleSyncStatus.textContent = 'Google sync status is unavailable.';
         }
     }
 
@@ -4000,11 +4302,11 @@ Would you like me to continue with more detail?` : content;
         if (!this.previewMessage) return;
 
         let preview = formalityValue > 65
-            ? 'I can help identify who matters now and the strongest next move.'
-            : 'I can help sort out which relationship needs attention next.';
+            ? 'I can help identify what matters now and the strongest next move.'
+            : 'I can help sort out which task needs attention next.';
 
         if (verbosityValue > 65) {
-            preview += ' I will include more context so each suggestion feels grounded in your recent relationship memory.';
+            preview += ' I will include more context so each suggestion feels grounded in your recent work memory.';
         } else if (verbosityValue < 35) {
             preview += ' Short version first.';
         }
@@ -4094,14 +4396,14 @@ Would you like me to continue with more detail?` : content;
         const title = this.truncate(top?.title || 'Start here', 72);
         const person = this.extractRelationshipTarget(top);
         this.presenceSummary.textContent = count === 1
-            ? `${person ? `${person} needs attention` : 'One signal is active'}. Next move: ${title}`
+            ? `${RELATIONSHIP_FEATURE_ENABLED && person ? `${person} needs attention` : 'One signal is active'}. Next move: ${title}`
             : `${count} signals are active. Strongest signal: ${title}`;
         this.presencePrimaryAction.textContent = 'Refresh radar';
     }
 
     updateTodaySnapshot(visibleTodos = []) {
         const allSignals = (this.radarState?.allSignals || []).filter((todo) => !todo.completed);
-        const relationshipSignals = (this.radarState?.relationshipSignals || []).filter((todo) => !todo.completed);
+        const relationshipSignals = RELATIONSHIP_FEATURE_ENABLED ? (this.radarState?.relationshipSignals || []).filter((todo) => !todo.completed) : [];
         const todoSignals = (this.radarState?.todoSignals || []).filter((todo) => !todo.completed);
         if (this.todayOpenCount) this.todayOpenCount.textContent = String(allSignals.length);
         if (this.todayClientCount) this.todayClientCount.textContent = String(relationshipSignals.length);
@@ -4112,11 +4414,11 @@ Would you like me to continue with more detail?` : content;
         this.presenceMode = mode;
         if (!this.presenceState) return;
         const labels = {
-            idle: 'Relationship radar',
-            thinking: 'Reviewing relationship context',
+            idle: 'Work radar',
+            thinking: 'Reviewing work context',
             remembering: 'Updating memory',
             suggesting: 'Radar ready',
-            waiting: 'Relationship radar'
+            waiting: 'Work radar'
         };
         const label = labels[mode] || labels.waiting;
         this.presenceState.textContent = label;
@@ -4132,10 +4434,10 @@ Would you like me to continue with more detail?` : content;
         const el = this.todayWhisperPrompt;
         if (!el) return;
         const prompts = [
-            'What are my top five relationship moves?',
+            'What are my top five moves?',
             'What are the top to-dos I should do next?',
-            'Go deeper on the first relationship move.',
-            'Brief me on this person.'
+            'Go deeper on the first move.',
+            'Brief me on the current work context.'
         ];
         const initial = Math.floor(Math.random() * prompts.length);
         el.textContent = prompts[initial];
@@ -4158,10 +4460,10 @@ Would you like me to continue with more detail?` : content;
     startChatPromptRotation() {
         if (!this.chatInput) return;
         const prompts = [
-            'Ask for the top relationship moves right now',
+            'Ask for the top moves right now',
             'Ask for the top to-dos right now',
             'Ask Weave to go deeper on one move',
-            'Ask Weave to brief you on a person'
+            'Ask Weave to brief you on the current work context'
         ];
         let index = Math.floor(Math.random() * prompts.length);
         this.chatInput.placeholder = prompts[index];
@@ -4507,12 +4809,12 @@ Would you like me to continue with more detail?` : content;
             if (textEl) {
                 textEl.textContent = payload?.type === "request_chat_save"
                     ? "Saving chat to memory..."
-                    : "Relationship memory refreshed";
+                    : "Memory refreshed";
             }
             
             clearTimeout(this._syncResetTimer);
             this._syncResetTimer = setTimeout(() => {
-                if (textEl) textEl.textContent = "Relationship memory updated";
+                if (textEl) textEl.textContent = "Memory updated";
                 syncStatusEl.classList.remove("syncing");
             }, 3000);
         }

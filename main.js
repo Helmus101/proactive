@@ -50,12 +50,14 @@ const { answerChatQuery } = require('./services/agent/chat-engine');
 const { buildRadarState } = require('./services/agent/radar-engine');
 const { buildHybridGraphRetrieval } = require('./services/agent/hybrid-graph-retrieval');
 const { buildRetrievalThought } = require('./services/agent/retrieval-thought-system');
+const { upsertMemoryNode } = require('./services/agent/graph-store');
 const { generateEmbedding } = require('./services/embedding-engine');
 const { generateTopTodosFromMemoryQuery, generateAndPersistTasksFromLLM } = require('./services/agent/suggestion-engine');
 const { getLatestRecursiveImprovementLog } = require('./services/agent/recursive-improvement-engine');
 const { getRelationshipContactDetail } = require('./services/relationship-graph');
 const { getRelationshipContacts } = require('./services/relationship-graph');
 const { syncAppleContactsIntoRelationshipGraph } = require('./services/relationship-graph');
+const { syncGoogleContactsIntoRelationshipGraph } = require('./services/relationship-graph');
 const { updateRelationshipContactProfile } = require('./services/relationship-graph');
 const { resetZeroBaseMemory } = require('./services/agent/zero-base-memory');
 const { runDailyInsights } = require('./services/agent/intelligence-engine');
@@ -88,6 +90,7 @@ const { rebuildInvertedIndex } = require('./services/summarizer/indexing');
 
 // Initialize electron-store for data persistence
 const store = new Store();
+const RELATIONSHIP_FEATURE_ENABLED = false;
 const storeDebounceTimers = new Map();
 function debouncedStoreSet(key, value, delay = 2000) {
   if (storeDebounceTimers.has(key)) {
@@ -521,11 +524,13 @@ function maybeHandleLocalChatToolQuery(query = '') {
 
 function getStoredRadarState() {
   const state = store.get('radarState') || null;
-  if (state && typeof state === 'object') return state;
+  if (state && typeof state === 'object') return sanitizeRadarStateForFeatures(state);
   const suggestions = Array.isArray(store.get('suggestions')) ? store.get('suggestions') : [];
   const persistentTodos = Array.isArray(store.get('persistentTodos')) ? store.get('persistentTodos') : [];
   const centralSignals = suggestions.filter((item) => String(item.signal_type || '').toLowerCase() === 'central');
-  const relationshipSignals = suggestions.filter((item) => String(item.signal_type || '').toLowerCase() === 'relationship' || looksRelationshipSuggestion(item));
+  const relationshipSignals = RELATIONSHIP_FEATURE_ENABLED
+    ? suggestions.filter((item) => String(item.signal_type || '').toLowerCase() === 'relationship' || looksRelationshipSuggestion(item))
+    : [];
   const todoSignals = [
     ...suggestions.filter((item) => String(item.signal_type || '').toLowerCase() === 'todo'),
     ...persistentTodos.filter((item) => !item?.completed).map((item) => ({
@@ -549,17 +554,39 @@ function getStoredRadarState() {
 }
 
 function persistRadarState(radarState = {}) {
-  const clean = {
+  const incomingAllSignals = Array.isArray(radarState.allSignals) ? radarState.allSignals : [];
+  const allSignals = RELATIONSHIP_FEATURE_ENABLED
+    ? incomingAllSignals
+    : incomingAllSignals.filter((item) => String(item?.signal_type || '').toLowerCase() !== 'relationship' && !looksRelationshipSuggestion(item));
+  const clean = sanitizeRadarStateForFeatures({
     generated_at: radarState.generated_at || new Date().toISOString(),
-    allSignals: Array.isArray(radarState.allSignals) ? radarState.allSignals : [],
+    allSignals,
     centralSignals: Array.isArray(radarState.centralSignals) ? radarState.centralSignals : [],
     relationshipSignals: Array.isArray(radarState.relationshipSignals) ? radarState.relationshipSignals : [],
     todoSignals: Array.isArray(radarState.todoSignals) ? radarState.todoSignals : [],
     sections: radarState.sections || {}
-  };
+  });
   store.set('radarState', clean);
   store.set('suggestions', clean.allSignals.filter((item) => !item?.completed));
   return clean;
+}
+
+function sanitizeRadarStateForFeatures(radarState = {}) {
+  if (RELATIONSHIP_FEATURE_ENABLED) return radarState;
+  const notRelationship = (item) => String(item?.signal_type || '').toLowerCase() !== 'relationship' && !looksRelationshipSuggestion(item);
+  const centralSignals = Array.isArray(radarState.centralSignals) ? radarState.centralSignals.filter(notRelationship) : [];
+  const todoSignals = Array.isArray(radarState.todoSignals) ? radarState.todoSignals.filter(notRelationship) : [];
+  return {
+    ...radarState,
+    allSignals: Array.isArray(radarState.allSignals) ? radarState.allSignals.filter(notRelationship) : [...centralSignals, ...todoSignals],
+    centralSignals,
+    relationshipSignals: [],
+    todoSignals,
+    sections: {
+      ...(radarState.sections || {}),
+      relationship: { status: 'disabled', count: 0 }
+    }
+  };
 }
 
 async function persistDailyBriefSemanticNode(summary = {}) {
@@ -695,7 +722,7 @@ const SCREENSHOT_WATCHDOG_INTERVAL_MS = 60 * 1000;
 const CAPTURE_VISUAL_DIFF_THRESHOLD = Number(process.env.CAPTURE_VISUAL_DIFF_THRESHOLD || 0.05);
 const STARTUP_HEAVY_JOB_DELAY_MS = Math.max(5 * 60 * 1000, Number(process.env.STARTUP_HEAVY_JOB_DELAY_MS || 10 * 60 * 1000));
 const STARTUP_INITIAL_SYNC_DELAY_MS = Math.max(10 * 60 * 1000, Number(process.env.STARTUP_INITIAL_SYNC_DELAY_MS || 20 * 60 * 1000));
-const GSUITE_SYNC_INTERVAL_MS = Math.max(15 * 60 * 1000, Number(process.env.GSUITE_SYNC_INTERVAL_MS || 15 * 60 * 1000));
+const GSUITE_SYNC_INTERVAL_MS = Math.max(5 * 60 * 1000, Number(process.env.GSUITE_SYNC_INTERVAL_MS || 5 * 60 * 1000));
 const HEAVY_JOB_RETRY_COOLDOWN_MS = 60 * 1000;
 const STARTUP_SOURCE_WARMUP_DELAY_MS = STARTUP_HEAVY_JOB_DELAY_MS;
 const STARTUP_MEMORY_GRAPH_DELAY_MS = STARTUP_HEAVY_JOB_DELAY_MS + (90 * 1000);
@@ -1336,9 +1363,10 @@ let morningBriefTimer = null;
 let screenshotCleanupTimer = null;
 
 const MINUTELY_MS = 60 * 1000;
-const GOOGLE_SYNC_BASELINE_ISO = '2020-01-01T00:00:00.000Z';
+const GOOGLE_SYNC_BASELINE_ISO = '2010-01-01T00:00:00.000Z';
 const GOOGLE_SYNC_OVERLAP_MS = 5 * 60 * 1000;
 const GOOGLE_SYNC_FUTURE_DRIFT_MS = 5 * 60 * 1000;
+const GOOGLE_CONTACTS_SYNC_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const DEFAULT_SENSOR_SETTINGS = {
   enabled: true, // Auto-enable for continuous capture
   intervalMinutes: 15, // 15 minutes
@@ -1769,7 +1797,9 @@ function getFrontmostWindowContext() {
 }
 
 async function captureDesktopSensorSnapshot(reason = 'scheduled') {
-  if (shouldDeferBackgroundWork('SensorCapture')) return { skipped: true, reason: 'active_use' };
+  const captureReason = String(reason || 'scheduled');
+  const isPeriodicScreenshot = /periodic-screenshot/i.test(captureReason);
+  if (!isPeriodicScreenshot && shouldDeferBackgroundWork('SensorCapture')) return { skipped: true, reason: 'active_use' };
   const captureStartedAt = Date.now();
   if (screenshotsPausedForDisplayOff) {
     return {
@@ -1910,7 +1940,6 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   const fingerprint = buildPerceptualFingerprintFromPngBuffer(capturePngBuffer);
   const visualDiffPct = Number((fingerprintDiffPercent(lastAcceptedCaptureFingerprint, fingerprint) * 100).toFixed(2));
   const visualChangeSignificant = !lastAcceptedCaptureFingerprint || !fingerprint || visualDiffPct >= (CAPTURE_VISUAL_DIFF_THRESHOLD * 100);
-  const isPeriodicScreenshot = /periodic-screenshot/i.test(String(reason || ''));
   const forceCapture = /manual|reset/i.test(String(reason || ''));
 
   if (fingerprint) {
@@ -2183,6 +2212,7 @@ function startSensorCaptureLoop(mode = null) {
   console.log(`[SensorCapture] Starting loop with interval: ${intervalMs / 60000}m (Reduced mode: ${currentMode === 'reduced'})`);
 
   sensorCaptureTimer = setInterval(() => {
+    if (periodicScreenshotRunning) return;
     // Fire-and-forget scheduled capture to keep it in the background
     captureDesktopSensorSnapshot("scheduled").catch((error) => {
       console.warn("Scheduled sensor capture failed:", error && error.message ? error.message : error);
@@ -2235,13 +2265,6 @@ async function runPeriodicScreenshotTick() {
 
   if (!periodicScreenshotRunning) return;
 
-  if (shouldDeferBackgroundWork('PeriodicScreenshot')) {
-    const retryMs = 30000;
-    periodicScreenshotNextDueAt = Date.now() + retryMs;
-    scheduleNextPeriodicScreenshot(retryMs);
-    return;
-  }
-
   if (screenshotsPausedForDisplayOff) {
     console.log('[Screenshot] Paused because display/system is asleep');
     return;
@@ -2253,14 +2276,6 @@ async function runPeriodicScreenshotTick() {
       ? Math.max(1, Math.ceil((now - periodicScreenshotNextDueAt + 1) / intervalMs))
       : 1;
     periodicScreenshotNextDueAt = (periodicScreenshotNextDueAt || now) + (missedIntervals * intervalMs);
-  }
-
-  if (heavyJobState.activeJob && isAppInteractionHot()) {
-    const retryMs = Math.max(10000, Math.min(30000, Math.floor(intervalMs / 2)));
-    periodicScreenshotNextDueAt = Date.now() + retryMs;
-    console.log(`[Screenshot] Deferring periodic capture because ${heavyJobState.activeJob} is running during active use`);
-    scheduleNextPeriodicScreenshot(retryMs);
-    return;
   }
 
   console.log("[Screenshot] Taking periodic screenshot...");
@@ -2440,13 +2455,16 @@ async function runMinutelySync() {
       syncStatus: 'running'
     });
     const existingGoogleData = store.get('googleData') || {};
-    const googleDelta = await getGoogleData({ since: existingGoogleData.lastSync });
+    const lastContactsSyncAt = Date.parse((store.get('googleSyncHealth') || {}).lastContactsSyncAt || '') || 0;
+    const shouldFetchContacts = RELATIONSHIP_FEATURE_ENABLED && (!lastContactsSyncAt || (Date.now() - lastContactsSyncAt) >= GOOGLE_CONTACTS_SYNC_INTERVAL_MS);
+    const googleDelta = await getGoogleData({ since: existingGoogleData.lastSync, includeContacts: shouldFetchContacts });
     const syncMeta = googleDelta._meta || {};
     const existingEmailIds = new Set((existingGoogleData.gmail || []).map((m) => m.id));
     const existingEventsById = new Map((existingGoogleData.calendar || []).map((e) => [e.id, e]));
     let newEmailCount = 0;
     let newEventCount = 0;
     let editedEventCount = 0;
+    let contactsMerged = 0;
 
     for (const msg of (googleDelta.gmail || [])) {
       if (!existingEmailIds.has(msg.id)) newEmailCount += 1;
@@ -2552,6 +2570,20 @@ async function runMinutelySync() {
         }
       }
 
+      const lastContactsSyncAt = Date.parse((store.get('googleSyncHealth') || {}).lastContactsSyncAt || '') || 0;
+      const shouldRefreshContacts = RELATIONSHIP_FEATURE_ENABLED && Array.isArray(googleDelta.contacts) && googleDelta.contacts.length > 0
+        && (!lastContactsSyncAt || (Date.now() - lastContactsSyncAt) >= GOOGLE_CONTACTS_SYNC_INTERVAL_MS);
+      if (shouldRefreshContacts) {
+        const contactMerge = await syncGoogleContactsIntoRelationshipGraph({ contacts: googleDelta.contacts, force: true });
+        contactsMerged = Number(contactMerge?.imported || contactMerge?.merged || 0);
+        const currentHealth = store.get('googleSyncHealth') || {};
+        store.set('googleSyncHealth', {
+          ...currentHealth,
+          lastContactsSyncAt: new Date().toISOString(),
+          contactsMerged
+        });
+      }
+
       const browserHistory = await refreshBrowserHistory({
         reason: 'minutely_sync',
         maxAgeMs: BACKGROUND_BROWSER_HISTORY_MAX_AGE_MS
@@ -2587,14 +2619,28 @@ async function runMinutelySync() {
       }
       store.set('lastHistorySync', Date.now());
 
-      console.log(`[runMinutelySync] Ingested ${ingestedCount} new raw events into SQLite L1. Checks: emails=${newEmailCount}, new_events=${newEventCount}, edited_events=${editedEventCount}, cursor_advanced=${shouldAdvanceLastSync}`);
-      if (ingestedCount > 0) {
-        runRelationshipGraphUpdate({ backfill: false }).catch((e) => console.warn('[runMinutelySync] Relationship graph update failed:', e?.message || e));
+      console.log(`[runMinutelySync] Ingested ${ingestedCount} new raw events into SQLite L1. Checks: emails=${newEmailCount}, new_events=${newEventCount}, edited_events=${editedEventCount}, contacts_merged=${contactsMerged}, cursor_advanced=${shouldAdvanceLastSync}`);
+      if (RELATIONSHIP_FEATURE_ENABLED && ingestedCount > 0) {
+        enqueueHeavyJob('relationship_graph', () => runRelationshipGraphUpdate({ backfill: false }), { source: 'sync_followup' });
       }
       updateMemoryGraphHealth({
         syncStatus: 'idle',
         lastSyncRunAt: new Date().toISOString(),
         syncDurationMs: Date.now() - startedAt
+      });
+      store.set('googleSyncHealth', {
+        ...(store.get('googleSyncHealth') || {}),
+        mode: 'incremental_sync',
+        phase: 'Idle',
+        lastCheckAt: new Date().toISOString(),
+        rawIngested: ingestedCount,
+        contactsMerged,
+        checks: {
+          newEmails: newEmailCount,
+          newEvents: newEventCount,
+          editedEvents: editedEventCount,
+          contactsMerged
+        }
       });
     } catch (gErr) {
       console.warn('[runMinutelySync] L1 ingestion failed:', gErr.message || gErr);
@@ -2653,6 +2699,9 @@ async function hasNewEventsSince(jobKey) {
 }
 
 async function runRelationshipGraphUpdate(options = {}) {
+  if (!RELATIONSHIP_FEATURE_ENABLED) {
+    return { contacts: 0, skipped: true, disabled: true };
+  }
   if (!options?.force && shouldDeferBackgroundWork(options?.backfill ? 'RelationshipGraphBackfill' : 'RelationshipGraph')) {
     return { contacts: 0, deferred: true };
   }
@@ -2856,7 +2905,7 @@ async function runSuggestionEngineJob(options = {}) {
         llmConfig,
         manualTodos,
         maxCentralSignals: 5,
-        maxRelationshipSignals: 5,
+        maxRelationshipSignals: RELATIONSHIP_FEATURE_ENABLED ? 5 : 0,
         maxTodoSignals: 5,
         existingState
       }),
@@ -3089,7 +3138,7 @@ function startMemoryGraphProcessing() {
     if (suggestionEngineTimer) clearInterval(suggestionEngineTimer);
     const suggestionIntervalMs = SUGGESTION_REFRESH_INTERVAL_MINUTES * 60 * 1000;
     const nextBoundary = Math.ceil(Date.now() / suggestionIntervalMs) * suggestionIntervalMs;
-    const suggestionDelay = Math.max(1000, nextBoundary - Date.now());
+    const suggestionDelay = Math.max(10 * 60 * 1000, nextBoundary - Date.now());
     setTimeout(() => {
       runSuggestionEngineJob().catch((e) => console.warn('[MemoryGraph] Aligned suggestion generation failed:', e?.message || e));
       try { suggestionEngineTimer = setInterval(runSuggestionEngineJob, suggestionIntervalMs); } catch (_) {}
@@ -3100,12 +3149,11 @@ function startMemoryGraphProcessing() {
   }
 
   if (relationshipGraphTimer) clearInterval(relationshipGraphTimer);
-  relationshipGraphTimer = setInterval(() => {
-    runRelationshipGraphUpdate({ backfill: false }).catch((e) => console.warn('[RelationshipGraph] Scheduled update failed:', e?.message || e));
-  }, 12 * 60 * 60 * 1000);
-  setTimeout(() => {
-    runRelationshipGraphUpdate({ backfill: true }).catch((e) => console.warn('[RelationshipGraph] Initial backfill failed:', e?.message || e));
-  }, 45000);
+  if (RELATIONSHIP_FEATURE_ENABLED) {
+    relationshipGraphTimer = setInterval(() => {
+      runRelationshipGraphUpdate({ backfill: false }).catch((e) => console.warn('[RelationshipGraph] Scheduled update failed:', e?.message || e));
+    }, 12 * 60 * 60 * 1000);
+  }
 
   // Schedule weekly insights for Sunday 11:59 PM
   scheduleWeeklyInsights();
@@ -3116,10 +3164,6 @@ function startMemoryGraphProcessing() {
 
   // Avoid heavy graph work during initial UI load; rely on scheduled aligned runs.
 
-  // Suggestions can lag behind graph warmup; avoid launch-time battery spikes.
-  setTimeout(() => {
-    runSuggestionEngineJob().catch((e) => console.warn('[MemoryGraph] Initial suggestion generation failed:', e?.message || e));
-  }, 15000);
 }
 
 function scheduleWeeklyInsights() {
@@ -4297,26 +4341,15 @@ oauthApp.get('/oauth2callback', async (req, res) => {
     (async () => {
       try {
         console.log('[oauth2callback] Triggering full Google sync after auth');
-        await fullGoogleSync({ since: null, forceHistoricalBackfill: true });
+        await fullGoogleSync({ since: null, forceHistoricalBackfill: true, mode: 'initial_backfill', includeContacts: true });
         if (mainWindow && mainWindow.webContents) mainWindow.webContents.send('gsuite-sync-complete', store.get('googleData'));
 
-        // Auto-trigger memory graph processing after Google sync
-        console.log('[oauth2callback] Triggering memory graph processing after Google sync');
-        setTimeout(async () => {
-          try {
-            await runEpisodeGeneration();
-            await runSuggestionEngineJob({ force: true });
-            console.log('[oauth2callback] Memory graph processing completed');
-            if (mainWindow && mainWindow.webContents) {
-              mainWindow.webContents.send('memory-graph-update', {
-                type: 'google_sync_completed',
-                timestamp: Date.now()
-              });
-            }
-          } catch (e) {
-            console.error('[oauth2callback] Memory graph processing failed:', e);
-          }
-        }, 3000); // Wait 3 seconds for data to settle
+        if (mainWindow && mainWindow.webContents) {
+          mainWindow.webContents.send('memory-graph-update', {
+            type: 'google_sync_completed',
+            timestamp: Date.now()
+          });
+        }
       } catch (e) {
         console.warn('[oauth2callback] Full Google sync failed:', e && e.message ? e.message : e);
       }
@@ -5393,8 +5426,136 @@ function mergeGoogleData(existing = {}, incoming = {}) {
     gmail: mergeUniqueById(existing.gmail, incoming.gmail, 'id'),
     gmailSent: mergeUniqueById(existing.gmailSent, incoming.gmailSent, 'id'),
     calendar: mergeUniqueById(existing.calendar, incoming.calendar, 'id'),
+    contacts: mergeUniqueById(existing.contacts, incoming.contacts, 'id'),
     drive: mergeUniqueById(existing.drive, incoming.drive, 'id'),
     lastSync: incoming.lastSync || existing.lastSync || null
+  };
+}
+
+function normalizeGoogleContactRecord(person = {}) {
+  const names = Array.isArray(person.names) ? person.names : [];
+  const primaryName = names.find((item) => item?.displayName) || names[0] || {};
+  const emails = (Array.isArray(person.emailAddresses) ? person.emailAddresses : [])
+    .map((item) => String(item?.value || '').trim().toLowerCase())
+    .filter(Boolean);
+  const phones = (Array.isArray(person.phoneNumbers) ? person.phoneNumbers : [])
+    .map((item) => String(item?.value || '').trim())
+    .filter(Boolean);
+  const organizations = Array.isArray(person.organizations) ? person.organizations : [];
+  const primaryOrg = organizations.find((item) => item?.current) || organizations[0] || {};
+  const urls = (Array.isArray(person.urls) ? person.urls : [])
+    .map((item) => String(item?.value || '').trim())
+    .filter(Boolean);
+  const biographies = (Array.isArray(person.biographies) ? person.biographies : [])
+    .map((item) => String(item?.value || '').trim())
+    .filter(Boolean);
+  const addresses = (Array.isArray(person.addresses) ? person.addresses : []).map((item) => {
+    const parts = [
+      item?.streetAddress,
+      item?.city,
+      item?.region,
+      item?.postalCode,
+      item?.country
+    ].filter(Boolean);
+    return parts.join(', ');
+  }).filter(Boolean);
+  const id = String(person.resourceName || person.etag || emails[0] || primaryName.displayName || '').trim();
+  if (!id) return null;
+  return {
+    id,
+    resourceName: String(person.resourceName || id),
+    etag: String(person.etag || ''),
+    name: String(primaryName.displayName || primaryName.unstructuredName || emails[0] || 'Unknown').trim(),
+    first_name: String(primaryName.givenName || '').trim(),
+    last_name: String(primaryName.familyName || '').trim(),
+    company: String(primaryOrg.name || '').trim(),
+    role: String(primaryOrg.title || '').trim(),
+    emails,
+    phones,
+    addresses,
+    urls,
+    notes: biographies.join('\n\n').trim(),
+    birthday: (() => {
+      const birthday = Array.isArray(person.birthdays) ? person.birthdays[0] : null;
+      const date = birthday?.date || {};
+      if (!date?.year && !date?.month && !date?.day) return null;
+      const year = date.year || 1900;
+      const month = String(date.month || 1).padStart(2, '0');
+      const day = String(date.day || 1).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    })(),
+    metadata: {
+      google_contact_id: String(person.resourceName || id),
+      source: 'google_contacts',
+      google_contacts: true
+    }
+  };
+}
+
+async function fetchGoogleContactsForAuth(auth) {
+  const peopleApi = google.people({ version: 'v1', auth });
+  const contacts = [];
+  let pageToken = null;
+  do {
+    const res = await peopleApi.people.connections.list({
+      resourceName: 'people/me',
+      pageSize: 1000,
+      pageToken: pageToken || undefined,
+      personFields: 'names,emailAddresses,phoneNumbers,organizations,biographies,urls,birthdays,addresses'
+    });
+    const items = Array.isArray(res?.data?.connections) ? res.data.connections : [];
+    for (const person of items) {
+      const normalized = normalizeGoogleContactRecord(person);
+      if (normalized) contacts.push(normalized);
+    }
+    pageToken = res?.data?.nextPageToken || null;
+  } while (pageToken);
+  return contacts;
+}
+
+async function persistGoogleSyncProjectNote() {
+  const now = new Date().toISOString();
+  await upsertMemoryNode({
+    id: 'project_google_sync_memory',
+    layer: 'semantic',
+    subtype: 'project_note',
+    title: 'Google sync architecture',
+    summary: 'Google sync backfills Gmail and Calendar into raw, episodic, and semantic memory.',
+    canonicalText: [
+      'Google sync architecture',
+      'Backfill Gmail and Calendar from 2010.',
+      'Use raw ingestion first, then episode generation and semantic summarization.'
+    ].join('\n'),
+    confidence: 0.86,
+    status: 'active',
+    sourceRefs: ['google_sync_settings'],
+    metadata: {
+      project: 'google_sync',
+      layer_flow: ['raw', 'episodic', 'semantic'],
+      source_systems: ['gmail', 'calendar']
+    },
+    graphVersion: 'google_sync_project_v1',
+    createdAt: now,
+    updatedAt: now,
+    anchorDate: now.slice(0, 10),
+    anchorAt: now
+  }).catch(() => {});
+}
+
+function getGoogleSyncStatusSnapshot() {
+  const accounts = store.get('googleAccounts') || [];
+  const health = store.get('googleSyncHealth') || {};
+  const googleData = store.get('googleData') || {};
+  return {
+    connected: accounts.length > 0,
+    accounts: accounts.map((item) => ({ email: item.email || 'Unknown Account' })),
+    lastSync: googleData.lastSync || null,
+    health,
+    counts: {
+      gmail: Array.isArray(googleData.gmail) ? googleData.gmail.length : 0,
+      calendar: Array.isArray(googleData.calendar) ? googleData.calendar.length : 0,
+      contacts: RELATIONSHIP_FEATURE_ENABLED && Array.isArray(googleData.contacts) ? googleData.contacts.length : 0
+    }
   };
 }
 
@@ -5437,7 +5598,7 @@ async function repairEmailEventTimestamps() {
 }
 
 // Get Google data (Gmail, Calendar) using real APIs for ALL accounts
-async function getGoogleData({ since } = {}) {
+async function getGoogleData({ since, includeContacts = true, includeDrive = false } = {}) {
   try {
     let accounts = store.get('googleAccounts') || [];
 
@@ -5454,6 +5615,7 @@ async function getGoogleData({ since } = {}) {
         gmail: [],
         gmailSent: [],
         calendar: [],
+        contacts: [],
         drive: [],
         _meta: {
           hardFailure: false,
@@ -5466,6 +5628,7 @@ async function getGoogleData({ since } = {}) {
             gmail: { successAccounts: 0, failedAccounts: 0, lastError: null },
             gmailSent: { successAccounts: 0, failedAccounts: 0, lastError: null },
             calendar: { successAccounts: 0, failedAccounts: 0, lastError: null },
+            contacts: { successAccounts: 0, failedAccounts: 0, lastError: null },
             drive: { successAccounts: 0, failedAccounts: 0, lastError: null }
           }
         }
@@ -5475,6 +5638,7 @@ async function getGoogleData({ since } = {}) {
     let allGmailInbox = [];
     let allGmailSent = [];
     let allCalItems = [];
+    let allContacts = [];
     let allDriveFiles = [];
     const sinceCursorMs = normalizeSyncCursorMs(since);
     const useIncrementalCursor = Boolean(sinceCursorMs);
@@ -5483,7 +5647,7 @@ async function getGoogleData({ since } = {}) {
       : Date.parse(GOOGLE_SYNC_BASELINE_ISO);
     const gmailAfter = useIncrementalCursor
       ? `after:${Math.floor(effectiveSinceMs / 1000)}`
-      : 'after:2020/01/01';
+      : `after:${GOOGLE_SYNC_BASELINE_ISO.slice(0, 10).replace(/-/g, '/')}`;
     const calendarUpdatedMin = useIncrementalCursor ? new Date(effectiveSinceMs).toISOString() : null;
     const driveModifiedMin = useIncrementalCursor ? new Date(effectiveSinceMs).toISOString() : null;
     const syncMeta = {
@@ -5493,13 +5657,14 @@ async function getGoogleData({ since } = {}) {
       overlapMs: useIncrementalCursor ? GOOGLE_SYNC_OVERLAP_MS : 0,
       accountsTotal: accounts.length,
       accountsWithTokens: 0,
-      sources: {
-        gmail: { successAccounts: 0, failedAccounts: 0, lastError: null },
-        gmailSent: { successAccounts: 0, failedAccounts: 0, lastError: null },
-        calendar: { successAccounts: 0, failedAccounts: 0, lastError: null },
-        drive: { successAccounts: 0, failedAccounts: 0, lastError: null }
-      }
-    };
+        sources: {
+          gmail: { successAccounts: 0, failedAccounts: 0, lastError: null },
+          gmailSent: { successAccounts: 0, failedAccounts: 0, lastError: null },
+          calendar: { successAccounts: 0, failedAccounts: 0, lastError: null },
+          contacts: { successAccounts: 0, failedAccounts: 0, lastError: null },
+          drive: { successAccounts: 0, failedAccounts: 0, lastError: null }
+        }
+      };
 
     // Loop through every connected account to aggregate data
     for (const account of accounts) {
@@ -5510,7 +5675,7 @@ async function getGoogleData({ since } = {}) {
 
       const gmail    = google.gmail({ version: 'v1', auth });
       const calendar = google.calendar({ version: 'v3', auth });
-      const drive    = google.drive({ version: 'v3', auth });
+      const drive    = includeDrive ? google.drive({ version: 'v3', auth }) : null;
 
       // ---- Gmail: Incoming (all messages since 2020) ----
       try {
@@ -5624,8 +5789,20 @@ async function getGoogleData({ since } = {}) {
         console.warn('[getGoogleData] Calendar sync failed for account:', account.email || 'unknown', e?.message || e);
       }
 
+      if (includeContacts) {
+        try {
+          const contacts = await fetchGoogleContactsForAuth(auth);
+          allContacts.push(...contacts);
+          syncMeta.sources.contacts.successAccounts += 1;
+        } catch (e) {
+          syncMeta.sources.contacts.failedAccounts += 1;
+          syncMeta.sources.contacts.lastError = e?.message || String(e);
+          console.warn('[getGoogleData] Google Contacts sync failed for account:', account.email || 'unknown', e?.message || e);
+        }
+      }
+
       // ---- Drive: New, modified, or full historical fetch ----
-      try {
+      if (includeDrive) try {
         const driveQuery = driveModifiedMin
           ? `trashed = false and modifiedTime > '${driveModifiedMin}'`
           : "trashed = false";
@@ -5668,6 +5845,7 @@ async function getGoogleData({ since } = {}) {
       gmail: allGmailInbox,
       gmailSent: allGmailSent,
       calendar: allCalItems,
+      contacts: allContacts,
       drive: allDriveFiles,
       _meta: syncMeta
     };
@@ -5677,6 +5855,7 @@ async function getGoogleData({ since } = {}) {
       gmail: [],
       gmailSent: [],
       calendar: [],
+      contacts: [],
       drive: [],
       _meta: {
         hardFailure: true,
@@ -5689,6 +5868,7 @@ async function getGoogleData({ since } = {}) {
           gmail: { successAccounts: 0, failedAccounts: 1, lastError: error?.message || String(error) },
           gmailSent: { successAccounts: 0, failedAccounts: 0, lastError: null },
           calendar: { successAccounts: 0, failedAccounts: 1, lastError: error?.message || String(error) },
+          contacts: { successAccounts: 0, failedAccounts: 1, lastError: error?.message || String(error) },
           drive: { successAccounts: 0, failedAccounts: 0, lastError: null }
         }
       }
@@ -10116,18 +10296,20 @@ oauthApp.get('/api/health', (req, res) => {
 
 // IPC handlers
 ipcMain.handle('start-google-auth', async () => {
+  const googleScopes = [
+    'https://www.googleapis.com/auth/userinfo.email',
+    'https://www.googleapis.com/auth/userinfo.profile',
+    'https://www.googleapis.com/auth/gmail.send',
+    'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/calendar.readonly',
+    'https://www.googleapis.com/auth/drive.readonly'
+  ];
+  if (RELATIONSHIP_FEATURE_ENABLED) googleScopes.push('https://www.googleapis.com/auth/contacts.readonly');
   const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` +
     `client_id=${GOOGLE_CLIENT_ID}&` +
     `redirect_uri=${encodeURIComponent(getRedirectUri())}&` +
     `response_type=code&` +
-    `scope=${encodeURIComponent([
-      'https://www.googleapis.com/auth/userinfo.email',
-      'https://www.googleapis.com/auth/userinfo.profile',
-      'https://www.googleapis.com/auth/gmail.send',
-      'https://www.googleapis.com/auth/gmail.readonly',
-      'https://www.googleapis.com/auth/calendar.readonly',
-      'https://www.googleapis.com/auth/drive.readonly'
-    ].join(' '))}&` +
+    `scope=${encodeURIComponent(googleScopes.join(' '))}&` +
     `access_type=offline`;
 
   const { shell } = require('electron');
@@ -10326,6 +10508,13 @@ ipcMain.handle('toggle-automation', async (_event, automationId, enabled) => {
   }
 });
 
+ipcMain.handle('open-url', async (_event, url) => {
+  const safe = String(url || '').trim();
+  if (!safe || !/^https?:\/\//.test(safe)) return { success: false, error: 'invalid_url' };
+  await shell.openExternal(safe).catch(() => {});
+  return { success: true };
+});
+
 // Automation scheduler: polls every minute for due automations
 let automationSchedulerTimer = null;
 let recursiveImprovementTimer = null;
@@ -10464,16 +10653,29 @@ ipcMain.handle('get-recursive-improvement-status', async () => {
   }
 });
 
-ipcMain.handle('sync-google-data', async () => {
-  return await fullGoogleSync();
+ipcMain.handle('sync-google-data', async (_event, payload = {}) => {
+  return await fullGoogleSync(payload || {});
+});
+
+ipcMain.handle('get-google-sync-status', async () => {
+  return getGoogleSyncStatusSnapshot();
 });
 
 // Full GSuite sync flow extracted so it can be invoked after OAuth and by IPC
-async function fullGoogleSync({ since, forceHistoricalBackfill = false } = {}) {
+async function fullGoogleSync({ since, forceHistoricalBackfill = false, mode = 'incremental_sync', includeContacts = true } = {}) {
+  includeContacts = Boolean(includeContacts && RELATIONSHIP_FEATURE_ENABLED);
   
   const apiKey = process.env.DEEPSEEK_API_KEY;
 
   const sendProgress = (phase, done, total) => {
+    store.set('googleSyncHealth', {
+      ...(store.get('googleSyncHealth') || {}),
+      phase,
+      done,
+      total,
+      mode,
+      lastProgressAt: new Date().toISOString()
+    });
     if (mainWindow && mainWindow.webContents) {
       mainWindow.webContents.send('initial-sync-progress', { phase, done, total });
     }
@@ -10485,7 +10687,7 @@ async function fullGoogleSync({ since, forceHistoricalBackfill = false } = {}) {
     const sinceFloor = forceHistoricalBackfill
       ? GOOGLE_SYNC_BASELINE_ISO
       : (since || existingGoogleData.lastSync || GOOGLE_SYNC_BASELINE_ISO);
-    const googleDelta = await getGoogleData({ since: sinceFloor });
+    const googleDelta = await getGoogleData({ since: sinceFloor, includeContacts });
     const syncMeta = googleDelta._meta || {};
     const shouldAdvanceLastSync = !syncMeta.hardFailure;
 
@@ -10498,7 +10700,9 @@ async function fullGoogleSync({ since, forceHistoricalBackfill = false } = {}) {
       ...(store.get('googleSyncHealth') || {}),
       lastCheckAt: new Date().toISOString(),
       cursorAdvanced: shouldAdvanceLastSync,
-      syncMeta
+      syncMeta,
+      mode,
+      lastBackfillAt: forceHistoricalBackfill ? new Date().toISOString() : (store.get('googleSyncHealth') || {}).lastBackfillAt || null
     });
 
     // --- L1: Ingestion to SQLite ---
@@ -10537,6 +10741,25 @@ async function fullGoogleSync({ since, forceHistoricalBackfill = false } = {}) {
           summary: c.summary
         }
       })),
+      ...((includeContacts ? (googleDelta.contacts || []) : [])).map(c => ({
+        type: 'contact_profile',
+        timestamp: new Date().toISOString(),
+        source: 'Google Contacts',
+        text: [
+          c.name ? `Name: ${c.name}` : '',
+          c.first_name ? `First name: ${c.first_name}` : '',
+          c.last_name ? `Last name: ${c.last_name}` : '',
+          c.company ? `Company: ${c.company}` : '',
+          c.role ? `Role: ${c.role}` : '',
+          c.emails?.length ? `Emails: ${c.emails.join(', ')}` : '',
+          c.phones?.length ? `Phones: ${c.phones.join(', ')}` : '',
+          c.notes || ''
+        ].filter(Boolean).join('\n'),
+        metadata: {
+          ...c,
+          app: 'Google Contacts'
+        }
+      })),
       ...(googleDelta.drive || []).map(d => ({
         type: d.mimeType?.includes('spreadsheet') ? 'spreadsheet' : 'doc',
         timestamp: d.last_modified,
@@ -10552,17 +10775,42 @@ async function fullGoogleSync({ since, forceHistoricalBackfill = false } = {}) {
       if (i % 5 === 0) sendProgress('Ingesting raw data...', i, allUnified.length);
     }
 
+    let contactsMerged = 0;
+    if (RELATIONSHIP_FEATURE_ENABLED && includeContacts && Array.isArray(googleDelta.contacts) && googleDelta.contacts.length) {
+      sendProgress('Merging Google Contacts...', 0, googleDelta.contacts.length);
+      const contactMerge = await syncGoogleContactsIntoRelationshipGraph({ contacts: googleDelta.contacts, force: true });
+      contactsMerged = Number(contactMerge?.imported || contactMerge?.merged || 0);
+      store.set('googleSyncHealth', {
+        ...(store.get('googleSyncHealth') || {}),
+        contactsMerged
+      });
+    }
+
     // --- L2 - L5: Memory Graph Build ---
     sendProgress('Building Episode Memory (L2)...', 0, 1);
     await engine.runEpisodeJob(apiKey || null);
+    await runRelationshipGraphUpdate({ backfill: true }).catch((e) => console.warn('[fullGoogleSync] Relationship graph update failed:', e?.message || e));
+    await runSemanticWindowGeneration().catch((e) => console.warn('[fullGoogleSync] Semantic window generation failed:', e?.message || e));
 
     if (apiKey) {
       sendProgress('Synthesizing Core Insights (L4/L5)...', 0, 1);
       await engine.runWeeklyInsightJob(apiKey);
     }
 
+    await persistGoogleSyncProjectNote();
     sendProgress('Sync Complete', 100, 100);
     store.set('initialSyncDone', true);
+    store.set('googleSyncHealth', {
+      ...(store.get('googleSyncHealth') || {}),
+      mode,
+      phase: 'Sync Complete',
+      done: 100,
+      total: 100,
+      rawIngested: allUnified.length,
+      contactsMerged,
+      episodesBuilt: 1,
+      semanticNodesUpdated: 1
+    });
     return googleData;
   } catch (error) {
     console.error('Error syncing Google Data:', error);
@@ -10572,7 +10820,7 @@ async function fullGoogleSync({ since, forceHistoricalBackfill = false } = {}) {
 }
 
 ipcMain.handle('get-google-data', () => {
-  return store.get('googleData') || { gmail: [], calendar: [], drive: [] };
+  return store.get('googleData') || { gmail: [], calendar: [], contacts: [], drive: [] };
 });
 
 // ── Memory Graph Status & Chat Integration ───────────────────────────────
@@ -11367,12 +11615,22 @@ ipcMain.handle('clear-extension-data', async () => {
 });
 
 ipcMain.handle('get-relationship-contacts', async (_event, payload = {}) => {
+  if (!RELATIONSHIP_FEATURE_ENABLED) return [];
   await syncAppleContactsIntoRelationshipGraph({
     force: Boolean(payload?.forceAppleContactsSync),
     limit: payload?.appleContactsLimit || 500
   }).catch((error) => {
     console.warn('[get-relationship-contacts] Apple Contacts sync skipped:', error?.message || error);
   });
+  const googleData = store.get('googleData') || {};
+  if (Array.isArray(googleData.contacts) && googleData.contacts.length && payload?.forceGoogleContactsSync) {
+    await syncGoogleContactsIntoRelationshipGraph({
+      contacts: googleData.contacts,
+      force: true
+    }).catch((error) => {
+      console.warn('[get-relationship-contacts] Google Contacts sync skipped:', error?.message || error);
+    });
+  }
   return getRelationshipContacts({
     limit: payload?.limit || 50,
     status: payload?.status || null
@@ -11380,6 +11638,7 @@ ipcMain.handle('get-relationship-contacts', async (_event, payload = {}) => {
 });
 
 ipcMain.handle('sync-apple-contacts', async (_event, payload = {}) => {
+  if (!RELATIONSHIP_FEATURE_ENABLED) return { imported: 0, skipped: true, disabled: true };
   return syncAppleContactsIntoRelationshipGraph({
     force: payload?.force !== false,
     limit: payload?.limit || 500
@@ -11387,26 +11646,29 @@ ipcMain.handle('sync-apple-contacts', async (_event, payload = {}) => {
 });
 
 ipcMain.handle('get-relationship-contact-detail', async (_event, contactId) => {
+  if (!RELATIONSHIP_FEATURE_ENABLED) return null;
   return getRelationshipContactDetail(contactId);
 });
 
 ipcMain.handle('update-person-profile', async (_event, payload = {}) => {
+  if (!RELATIONSHIP_FEATURE_ENABLED) return { success: false, disabled: true };
   const contactId = payload?.contactId || payload?.contact_id;
   return updateRelationshipContactProfile(contactId, payload || {});
 });
 
 ipcMain.handle('generate-relationship-draft', async (_event, payload = {}) => {
-  const {
-    buildRelationshipDraftContext,
-    buildDeterministicDraft
-  } = require('./services/relationship-graph');
+  if (!RELATIONSHIP_FEATURE_ENABLED) return { draft: '', context: null, disabled: true };
+  const { generateRelationshipDraft } = require('./services/agent/relationship-suggestions-engine');
   const contactId = payload?.contactId || payload?.contact_id;
-  const context = await buildRelationshipDraftContext(contactId, { suggestionId: payload?.suggestionId || payload?.suggestion_id });
-  if (!context) return { draft: '', context: null, error: 'contact_not_found' };
-  return {
-    draft: buildDeterministicDraft(context),
-    context
-  };
+  if (!contactId) return { draft: '', context: null, error: 'missing_contact_id' };
+  const llmConfig = getSuggestionLLMConfig();
+  const result = await generateRelationshipDraft(
+    contactId,
+    payload?.triggerType || payload?.trigger_type || 'dormancy',
+    payload?.triggerContext || payload?.trigger_context || {},
+    llmConfig
+  ).catch((err) => ({ draft: '', ai_generated: false, context: null, error: err?.message }));
+  return result || { draft: '', context: null, error: 'generation_failed' };
 });
 
 // Persistent todos management

@@ -7,6 +7,8 @@ const { buildHybridGraphRetrieval, formatContext, estimateTokensHeuristic } = re
 const { buildRetrievalThought, widenTemporalWindow, inferSurfaceFamilies } = require('./retrieval-thought-system');
 const { dispatchTool, TOOL_SCHEMAS } = require('./tool-dispatcher');
 
+const RELATIONSHIP_FEATURE_ENABLED = false;
+
 function safeJsonParse(value, fallback) {
   try {
     return JSON.parse(value);
@@ -1732,7 +1734,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       }
     }
 
-    if (/\b(relationship|reconnect|contact|person|people|intro|introduction|follow up|outreach|network)\b/i.test(activeQuery)) {
+    if (RELATIONSHIP_FEATURE_ENABLED && /\b(relationship|reconnect|contact|person|people|intro|introduction|follow up|outreach|network)\b/i.test(activeQuery)) {
       const relationshipEvidence = await lookupRelationshipEvidence(activeQuery, 8);
       if (relationshipEvidence.length) {
       const existingIds = new Set((retrieval.evidence || []).map((item) => item?.id || item?.relationship_contact_id).filter(Boolean));
@@ -2287,7 +2289,7 @@ async function runSynthesizerStage({ query, retrieval, chatHistory, standingNote
   })();
 
   const prompt = `[System]
-You are Weave, a relationship-intelligence copilot. Your tone is warm, capable, calm, and direct.
+You are Weave, a work-memory copilot. Your tone is capable, calm, and direct.
 Behave like a thoughtful operator with strong judgment, not a generic chatbot and not a yes-man.
 Tell the user when their framing is weak, when evidence is thin, or when a recommendation has tradeoffs.
 Use plain ASCII punctuation only. No invented facts. No hype. No therapy language. No urgency theater.
@@ -2304,17 +2306,16 @@ Mode rules:
 Do not claim that a missing dedicated task-manager record means no todos exist if <context_memory> contains actionable suggestions, active suggestions, recent work, emails, calendar items, or open-loop evidence.
 When generating things, always use the retrieved memory/web context as constraints and cite uncertainty plainly. Do not freewheel generic advice when memory is sparse.
 When the answer can be developed, write at least ${policy.minWords} words. Start with the answer, then add related grounded context, adjacent memories, useful implications, or next steps. If there is truly no supporting context, stay shorter and ask one concise follow-up question.
-Do not create contacts, automations, external actions, or UI cards unless the user explicitly asks you to create/save them and the runtime actually supports that action.
+Do not create automations, external actions, or UI cards unless the user explicitly asks you to create/save them and the runtime actually supports that action.
 Do not output XML tags or tool instructions.
 Answer strictly from the grounded memory/web context in <context_memory>. If evidence is missing, clearly say what is missing and ask one concise follow-up question.
 If the user asks for strategy, recommendations, prioritization, or interpretation, make a real judgment instead of hedging across every option.
-If the user asks for a draft, make it sound natural and specific to the relationship context rather than polished marketing copy.
+If the user asks for a draft, make it sound natural and specific to the grounded work context rather than polished marketing copy.
 If the request is complex, you may open with one short orienting sentence before the main answer, but do not add filler acknowledgments.
 
 [Available Tools]
 You can use tools by outputting <tool_call>{"tool": "name", "input": {...}}</tool_call>.
-Available tools: ${Object.keys(TOOL_SCHEMAS).join(', ')}.
-Example: To create a contact, use <tool_call>{"tool": "contact_create", "input": {"name": "John Doe", "notes": "Met at conference"}}</tool_call>.
+Available tools: ${Object.keys(TOOL_SCHEMAS).filter((name) => RELATIONSHIP_FEATURE_ENABLED || !/^contact_/i.test(name)).join(', ')}.
 When using a tool, you must still provide a helpful response to the user.
 
 [Grounded Context]

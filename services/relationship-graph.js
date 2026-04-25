@@ -7,6 +7,8 @@ const APPLE_CONTACTS_SYNC_TTL_MS = 12 * 60 * 60 * 1000;
 let appleContactsSyncAt = 0;
 let appleContactsSyncInFlight = null;
 let appleContactsLastResult = { imported: 0, skipped: true, source: 'apple_contacts' };
+let googleContactsSyncAt = 0;
+let googleContactsLastResult = { imported: 0, skipped: true, source: 'google_contacts' };
 
 function nowIso() {
   return new Date().toISOString();
@@ -389,9 +391,15 @@ async function upsertRelationshipContact(contact = {}, identifiers = [], evidenc
   const existing = await findContactByIdentifiers(normalizedIdentifiers, displayName);
   const id = existing?.id || stableId('rel', normalizedIdentifiers.find((item) => item.identifier_type === 'email')?.normalized_value || normalizedIdentifier(displayName));
   const now = nowIso();
-  const chosenDisplayName = chooseBetterDisplayName(existing?.display_name, displayName);
   const existingMeta = asObj(existing?.metadata);
   const incomingMeta = asObj(parsedContact.metadata);
+  const incomingSources = Array.from(new Set([
+    evidence.source || parsedContact.source || 'memory',
+    ...(asList(incomingMeta.sources || []))
+  ].filter(Boolean)));
+  const applePreferred = Boolean(existingMeta.apple_contacts) || incomingSources.includes('apple_contacts') || Boolean(incomingMeta.apple_contacts);
+  const keepExistingName = applePreferred && existing?.display_name;
+  const chosenDisplayName = keepExistingName ? chooseBetterDisplayName(existing?.display_name, existing?.display_name) : chooseBetterDisplayName(existing?.display_name, displayName);
   const mergedTopics = uniqNormalized([
     ...(existingMeta.topics || []),
     ...(incomingMeta.topics || []),
@@ -413,20 +421,22 @@ async function upsertRelationshipContact(contact = {}, identifiers = [], evidenc
     sources: Array.from(new Set([
       ...asList(existingMeta.sources),
       ...asList(incomingMeta.sources),
-      evidence.source || parsedContact.source || 'memory'
+      ...incomingSources
     ].filter(Boolean))),
     birthday: incomingMeta.birthday || existingMeta.birthday || null,
     apple_contacts: Boolean(incomingMeta.apple_contacts || existingMeta.apple_contacts),
+    google_contacts: Boolean(incomingMeta.google_contacts || existingMeta.google_contacts),
+    google_contact_id: incomingMeta.google_contact_id || existingMeta.google_contact_id || null,
     linkedin_observed: Boolean(parsedContact.linkedin_observed || existingMeta.linkedin_observed),
     score_inputs: existingMeta.score_inputs || null,
-    first_name: incomingMeta.first_name || existingMeta.first_name || splitNameParts(chosenDisplayName).first_name || '',
-    last_name: incomingMeta.last_name || existingMeta.last_name || splitNameParts(chosenDisplayName).last_name || '',
+    first_name: applePreferred ? (existingMeta.first_name || incomingMeta.first_name || splitNameParts(chosenDisplayName).first_name || '') : (incomingMeta.first_name || existingMeta.first_name || splitNameParts(chosenDisplayName).first_name || ''),
+    last_name: applePreferred ? (existingMeta.last_name || incomingMeta.last_name || splitNameParts(chosenDisplayName).last_name || '') : (incomingMeta.last_name || existingMeta.last_name || splitNameParts(chosenDisplayName).last_name || ''),
     display_name: chosenDisplayName,
     editable_overrides: asObj(existingMeta.editable_overrides)
   };
   const lastInteraction = parsedContact.last_interaction_at || evidence.timestamp || existing?.last_interaction_at || null;
-  const company = parsedContact.company || existing?.company || null;
-  const role = parsedContact.role || existing?.role || null;
+  const company = applePreferred ? (existing?.company || parsedContact.company || null) : (parsedContact.company || existing?.company || null);
+  const role = applePreferred ? (existing?.role || parsedContact.role || null) : (parsedContact.role || existing?.role || null);
   const tier = parsedContact.relationship_tier || existing?.relationship_tier || (isEmail(displayName) ? 'network' : 'observed_contact');
 
   await db.runQuery(
@@ -940,13 +950,14 @@ async function rescoreRelationshipContacts() {
   }
 }
 
-async function backfillRelationshipContacts() {
+async function backfillRelationshipContacts(limit = 2500) {
   await ensureRelationshipTables();
   const rows = await db.allQuery(
     `SELECT id, type, source, app, title, text, timestamp, occurred_at, participants, metadata
      FROM events
      ORDER BY datetime(COALESCE(occurred_at, timestamp)) DESC
-     LIMIT 2500`
+     LIMIT ?`,
+    [Math.max(1, Number(limit || 2500))]
   ).catch(() => []);
 
   const known = await loadKnownIdentifiers();
@@ -973,7 +984,8 @@ async function backfillRelationshipContacts() {
 
 async function runRelationshipGraphJob(options = {}) {
   await ensureRelationshipTables();
-  if (options.backfill) await backfillRelationshipContacts();
+  if (options.backfill) await backfillRelationshipContacts(2500);
+  else await backfillRelationshipContacts(300);
   await rescoreRelationshipContacts();
   const count = await db.getQuery(`SELECT COUNT(*) AS count FROM relationship_contacts`).catch(() => ({ count: 0 }));
   return { contacts: Number(count?.count || 0), backfill: Boolean(options.backfill), updated_at: nowIso() };
@@ -1036,10 +1048,55 @@ async function syncAppleContactsIntoRelationshipGraph({ force = false, limit = 5
   return appleContactsSyncInFlight;
 }
 
+async function syncGoogleContactsIntoRelationshipGraph({ contacts = [], force = false } = {}) {
+  await ensureRelationshipTables();
+  if (!force && googleContactsLastResult && contacts.length === 0) {
+    return googleContactsLastResult;
+  }
+  let imported = 0;
+  for (const row of contacts || []) {
+    const emails = asList(row.emails);
+    const phones = asList(row.phones);
+    const primaryEmail = emails[0] || '';
+    const contact = await upsertRelationshipContact(
+      {
+        name: row.name || primaryEmail,
+        email: primaryEmail,
+        company: row.company || null,
+        role: row.role || null,
+        metadata: {
+          emails,
+          phones,
+          addresses: asList(row.addresses),
+          urls: asList(row.urls),
+          birthday: row.birthday || null,
+          notes: trim(row.notes || '', 800),
+          google_contacts: true,
+          google_contact_id: row.resourceName || row.id || null,
+          first_name: row.first_name || '',
+          last_name: row.last_name || ''
+        },
+        relationship_tier: 'google_contact'
+      },
+      [
+        ...emails.map((email) => ({ type: 'email', value: email, source_label: 'google_contacts', confidence: 1 })),
+        ...phones.map((phone) => ({ type: 'phone', value: phone, source_label: 'google_contacts', confidence: 0.92 })),
+        row.name ? { type: 'name', value: row.name, source_label: 'google_contacts', confidence: 0.95 } : null,
+        row.resourceName ? { type: 'external_id', value: row.resourceName, source_label: 'google_contacts', confidence: 1 } : null
+      ].filter(Boolean),
+      { source: 'google_contacts', timestamp: nowIso() }
+    );
+    if (contact?.id) imported += 1;
+  }
+  googleContactsSyncAt = Date.now();
+  googleContactsLastResult = { imported, merged: imported, source: 'google_contacts', skipped: false };
+  return googleContactsLastResult;
+}
+
 async function getRelationshipContacts({ limit = 50, status = null } = {}) {
   await ensureRelationshipTables();
   const params = [];
-  const where = [`json_extract(COALESCE(metadata, '{}'), '$.apple_contacts') = 1`];
+  const where = [];
   if (status) {
     where.push(`status = ?`);
     params.push(status);
@@ -1122,6 +1179,11 @@ async function getRelationshipContactDetail(contactId) {
       addresses: asList(metadata.addresses),
       urls: asList(metadata.urls),
       birthday: metadata.birthday || null
+    },
+    source_platforms: {
+      apple_contacts: Boolean(metadata.apple_contacts),
+      google_contacts: Boolean(metadata.google_contacts),
+      google_contact_id: metadata.google_contact_id || null
     },
     editable_fields: {
       display_name: overrides.display_name || metadata.display_name || contact.display_name || '',
@@ -1311,6 +1373,7 @@ module.exports = {
   buildDeterministicDraft,
   searchRelationshipContext,
   syncAppleContactsIntoRelationshipGraph,
+  syncGoogleContactsIntoRelationshipGraph,
   __test__: {
     normalizeName,
     isLikelyPersonName,
