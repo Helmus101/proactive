@@ -119,6 +119,8 @@ function makeChatRequestKey(senderId, requestId) {
 
 function startActiveChatRequest(senderId, requestId) {
   const key = makeChatRequestKey(senderId, requestId);
+  appInteractionState.chatActive = true;
+  markAppInteraction("chat-start");
   const previousKey = activeChatRequestsBySender.get(senderId);
   if (previousKey && previousKey !== key) {
     const previous = activeChatRequestRegistry.get(previousKey);
@@ -150,9 +152,12 @@ function cancelActiveChatRequest(senderId, requestId) {
 
 function finishActiveChatRequest(senderId, requestId) {
   const key = makeChatRequestKey(senderId, requestId);
+  appInteractionState.chatActive = true;
+  markAppInteraction("chat-start");
   const activeKey = activeChatRequestsBySender.get(senderId);
   if (activeKey === key) activeChatRequestsBySender.delete(senderId);
   activeChatRequestRegistry.delete(key);
+  if (activeChatRequestRegistry.size === 0) appInteractionState.chatActive = false;
 }
 
 function compactChatStepPayload(data = {}, requestId) {
@@ -701,7 +706,8 @@ const performanceState = {
 const appInteractionState = {
   focused: false,
   minimized: false,
-  lastInteractionAt: 0
+  lastInteractionAt: 0,
+  chatActive: false
 };
 const heavyJobState = {
   activeJob: null,
@@ -888,7 +894,7 @@ function looksRelationshipSuggestion(item = {}) {
 function markAppInteraction(reason = 'interaction') {
   appInteractionState.lastInteractionAt = Date.now();
   if (reason) {
-    store.set('lastAppInteraction', {
+    debouncedStoreSet('lastAppInteraction', {
       reason,
       at: new Date(appInteractionState.lastInteractionAt).toISOString()
     });
@@ -899,6 +905,7 @@ function isAppInteractionHot() {
   if (!mainWindow || mainWindow.isDestroyed()) return false;
   if (appInteractionState.minimized) return false;
   if (!appInteractionState.focused) return false;
+  if (appInteractionState.chatActive) return true;
   return (Date.now() - Number(appInteractionState.lastInteractionAt || 0)) < APP_ACTIVE_CAPTURE_COOLDOWN_MS;
 }
 
@@ -907,7 +914,7 @@ function updatePerformanceState(next = {}) {
   Object.assign(performanceState, next || {});
   const newMode = getPerformanceMode();
 
-  store.set("performanceState", {
+  debouncedStoreSet("performanceState", {
     ...performanceState,
     mode: newMode,
     updated_at: new Date().toISOString()
@@ -965,7 +972,7 @@ function setStudySessionState(nextState = {}) {
     ...(getStudySessionState() || {}),
     ...(nextState || {})
   };
-  store.set('studySessionState', activeStudySession);
+  debouncedStoreSet('studySessionState', activeStudySession);
   emitStudySessionUpdate();
   return activeStudySession;
 }
@@ -1656,24 +1663,26 @@ function buildPerceptualFingerprintFromPngBuffer(pngBuffer) {
     if (!pngBuffer || !pngBuffer.length) return null;
     const image = nativeImage.createFromBuffer(pngBuffer);
     if (!image || image.isEmpty()) return null;
-    const normalized = image.resize({ width: 32, height: 18, quality: 'good' });
+    // Lower resolution for faster processing and better fuzzy matching
+    const normalized = image.resize({ width: 16, height: 9, quality: 'good' });
     const bitmap = normalized.toBitmap();
     if (!bitmap || !bitmap.length) return null;
 
     const bins = new Array(64).fill(0);
     const counts = new Array(64).fill(0);
-    const pixelCount = Math.floor(bitmap.length / 4);
-    for (let idx = 0; idx < pixelCount; idx += 4) {
-      const offset = idx * 4;
-      const r = bitmap[offset] || 0;
-      const g = bitmap[offset + 1] || 0;
-      const b = bitmap[offset + 2] || 0;
-      const gray = Math.round((r * 0.299) + (g * 0.587) + (b * 0.114));
-      const bin = Math.min(63, Math.floor((idx / Math.max(1, pixelCount - 1)) * 64));
+    const len = bitmap.length;
+    // Optimized loop: process 4 pixels at a time, use bitwise for gray calculation
+    for (let i = 0; i < len; i += 16) {
+      const r = bitmap[i];
+      const g = bitmap[i + 1];
+      const b = bitmap[i + 2];
+      // gray = (r*30 + g*59 + b*11) / 100 approx.
+      const gray = (r * 30 + g * 59 + b * 11) >> 6;
+      const bin = Math.min(63, (i * 64 / len) | 0);
       bins[bin] += gray;
-      counts[bin] += 1;
+      counts[bin]++;
     }
-    return bins.map((sum, i) => Math.round(sum / Math.max(1, counts[i])));
+    return bins.map((sum, i) => counts[i] ? (sum / counts[i]) | 0 : 0);
   } catch (_) {
     return null;
   }
