@@ -21,6 +21,13 @@ if (process.stderr && typeof process.stderr.on === 'function') {
 const { app, BrowserWindow, ipcMain, session, desktopCapturer, systemPreferences, screen, globalShortcut, powerMonitor, nativeImage } = require('electron');
 const crypto = require('crypto');
 const path = require('path');
+const Utils = require('./services/utils');
+const AppState = require('./services/app-state');
+const ChatManagement = require('./services/chat-management');
+const BrowserHistory = require('./services/browser-history');
+const HeavyJobQueue = require('./services/heavy-job-queue');
+const RadarState = require('./services/radar-state');
+
 const os = require('os');
 const fs = require('fs');
 const fsPromises = fs.promises;
@@ -137,12 +144,6 @@ const rebuildInvertedIndex = (...args) => lazyRequire('./services/summarizer/ind
 // Global state
 let mainWindow;
 let voiceHudWindow = null;
-const appInteractionState = {
-  focused: false,
-  minimized: false,
-  chatActive: false,
-  lastInteractionAt: 0
-};
 
 // Initialize store early
 const store = new Store();
@@ -199,10 +200,10 @@ function createWindow() {
 
   appInteractionState.focused = mainWindow.isFocused();
   appInteractionState.minimized = mainWindow.isMinimized();
-  if (appInteractionState.focused) markAppInteraction('window-created');
+  if (appInteractionState.focused) AppState.markAppInteraction('window-created');
   mainWindow.on('focus', () => {
     appInteractionState.focused = true;
-    markAppInteraction('focus');
+    AppState.markAppInteraction('focus');
   });
   mainWindow.on('blur', () => {
     appInteractionState.focused = false;
@@ -212,10 +213,10 @@ function createWindow() {
   });
   mainWindow.on('restore', () => {
     appInteractionState.minimized = false;
-    markAppInteraction('restore');
+    AppState.markAppInteraction('restore');
   });
   mainWindow.webContents.on('before-input-event', () => {
-    markAppInteraction('input');
+    AppState.markAppInteraction('input');
   });
 
   if (process.argv.includes('--dev')) {
@@ -257,7 +258,35 @@ function createVoiceHudWindow() {
 }
 
 function ensureVoiceHudVisible() {
-  const win = createVoiceHudWindow();
+  const win = 
+  createVoiceHudWindow();
+
+  // Initialize services
+  AppState.init({
+    mainWindow,
+    debouncedStoreSet,
+    startSensorCaptureLoop,
+    startPeriodicScreenshotCapture,
+    getScreenshotsPausedForDisplayOff: () => screenshotsPausedForDisplayOff,
+    getPeriodicScreenshotRunning: () => periodicScreenshotRunning,
+    isChatActive: () => ChatManagement.ChatManagement.isChatActive()
+  });
+  ChatManagement.init({
+    appState: AppState
+  });
+  BrowserHistory.init({
+    store,
+    startupTrace,
+    updateMemoryGraphHealth,
+    emitMemoryGraphUpdate
+  });
+  HeavyJobQueue.init({
+    appState: AppState,
+    chatManagement: ChatManagement,
+    startupTrace
+  });
+  RadarState.init({ store });
+
   if (!win) return null;
   try {
     const cursor = screen.getCursorScreenPoint();
@@ -363,7 +392,7 @@ function makeChatRequestKey(senderId, requestId) {
 function startActiveChatRequest(senderId, requestId) {
   const key = makeChatRequestKey(senderId, requestId);
   appInteractionState.chatActive = true;
-  markAppInteraction("chat-start");
+  AppState.markAppInteraction("chat-start");
   const previousKey = activeChatRequestsBySender.get(senderId);
   if (previousKey && previousKey !== key) {
     const previous = activeChatRequestRegistry.get(previousKey);
@@ -387,7 +416,7 @@ function getActiveChatRequest(senderId, requestId) {
 }
 
 function cancelActiveChatRequest(senderId, requestId) {
-  const record = getActiveChatRequest(senderId, requestId);
+  const record = ChatManagement.getActiveChatRequest(senderId, requestId);
   if (!record) return false;
   record.cancelled = true;
   return true;
@@ -396,7 +425,7 @@ function cancelActiveChatRequest(senderId, requestId) {
 function finishActiveChatRequest(senderId, requestId) {
   const key = makeChatRequestKey(senderId, requestId);
   appInteractionState.chatActive = true;
-  markAppInteraction("chat-start");
+  AppState.markAppInteraction("chat-start");
   const activeKey = activeChatRequestsBySender.get(senderId);
   if (activeKey === key) activeChatRequestsBySender.delete(senderId);
   activeChatRequestRegistry.delete(key);
@@ -594,7 +623,7 @@ async function refreshBrowserHistory(options = {}) {
   browserHistoryRefreshPromise = (async () => {
     const startedAt = Date.now();
     try {
-      const fresh = await withTimeout(getBrowserHistory(), timeoutMs, 'refreshBrowserHistory');
+      const fresh = await withTimeout(BrowserHistory.getBrowserHistory(), timeoutMs, 'refreshBrowserHistory');
       const normalized = updateBrowserHistoryCache(fresh, reason);
       browserHistoryRefreshMeta.lastSuccessAt = Date.now();
       browserHistoryRefreshMeta.lastError = null;
@@ -642,7 +671,7 @@ function scoreHistoryItemForScreenshot(item = {}, screenshotTs, appName = '', wi
   const titleLower = String(windowTitle || '').toLowerCase();
   const itemTitleLower = String(item.title || '').toLowerCase();
   const domainLower = String(item.domain || '').toLowerCase();
-  const browserActive = isBrowserAppName(appName);
+  const browserActive = BrowserHistory.isBrowserAppName(appName);
   const deltaMs = Math.abs(Number(screenshotTs || 0) - Number(item.timestamp || 0));
   const allowedWindowMs = browserActive ? 15 * 60 * 1000 : 3 * 60 * 1000;
   if (!deltaMs || deltaMs > allowedWindowMs) return 0;
@@ -657,7 +686,7 @@ function scoreHistoryItemForScreenshot(item = {}, screenshotTs, appName = '', wi
 }
 
 async function findAssociatedUrlsForScreenshot({ timestamp, appName = '', windowTitle = '', limit = 5 } = {}) {
-  const history = getCachedBrowserHistory({ maxAgeMs: SCREENSHOT_BROWSER_HISTORY_MAX_AGE_MS });
+  const history = BrowserHistory.getCachedBrowserHistory({ maxAgeMs: SCREENSHOT_BROWSER_HISTORY_MAX_AGE_MS });
   if (!Array.isArray(history) || !history.length) return [];
 
   return history
@@ -894,20 +923,6 @@ function uniqById(items = []) {
 const oauthApp = express();
 let oauthPort = process.env.OAUTH_PORT || 3002; // Moved from 3001 to avoid overlap with WebSocket server
 
-let mainWindow;
-let authWindow;
-let voiceHudWindow = null;
-let pendingAITasks = [];
-let sensorCaptureTimer = null;
-let periodicScreenshotTimer = null;
-let periodicScreenshotWatchdogTimer = null;
-let sensorCaptureInProgress = false;
-let sensorCaptureStartedAt = 0;
-let activeVoiceSession = null;
-let activeStudySession = null;
-const DEFAULT_VOICE_SHORTCUT = 'CommandOrControl+Shift+Space';
-const LEGACY_VOICE_SHORTCUT = 'CommandOrControl+Space';
-const PLANNER_STEP_THROTTLE_MS = 700;
 const SCREENSHOT_RETENTION_DAYS = 36500;
 
 function inferStudySignal(text = '', event = {}) {
@@ -974,12 +989,6 @@ const performanceState = {
   onBattery: false,
   thermalState: 'unknown'
 };
-const appInteractionState = {
-  focused: false,
-  minimized: false,
-  lastInteractionAt: 0,
-  chatActive: false
-};
 const heavyJobState = {
   activeJob: null,
   startedAt: 0,
@@ -1009,17 +1018,17 @@ function getPerformanceMode() {
 }
 
 function isReducedLoadMode() {
-  const mode = getPerformanceMode();
+  const mode = AppState.getPerformanceMode();
   return mode === 'reduced' || mode === 'deep-idle';
 }
 
-function getPeriodicScreenshotIntervalMs(mode = getPerformanceMode()) {
+function getPeriodicScreenshotIntervalMs(mode = AppState.getPerformanceMode()) {
   if (mode === 'deep-idle') return 45 * 60 * 1000;   // 45 min when idle - INCREASED
   if (mode === 'reduced')   return 20 * 60 * 1000;    // 20 min on battery/thermal - INCREASED
   return PERIODIC_SCREENSHOT_INTERVAL_MS;             // 45 sec normal - USER REQUESTED
 }
 
-function getPeriodicScreenshotWakeDelayMs(mode = getPerformanceMode()) {
+function getPeriodicScreenshotWakeDelayMs(mode = AppState.getPerformanceMode()) {
   if (mode === 'deep-idle') return 60 * 1000; // 1 min after wake in idle
   if (mode === 'reduced')   return 30 * 1000; // 30s after wake in reduced
   return PERIODIC_SCREENSHOT_WAKE_DELAY_MS;   // 15s after wake in normal
@@ -1027,7 +1036,7 @@ function getPeriodicScreenshotWakeDelayMs(mode = getPerformanceMode()) {
 
 function canRunHeavyJob(lastRunAt = 0) {
   const idleTime = (powerMonitor && typeof powerMonitor.getSystemIdleTime === 'function') ? powerMonitor.getSystemIdleTime() : 0;
-  const mode = getPerformanceMode();
+  const mode = AppState.getPerformanceMode();
   
   // More aggressive throttling in reduced modes
   if (mode === 'deep-idle') {
@@ -1043,8 +1052,8 @@ function canRunHeavyJob(lastRunAt = 0) {
 
 function shouldDeferBackgroundWork(label = 'background') {
   const idleTime = (powerMonitor && typeof powerMonitor.getSystemIdleTime === 'function') ? powerMonitor.getSystemIdleTime() : 0;
-  const appBusy = isAppInteractionHot() || (activeChatRequestRegistry && activeChatRequestRegistry.size > 0);
-  const mode = getPerformanceMode();
+  const appBusy = AppState.isAppInteractionHot() || (activeChatRequestRegistry && activeChatRequestRegistry.size > 0);
+  const mode = AppState.getPerformanceMode();
   
   // More aggressive deferral based on performance mode
   let deferThreshold = 30; // default 30 seconds
@@ -1204,9 +1213,9 @@ function isAppInteractionHot() {
 }
 
 function updatePerformanceState(next = {}) {
-  const oldMode = getPerformanceMode();
+  const oldMode = AppState.getPerformanceMode();
   Object.assign(performanceState, next || {});
-  const newMode = getPerformanceMode();
+  const newMode = AppState.getPerformanceMode();
 
   debouncedStoreSet("performanceState", {
     ...performanceState,
@@ -1565,10 +1574,10 @@ function createWindow() {
 
   appInteractionState.focused = mainWindow.isFocused();
   appInteractionState.minimized = mainWindow.isMinimized();
-  if (appInteractionState.focused) markAppInteraction('window-created');
+  if (appInteractionState.focused) AppState.markAppInteraction('window-created');
   mainWindow.on('focus', () => {
     appInteractionState.focused = true;
-    markAppInteraction('focus');
+    AppState.markAppInteraction('focus');
   });
   mainWindow.on('blur', () => {
     appInteractionState.focused = false;
@@ -1578,10 +1587,10 @@ function createWindow() {
   });
   mainWindow.on('restore', () => {
     appInteractionState.minimized = false;
-    markAppInteraction('restore');
+    AppState.markAppInteraction('restore');
   });
   mainWindow.webContents.on('before-input-event', () => {
-    markAppInteraction('input');
+    AppState.markAppInteraction('input');
   });
 
   if (process.argv.includes('--dev')) {
@@ -1788,7 +1797,7 @@ function getSensorStatus() {
     screenPermission,
     transport: 'apple-vision-frontmost-window',
     study_session: getStudySessionState(),
-    performance_mode: isReducedLoadMode() ? 'reduced' : 'normal'
+    performance_mode: AppState.isReducedLoadMode() ? 'reduced' : 'normal'
   };
 }
 
@@ -1919,7 +1928,7 @@ function mergeSuggestionQueues(existing = [], incoming = [], limit = MAX_PRACTIC
 
 async function ensureSensorStorageDir() {
   const capturesDir = path.join(app.getPath('userData'), 'screenshots');
-  if (!(await existsAsync(capturesDir))) {
+  if (!(await Utils.existsAsync(capturesDir))) {
     await fs.promises.mkdir(capturesDir, { recursive: true });
   }
   return capturesDir;
@@ -2013,7 +2022,7 @@ async function deleteSensitiveCapture(imagePath, eventId, reason) {
 function runVisionOCR(imagePath) {
   const scriptPath = path.join(__dirname, 'ocr_vision.swift');
   const timeoutMs = Number(process.env.VISION_OCR_TIMEOUT_MS || 12000); // must be < outer 25s cap
-  const accuracy = (getPerformanceMode() === 'reduced' || getPerformanceMode() === 'deep-idle') ? 'fast' : 'accurate';
+  const accuracy = (AppState.getPerformanceMode() === 'reduced' || AppState.getPerformanceMode() === 'deep-idle') ? 'fast' : 'accurate';
   
   return new Promise((resolve) => {
     execFile('/usr/bin/xcrun', ['swift', scriptPath, imagePath, accuracy], { timeout: timeoutMs }, (error, stdout, stderr) => {
@@ -2211,7 +2220,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
           else resolve();
         });
       });
-      if (await existsAsync(imagePath)) {
+      if (await Utils.existsAsync(imagePath)) {
         captureMode = 'frontmost-window';
         sourceName = windowContext.windowTitle || windowContext.appName || 'Window';
         capturePngBuffer = await fs.promises.readFile(imagePath).catch(() => null);
@@ -2233,7 +2242,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
             }
           );
         });
-        if (await existsAsync(imagePath)) {
+        if (await Utils.existsAsync(imagePath)) {
           captureMode = 'frontmost-window-bounds';
           sourceName = windowContext.windowTitle || windowContext.appName || 'Window';
           capturePngBuffer = await fs.promises.readFile(imagePath).catch(() => null);
@@ -2246,7 +2255,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   if (!String(captureMode).startsWith('frontmost-window')) {
     const primary = screen.getPrimaryDisplay();
     const fullSize = primary?.size || { width: 1920, height: 1080 };
-    const reducedLoad = isReducedLoadMode();
+    const reducedLoad = AppState.isReducedLoadMode();
     
     // Further reduce resolution to minimize GPU load
     const maxWidth = reducedLoad ? 640 : 960; // REDUCED from 960/1440
@@ -2298,7 +2307,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     sourceName = source.name || 'Screen';
   }
 
-  if (!capturePngBuffer && (await existsAsync(imagePath))) {
+  if (!capturePngBuffer && (await Utils.existsAsync(imagePath))) {
     capturePngBuffer = await fs.promises.readFile(imagePath).catch(() => null);
   }
 
@@ -2316,8 +2325,8 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     return {
       skipped: true,
       reason: 'low_visual_change',
-      screenshot_present: Boolean(await existsAsync(imagePath)),
-      imagePath: (await existsAsync(imagePath)) ? imagePath : null,
+      screenshot_present: Boolean(await Utils.existsAsync(imagePath)),
+      imagePath: (await Utils.existsAsync(imagePath)) ? imagePath : null,
       screenshot_filename: filename,
       activeApp: windowContext.appName || '',
       activeWindowTitle: windowContext.windowTitle || '',
@@ -2411,7 +2420,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   };
   if (windowContext.error) event.windowContextError = windowContext.error;
   if (ocr.error) event.ocrError = ocr.error;
-  if (isReducedLoadMode()) lastLowPowerOCRAt = Date.now();
+  if (AppState.isReducedLoadMode()) lastLowPowerOCRAt = Date.now();
 
   try {
     const urlAssociationStartedAt = Date.now();
@@ -2455,8 +2464,8 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
       filter_reason: filterCheck.reason,
       sensitive_category: filterCheck.category || null,
       retained_for_durability: Boolean(filterResult?.retained_for_durability),
-      screenshot_present: Boolean(await existsAsync(imagePath)),
-      imagePath: (await existsAsync(imagePath)) ? imagePath : null
+      screenshot_present: Boolean(await Utils.existsAsync(imagePath)),
+      imagePath: (await Utils.existsAsync(imagePath)) ? imagePath : null
     };
   }
 
@@ -2552,7 +2561,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     // console.log(`[SensorCaptureTiming] total=${Date.now() - captureStartedAt}ms ocr=${ocrDuration}ms urls=${urlAssociationDurationMs}ms persist=${eventPersistenceDurationMs}ms`);
 
     // Throttle expensive background suggestion generation to avoid UI slowdown.
-    const triggerInterval = isReducedLoadMode()
+    const triggerInterval = AppState.isReducedLoadMode()
       ? Math.max(CAPTURE_TRIGGER_MIN_INTERVAL_MS * 2, LOW_POWER_HEAVY_JOB_MIN_GAP_MS)
       : Math.max(CAPTURE_TRIGGER_MIN_INTERVAL_MS, LOW_POWER_HEAVY_JOB_MIN_GAP_MS);
     const activeSuggestionCount = mergeSuggestionQueues(store.get('suggestions') || [], [], MAX_PRACTICAL_SUGGESTIONS).length;
@@ -2597,7 +2606,7 @@ function startSensorCaptureLoop(mode = null) {
 
   // Startup capture is handled by the periodic screenshot loop (startPeriodicScreenshotCapture).
 
-  const intervalMs = getPeriodicScreenshotIntervalMs(mode || getPerformanceMode());
+  const intervalMs = getPeriodicScreenshotIntervalMs(mode || AppState.getPerformanceMode());
   sensorCaptureTimer = setInterval(() => {
     // Prevent overlapping captures and add additional throttling
     if (periodicScreenshotRunning || sensorCaptureInProgress || screenshotsPausedForDisplayOff) return;
@@ -2759,7 +2768,7 @@ function resumePeriodicScreenshotCapture(reason = 'display/system awake') {
 function startPeriodicScreenshotCapture(mode = null, options = {}) {
   clearPeriodicScreenshotTimer();
 
-  const currentMode = mode || getPerformanceMode();
+  const currentMode = mode || AppState.getPerformanceMode();
   const intervalMs = getPeriodicScreenshotIntervalMs(currentMode);
   const initialDelayMs = Math.max(1000, Number(options.initialDelayMs || getPeriodicScreenshotWakeDelayMs(currentMode)));
 
@@ -2821,7 +2830,7 @@ function scheduleDailyTasks() {
     try {
       // Update user patterns based on today's activity
       const userProfile = store.get('userProfile') || {};
-      const browsingHistory = await refreshBrowserHistory({
+      const browsingHistory = await BrowserHistory.refreshBrowserHistory({
         reason: 'pattern_update',
         maxAgeMs: BACKGROUND_BROWSER_HISTORY_MAX_AGE_MS
       });
@@ -2863,7 +2872,7 @@ async function runMinutelySync() {
     return;
   }
   if (!beginHeavyJob('gsuite_sync')) {
-    enqueueHeavyJob('gsuite_sync', () => runMinutelySync(), { source: 'scheduler' });
+    HeavyJobQueue.enqueueHeavyJob('gsuite_sync', () => runMinutelySync(), { source: 'scheduler' });
     return;
   }
   global.__gsuite_sync_lock = true;
@@ -3003,7 +3012,7 @@ async function runMinutelySync() {
         });
       }
 
-      const browserHistory = await refreshBrowserHistory({
+      const browserHistory = await BrowserHistory.refreshBrowserHistory({
         reason: 'minutely_sync',
         maxAgeMs: BACKGROUND_BROWSER_HISTORY_MAX_AGE_MS
       });
@@ -3040,7 +3049,7 @@ async function runMinutelySync() {
 
       console.log(`[runMinutelySync] Ingested ${ingestedCount} new raw events into SQLite L1. Checks: emails=${newEmailCount}, new_events=${newEventCount}, edited_events=${editedEventCount}, contacts_merged=${contactsMerged}, cursor_advanced=${shouldAdvanceLastSync}`);
       if (RELATIONSHIP_FEATURE_ENABLED && ingestedCount > 0) {
-        enqueueHeavyJob('relationship_graph', () => runRelationshipGraphUpdate({ backfill: false }), { source: 'sync_followup' });
+        HeavyJobQueue.enqueueHeavyJob('relationship_graph', () => runRelationshipGraphUpdate({ backfill: false }), { source: 'sync_followup' });
       }
       updateMemoryGraphHealth({
         syncStatus: 'idle',
@@ -3088,12 +3097,12 @@ function startMinutelySyncLoop() {
 
 function startSourceWarmup() {
   if (!heavyJobState.activeJob) {
-    refreshBrowserHistory({
+    BrowserHistory.refreshBrowserHistory({
       reason: 'startup_warmup',
       maxAgeMs: BACKGROUND_BROWSER_HISTORY_MAX_AGE_MS
     }).catch((e) => console.warn('[Warmup] Browser history warmup failed:', e?.message || e));
   }
-  enqueueHeavyJob('gsuite_sync', () => runMinutelySync(), { source: 'startup_warmup' });
+  HeavyJobQueue.enqueueHeavyJob('gsuite_sync', () => runMinutelySync(), { source: 'startup_warmup' });
   drainPendingHeavyJobs();
 }
 
@@ -3126,7 +3135,7 @@ async function runRelationshipGraphUpdate(options = {}) {
   }
   const jobName = options?.backfill ? 'relationship_graph_backfill' : 'relationship_graph';
   if (!beginHeavyJob(jobName, { source: options?.force ? 'manual' : 'background' })) {
-    if (!options?.force) enqueueHeavyJob(jobName, () => runRelationshipGraphUpdate(options), { source: 'scheduler' });
+    if (!options?.force) HeavyJobQueue.enqueueHeavyJob(jobName, () => runRelationshipGraphUpdate(options), { source: 'scheduler' });
     return { contacts: 0, deferred: true, blocked_by: heavyJobState.activeJob };
   }
   try {
@@ -3170,7 +3179,7 @@ async function runEpisodeGeneration() {
     return;
   }
   if (!beginHeavyJob('episode_generation')) {
-    enqueueHeavyJob('episode_generation', () => runEpisodeGeneration(), { source: 'scheduler' });
+    HeavyJobQueue.enqueueHeavyJob('episode_generation', () => runEpisodeGeneration(), { source: 'scheduler' });
     return;
   }
   lastEpisodeHeavyRunAt = Date.now();
@@ -3226,7 +3235,7 @@ async function runSemanticWindowGeneration() {
       return;
     }
     if (!beginHeavyJob('semantic_window')) {
-      enqueueHeavyJob('semantic_window', () => runSemanticWindowGeneration(), { source: 'scheduler' });
+      HeavyJobQueue.enqueueHeavyJob('semantic_window', () => runSemanticWindowGeneration(), { source: 'scheduler' });
       return;
     }
     const startedAt = Date.now();
@@ -3283,7 +3292,7 @@ async function runSuggestionEngineJob(options = {}) {
   }
   if (!beginHeavyJob('radar_generation', { source: force ? 'manual' : 'background' })) {
     suggestionRunQueued = true;
-    if (!force) enqueueHeavyJob('radar_generation', () => runSuggestionEngineJob(options), { source: 'scheduler' });
+    if (!force) HeavyJobQueue.enqueueHeavyJob('radar_generation', () => runSuggestionEngineJob(options), { source: 'scheduler' });
     return { deferred: true, blocked_by: heavyJobState.activeJob };
   }
   lastSuggestionHeavyRunAt = Date.now();
@@ -3370,7 +3379,7 @@ async function runWeeklyInsightJobScheduled() {
   try {
     if (shouldDeferBackgroundWork('WeeklyInsight')) return;
     if (!beginHeavyJob('weekly_insight')) {
-      enqueueHeavyJob('weekly_insight', () => runWeeklyInsightJobScheduled(), { source: 'scheduler' });
+      HeavyJobQueue.enqueueHeavyJob('weekly_insight', () => runWeeklyInsightJobScheduled(), { source: 'scheduler' });
       return;
     }
     const apiKey = process.env.DEEPSEEK_API_KEY;
@@ -3408,7 +3417,7 @@ async function runDailyInsightsScheduled() {
   try {
     if (shouldDeferBackgroundWork('DailyInsight')) return;
     if (!beginHeavyJob('daily_insight')) {
-      enqueueHeavyJob('daily_insight', () => runDailyInsightsScheduled(), { source: 'scheduler' });
+      HeavyJobQueue.enqueueHeavyJob('daily_insight', () => runDailyInsightsScheduled(), { source: 'scheduler' });
       return;
     }
     const apiKey = process.env.DEEPSEEK_API_KEY;
@@ -3440,7 +3449,7 @@ async function runHourlySemanticPulseJob() {
   try {
     if (shouldDeferBackgroundWork('SemanticPulse')) return;
     if (!beginHeavyJob('semantic_pulse')) {
-      enqueueHeavyJob('semantic_pulse', () => runHourlySemanticPulseJob(), { source: 'scheduler' });
+      HeavyJobQueue.enqueueHeavyJob('semantic_pulse', () => runHourlySemanticPulseJob(), { source: 'scheduler' });
       return;
     }
     const apiKey = process.env.DEEPSEEK_API_KEY;
@@ -3470,7 +3479,7 @@ async function runLivingCoreJobScheduled() {
   try {
     if (shouldDeferBackgroundWork('LivingCore')) return;
     if (!beginHeavyJob('living_core')) {
-      enqueueHeavyJob('living_core', () => runLivingCoreJobScheduled(), { source: 'scheduler' });
+      HeavyJobQueue.enqueueHeavyJob('living_core', () => runLivingCoreJobScheduled(), { source: 'scheduler' });
       return;
     }
     const apiKey = process.env.DEEPSEEK_API_KEY;
@@ -4631,7 +4640,7 @@ class ProactiveSuggestionEngine {
     const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
 
     // Get browser history (filtered to last 7 days)
-    const browserHistory = await refreshBrowserHistory({ reason: 'proactive_collect_signals', force: true });
+    const browserHistory = await BrowserHistory.refreshBrowserHistory({ reason: 'proactive_collect_signals', force: true });
     const recentBrowserHistory = browserHistory.filter(visit =>
       (visit.timestamp || visit.last_visit_time || 0) > sevenDaysAgo
     ).map(visit => ({
@@ -5495,7 +5504,7 @@ async function getBrowserHistory() {
 // Read a single Chromium history DB file and return entries
 async function readChromiumHistoryDB(dbPath, browserName) {
 
-  if (!(await existsAsync(dbPath))) return [];
+  if (!(await Utils.existsAsync(dbPath))) return [];
 
   // Copy first to avoid the browser's exclusive lock
   const tmpPath = path.join(os.tmpdir(), `chromium_hist_${Date.now()}_${Math.random().toString(36).slice(2)}.db`);
@@ -5590,7 +5599,7 @@ async function getChromiumHistory() {
   }
 
   for (const { name, base } of browserBases) {
-    if (!(await existsAsync(base))) continue;
+    if (!(await Utils.existsAsync(base))) continue;
 
     // Try Default profile + numbered profiles (Profile 1, Profile 2 ...)
     let profileDirs;
@@ -5618,7 +5627,7 @@ async function getSafariHistory() {
 
     const safariHistoryPath = path.join(os.homedir(), 'Library/Safari/History.db');
 
-    if (!(await existsAsync(safariHistoryPath))) {
+    if (!(await Utils.existsAsync(safariHistoryPath))) {
       console.log('Safari history file not found');
       return [];
     }
@@ -5742,7 +5751,7 @@ function getProductivityScore(url) {
 async function getExtensionData() {
   try {
     console.log('Getting real browser history...');
-    const browserHistory = await refreshBrowserHistory({ reason: 'get_extension_data' });
+    const browserHistory = await BrowserHistory.refreshBrowserHistory({ reason: 'get_extension_data' });
 
     // Convert browser history to extension data format
     const urls = browserHistory.map(item => ({
@@ -6343,7 +6352,7 @@ async function generateDailySummary() {
     const proactiveResult = await engine.generateProactiveSuggestions();
 
     // Get real browser history
-    const browserHistory = await refreshBrowserHistory({ reason: 'generate_proactive_todos', force: true });
+    const browserHistory = await BrowserHistory.refreshBrowserHistory({ reason: 'generate_proactive_todos', force: true });
     console.log(`Retrieved ${browserHistory.length} URLs from browser history`);
 
     // Get Google data
@@ -6748,7 +6757,7 @@ async function processSyncResult(result) {
 ipcMain.handle('run-initial-sync', async (event) => {
   try {
     const googleData    = store.get('googleData') || await getGoogleData();
-    const browserHistory = await refreshBrowserHistory({ reason: 'manual_initial_sync', force: true });
+    const browserHistory = await BrowserHistory.refreshBrowserHistory({ reason: 'manual_initial_sync', force: true });
 
     const sendProgress = (progress) => {
       if (mainWindow && mainWindow.webContents) {
@@ -8779,7 +8788,7 @@ ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
   const senderId = event?.sender?.id || 0;
   const requestId = String(options?.requestId || `chatreq_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
   const timeoutMs = Math.max(4000, Number(options?.timeoutMs || DEFAULT_CHAT_TIMEOUT_MS));
-  const requestState = startActiveChatRequest(senderId, requestId);
+  const requestState = ChatManagement.startActiveChatRequest(senderId, requestId);
   try {
     console.log('[ChatMemory] Using SQLite memory DB:', typeof db.getDbPath === 'function' ? db.getDbPath() : 'unknown');
     const proactiveMemory = store.get('proactiveMemory') || { core: '' };
@@ -8804,7 +8813,7 @@ ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
         status: 'complete',
         degraded: false
       };
-      enqueueChatPersistence(`${resolvedChatSessionId}:${requestId}:tool`, async () => {
+      ChatManagement.enqueueChatPersistence(`${resolvedChatSessionId}:${requestId}:tool`, async () => {
         await persistChatTurnAsRawEvent({
           chatSessionId: resolvedChatSessionId,
           role: 'user',
@@ -8859,7 +8868,7 @@ ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
         const terminal = normalizedStatus === 'completed' || normalizedStatus === 'failed' || normalizedStatus === 'cancelled' || normalizedStatus === 'timed_out';
         if (!terminal && (now - requestState.lastStepEmitAt) < CHAT_STEP_EMIT_INTERVAL_MS) return;
         requestState.lastStepEmitAt = now;
-        try { event.sender.send('chat-step', compactChatStepPayload(data, requestId)); } catch (_) {}
+        try { event.sender.send('chat-step', ChatManagement.compactChatStepPayload(data, requestId)); } catch (_) {}
       }
     }), timeoutMs + 1000, 'ask-ai-assistant');
     const finalResponse = {
@@ -8868,7 +8877,7 @@ ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
       status: response?.status || 'complete',
       degraded: Boolean(response?.degraded)
     };
-    enqueueChatPersistence(`${resolvedChatSessionId}:${requestId}:answer`, async () => {
+    ChatManagement.enqueueChatPersistence(`${resolvedChatSessionId}:${requestId}:answer`, async () => {
       await persistChatTurnAsRawEvent({
         chatSessionId: resolvedChatSessionId,
         role: 'user',
@@ -8960,12 +8969,12 @@ ipcMain.handle('ask-ai-assistant', async (event, query, options = {}) => {
       }
     };
   } finally {
-    finishActiveChatRequest(senderId, requestId);
+    ChatManagement.finishActiveChatRequest(senderId, requestId);
   }
 });
 
 ipcMain.handle('cancel-ai-assistant-request', async (event, requestId) => {
-  return { cancelled: cancelActiveChatRequest(event?.sender?.id || 0, String(requestId || '')) };
+  return { cancelled: ChatManagement.cancelActiveChatRequest(event?.sender?.id || 0, String(requestId || '')) };
 });
 
 // Generate proactive todos — strictly AI generated from memory retrieval.
@@ -12246,7 +12255,7 @@ ipcMain.handle('delete-all-settings', async () => {
 
   try {
     const userDataPath = app.getPath('userData');
-    if (await existsAsync(userDataPath)) {
+    if (await Utils.existsAsync(userDataPath)) {
       const entries = await fs.promises.readdir(userDataPath);
       for (const name of entries) {
         const abs = path.join(userDataPath, name);
@@ -12322,18 +12331,18 @@ app.whenReady().then(async () => {
   startScreenshotCleanupLoop();
   emitStudySessionUpdate();
   try {
-    updatePerformanceState({
+    AppState.updatePerformanceState({
       onBattery: Boolean(powerMonitor?.isOnBatteryPower?.()),
       thermalState: 'unknown'
     });
-    powerMonitor.on('on-battery', () => updatePerformanceState({ onBattery: true }));
-    powerMonitor.on('on-ac', () => updatePerformanceState({ onBattery: false }));
+    powerMonitor.on('on-battery', () => AppState.updatePerformanceState({ onBattery: true }));
+    powerMonitor.on('on-ac', () => AppState.updatePerformanceState({ onBattery: false }));
     powerMonitor.on('thermal-state-change', (_event, details = {}) => {
-      updatePerformanceState({ thermalState: String(details.state || 'unknown') });
+      AppState.updatePerformanceState({ thermalState: String(details.state || 'unknown') });
     });
-    powerMonitor.on('idle', () => updatePerformanceState());
+    powerMonitor.on('idle', () => AppState.updatePerformanceState());
     powerMonitor.on('active', () => {
-      updatePerformanceState();
+      AppState.updatePerformanceState();
       if (screenshotsPausedForDisplayOff && !/lock/i.test(periodicScreenshotPauseReason)) {
         resumePeriodicScreenshotCapture('system active');
       }
