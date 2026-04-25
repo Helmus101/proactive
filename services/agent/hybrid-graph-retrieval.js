@@ -83,11 +83,27 @@ function formatContext({
   return contextSections.join('\n\n');
 }
 
+const embeddingCache = new Map();
+const EMBEDDING_CACHE_LIMIT = 2000;
+
 function getEmbedding(row) {
   if (!row) return [];
   if (Array.isArray(row.embedding)) return row.embedding;
+  if (!row.embedding) return [];
+
+  const cacheKey = row.id || row.doc_id || row.key || row.embedding;
+  if (embeddingCache.has(cacheKey)) {
+    return embeddingCache.get(cacheKey);
+  }
+
   try {
-    return JSON.parse(row.embedding || '[]');
+    const parsed = JSON.parse(row.embedding);
+    if (embeddingCache.size >= EMBEDDING_CACHE_LIMIT) {
+      const firstKey = embeddingCache.keys().next().value;
+      embeddingCache.delete(firstKey);
+    }
+    embeddingCache.set(cacheKey, parsed);
+    return parsed;
   } catch (_) {
     return [];
   }
@@ -1062,12 +1078,7 @@ async function vectorSearchNodes(nodeRows, semanticQueries = [], perQueryLimit =
     const queryEmbedding = await generateEmbedding(query, process.env.OPENAI_API_KEY);
     const ranked = nodeRows
       .map((row) => {
-        let embedding = [];
-        try {
-          embedding = JSON.parse(row.embedding || '[]');
-        } catch (_) {
-          embedding = [];
-        }
+const embedding = getEmbedding(row);
         return {
           key: `node:${row.id}`,
           source_type: 'node',

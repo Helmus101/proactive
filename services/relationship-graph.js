@@ -768,7 +768,7 @@ async function linkMentionsForEvent({ eventId, type = '', source = '', text = ''
 
   if (regexParts.length > 0) {
     // Process in chunks to avoid regex engine limits
-    const CHUNK_SIZE = 400;
+    const CHUNK_SIZE = 150;
     for (let i = 0; i < regexParts.length; i += CHUNK_SIZE) {
       const chunk = regexParts.slice(i, i + CHUNK_SIZE);
       const combinedRegex = new RegExp(chunk.join('|'), 'gi');
@@ -795,6 +795,8 @@ async function linkMentionsForEvent({ eventId, type = '', source = '', text = ''
           seen.add(item.contact_id);
         }
       }
+      // Yield to main thread between chunks to prevent CPU spikes
+      await new Promise(resolve => setImmediate(resolve));
     }
   }
 
@@ -948,7 +950,7 @@ async function backfillRelationshipContacts() {
   ).catch(() => []);
 
   const known = await loadKnownIdentifiers();
-  const batchSize = 50;
+  const batchSize = 20;
 
   for (let i = 0; i < (rows || []).length; i += batchSize) {
     const batch = rows.slice(i, i + batchSize);
