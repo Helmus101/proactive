@@ -59,13 +59,6 @@ function cancelActiveChatRequest(senderId, requestId) {
 function finishActiveChatRequest(senderId, requestId) {
   const key = makeChatRequestKey(senderId, requestId);
   
-  // Note: These were in the original code, possibly a copy-paste error
-  // but preserved for fidelity.
-  if (deps.appState) {
-    deps.appState.appInteractionState.chatActive = true;
-    deps.appState.markAppInteraction("chat-start");
-  }
-
   const activeKey = activeChatRequestsBySender.get(senderId);
   if (activeKey === key) activeChatRequestsBySender.delete(senderId);
   activeChatRequestRegistry.delete(key);
