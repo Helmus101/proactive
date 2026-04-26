@@ -2655,7 +2655,7 @@ body.compact-mode .suggestion-card {
 }
 
 .thinking-panel[data-expanded="true"] .thinking-live-content {
-    max-height: 780px;
+    max-height: 10000px; /* Ensure all thinking steps are visible */
     opacity: 1;
     transform: translateY(0);
     overflow-y: auto;
@@ -8648,3 +8648,52 @@ body.performance-reduced.dark-mode .card {
 }
 
 
+
+/* ───── FULL PAGE CHAT ENHANCEMENTS ───── */
+body.full-page-chat .top-bar,
+body.full-page-chat .bottom-nav {
+    display: none !important;
+}
+
+body.full-page-chat .app-shell {
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+}
+
+body.full-page-chat .content-area {
+    padding: 0 !important;
+    height: 100vh !important;
+}
+
+body.full-page-chat #action-view {
+    height: 100vh !important;
+    max-width: 100vw !important;
+    margin: 0 !important;
+}
+
+body.full-page-chat .chat-panel {
+    border-radius: 0 !important;
+    border: none !important;
+    height: 100vh !important;
+}
+
+body.full-page-chat .chat-main {
+    border-radius: 0 !important;
+    border: none !important;
+}
+
+body.full-page-chat .chat-main-header {
+    padding: 12px 24px !important;
+    background: var(--bg) !important;
+}
+
+body.full-page-chat .claude-chat-input-wrap {
+    padding-bottom: 32px !important;
+    background: transparent !important;
+    border-top: none !important;
+}
+
+body.full-page-chat .claude-composer {
+    box-shadow: 0 4px 24px rgba(0,0,0,0.06) !important;
+    border: 1px solid var(--separator) !important;
+}
