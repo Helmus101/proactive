@@ -149,6 +149,8 @@ const appInteractionState = { focused: false, minimized: false, chatActive: fals
 let activeStudySession = null;
 let sensorCaptureInProgress = false;
 let sensorCaptureTimer = null;
+let periodicScreenshotTimer = null;
+let periodicScreenshotWatchdogTimer = null;
 let sensorCaptureStartedAt = 0;
 
 // Initialize store early

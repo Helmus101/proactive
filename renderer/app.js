@@ -563,7 +563,7 @@ class WeaveApp {
 
         if (!silent) {
             this.remindersList.innerHTML = this.emptyStateHTML(
-                'refresh',
+                'rotate-cw',
                 'Refreshing radar...',
                 'Reviewing recent work context, tasks, and open loops.'
             );
@@ -771,7 +771,7 @@ class WeaveApp {
 
         if (!visibleTodos.length) {
             this.remindersList.innerHTML = this.emptyStateHTML(
-                'task_alt',
+                'check-circle',
                 'No signals surfaced yet',
                 'Refresh the radar, sync Google, or ask Weave what matters now.'
             ) + this.renderRegularTodosSection();

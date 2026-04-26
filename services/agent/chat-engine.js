@@ -1,6 +1,7 @@
 const db = require('../db');
 const { ingestRawEvent } = require('../ingestion');
 const { expandAppScopeValues } = require('../app-scope-catalog');
+const HeavyJobQueue = require('../heavy-job-queue');
 const { buildRawEvidenceText } = require('../raw-evidence-text');
 const { callLLM } = require('./intelligence-engine');
 const { buildHybridGraphRetrieval, formatContext, estimateTokensHeuristic } = require('./hybrid-graph-retrieval');
@@ -905,7 +906,8 @@ async function buildActionableTodoEvidence({ query = '', apiKey = null, options 
   if (options?.skip_radar_backfill || options?.internal_radar) return [];
   if (!isTaskCreationQuery(query)) return [];
   let suggestions = [];
-  if (apiKey) {
+  const shouldDefer = HeavyJobQueue.shouldDeferBackgroundWork('ChatRadarBackfill');
+  if (apiKey && !shouldDefer) {
     try {
       const { buildRadarState } = require('./radar-engine');
       const radar = await buildRadarState({
