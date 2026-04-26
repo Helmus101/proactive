@@ -2339,7 +2339,8 @@ Would you like me to continue with more detail?` : content;
                     <div class="claude-thinking-step">
                         <div class="claude-thinking-step-dot"></div>
                         <div class="claude-thinking-step-text">
-                            ${this.escapeHtml(stage.title || stage.label || stage.id)}
+                            <strong>${this.escapeHtml(stage.title || stage.label || stage.id)}</strong>
+                            ${stage.detail ? `<div class="claude-thinking-step-detail">${this.escapeHtml(stage.detail)}</div>` : ''}
                             ${duration ? `<span class="claude-thinking-step-time">(${duration})</span>` : ''}
                         </div>
                     </div>

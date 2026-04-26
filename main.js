@@ -26,6 +26,7 @@ const AppState = require('./services/app-state');
 const ChatManagement = require('./services/chat-management');
 const BrowserHistory = require('./services/browser-history');
 const HeavyJobQueue = require('./services/heavy-job-queue');
+const { heavyJobState, beginHeavyJob, endHeavyJob, drainPendingHeavyJobs, shouldDeferBackgroundWork } = HeavyJobQueue;
 const RadarState = require('./services/radar-state');
 
 const os = require('os');
@@ -148,6 +149,9 @@ const appInteractionState = { focused: false, minimized: false, chatActive: fals
 
 // Initialize store early
 const store = new Store();
+function getStoredRadarState() {
+  return store.get('radarState') || { allSignals: [], centralSignals: [], relationshipSignals: [], todoSignals: [], sections: {} };
+}
 
 function markAppInteraction(reason = 'interaction') {
   appInteractionState.lastInteractionAt = Date.now();
@@ -380,6 +384,8 @@ function withTimeout(promise, timeoutMs, label = 'operation') {
 }
 
 const DEFAULT_CHAT_TIMEOUT_MS = 600000;
+const DEFAULT_VOICE_SHORTCUT = 'Option+Space';
+const LEGACY_VOICE_SHORTCUT = 'Control+Shift+V';
 const CHAT_STEP_EMIT_INTERVAL_MS = 250;
 
 
@@ -548,6 +554,7 @@ function inferStudySignal(text = '', event = {}) {
 }
 
 // Memory Graph Processing Timers
+let sensorCaptureTimer = null;
 let episodeGenerationTimer = null;
 let suggestionEngineTimer = null;
 let semanticsTimer = null;

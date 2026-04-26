@@ -3426,6 +3426,13 @@ body.compact-mode .suggestion-card {
     flex-shrink: 0;
 }
 
+.claude-thinking-step-detail {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: 2px;
+    white-space: pre-wrap;
+}
+
 .claude-thinking-step-text {
     flex: 1;
 }
