@@ -76,7 +76,7 @@ async function existsAsync(path) {
 // Heavy modules lazy-loaded
 const execFile = (...args) => lazyRequire('child_process').execFile(...args);
 const axios = lazyRequire('axios');
-const Store = lazyRequire('electron-store');
+const Store = require('electron-store');
 const sqlite3 = (process.env.NODE_ENV === 'production') ? lazyRequire('sqlite3') : lazyRequire('sqlite3').verbose();
 const ingestion = lazyRequire('./services/ingestion');
 const ingestRawEvent = (...args) => ingestion.ingestRawEvent(...args);
