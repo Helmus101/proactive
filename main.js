@@ -262,6 +262,7 @@ function createVoiceHudWindow() {
   voiceHudWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   voiceHudWindow.setAlwaysOnTop(true, 'screen-saver');
   voiceHudWindow.loadFile('renderer/voice-hud.html');
+  voiceHudWindow.setIgnoreMouseEvents(true);
   voiceHudWindow.on('closed', () => {
     voiceHudWindow = null;
   });
@@ -1392,10 +1393,6 @@ function getFrontmostWindowContext() {
         });
       } catch (parseError) {
         resolve({
-          appName: '',
-          windowTitle: '',
-          extractedText: '',
-          windowId: null,
           bounds: null,
           status: 'unavailable',
           error: parseError.message
@@ -1407,20 +1404,6 @@ function getFrontmostWindowContext() {
 
 async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   const captureReason = String(reason || 'scheduled');
-  
-  // Check performance monitor for throttling
-  // if (performanceMonitor.shouldThrottleOperation('desktop_capture')) {
-  //   const delay = performanceMonitor.getRecommendedDelay('desktop_capture');
-  //   if (delay > 0) {
-  //     console.log(`[SensorCapture] Throttling capture for ${delay}ms due to system load`);
-  //     return {
-  //       skipped: true,
-  //       reason: 'performance_throttled',
-  //       screenshot_present: false,
-  //       performance_report: performanceMonitor.getPerformanceReport()
-  //     };
-  //   }
-  // }
   
   if (shouldDeferBackgroundWork("SensorCapture")) return { skipped: true, reason: "active_use" };
   const captureStartedAt = Date.now();
@@ -1437,7 +1420,6 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     sensorCaptureStartedAt = 0;
   }
   if (sensorCaptureInProgress) {
-    // Avoid overlapping captures
     return {
       skipped: true,
       reason: 'capture_in_progress',
@@ -1457,366 +1439,285 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   const sensorStorageDir = await ensureSensorStorageDir();
   const imagePath = path.join(sensorStorageDir, filename);
   let capturePngBuffer = null;
+
   try {
     const windowContext = await getFrontmostWindowContext();
     let sourceName = 'Screen';
     let captureMode = 'screen';
 
-  if (process.platform === 'darwin' && windowContext.windowId) {
-    try {
-      await new Promise((resolve, reject) => {
-        execFile('/usr/sbin/screencapture', ['-x', '-l', `${windowContext.windowId}`, imagePath], { timeout: 15000 }, (error) => {
-          if (error) reject(error);
-          else resolve();
-        });
-      });
-      if (await Utils.existsAsync(imagePath)) {
-        captureMode = 'frontmost-window';
-        sourceName = windowContext.windowTitle || windowContext.appName || 'Window';
-        capturePngBuffer = await fs.promises.readFile(imagePath).catch(() => null);
-      }
-    } catch (_) {}
-  }
-  if (captureMode !== 'frontmost-window' && process.platform === 'darwin' && windowContext.bounds) {
-    try {
-      const { x, y, width, height } = windowContext.bounds || {};
-      if ([x, y, width, height].every((value) => Number.isFinite(value)) && width > 20 && height > 20) {
+    if (process.platform === 'darwin' && windowContext.windowId) {
+      try {
         await new Promise((resolve, reject) => {
-          execFile(
-            '/usr/sbin/screencapture',
-            ['-x', '-R', `${Math.round(x)},${Math.round(y)},${Math.max(1, Math.round(width))},${Math.max(1, Math.round(height))}`, imagePath],
-            { timeout: 15000 },
-            (error) => {
-              if (error) reject(error);
-              else resolve();
-            }
-          );
+          execFile('/usr/sbin/screencapture', ['-x', '-l', `${windowContext.windowId}`, imagePath], { timeout: 15000 }, (error) => {
+            if (error) reject(error);
+            else resolve();
+          });
         });
         if (await Utils.existsAsync(imagePath)) {
-          captureMode = 'frontmost-window-bounds';
+          captureMode = 'frontmost-window';
           sourceName = windowContext.windowTitle || windowContext.appName || 'Window';
           capturePngBuffer = await fs.promises.readFile(imagePath).catch(() => null);
         }
-      }
-    } catch (_) {}
-  }
-  // windowContext logged at capture start (verbose; omitted from hot path)
-
-  if (!String(captureMode).startsWith('frontmost-window')) {
-    const primary = screen.getPrimaryDisplay();
-    const fullSize = primary?.size || { width: 1920, height: 1080 };
-    const reducedLoad = AppState.isReducedLoadMode();
-    
-    // Further reduce resolution to minimize GPU load
-    const maxWidth = reducedLoad ? 640 : 960; // REDUCED from 960/1440
-    const scale = Math.min(1, maxWidth / Math.max(1, Number(fullSize.width || 1920)));
-    const thumbWidth = Math.max(480, Math.floor((fullSize.width || 1920) * scale)); // REDUCED from 640
-    const thumbHeight = Math.max(270, Math.floor((fullSize.height || 1080) * scale)); // REDUCED from 360
-
-    // Request only screen sources for the fallback to minimize GPU/WindowServer load.
-    // Capturing all windows via desktopCapturer just to find a title match is extremely expensive.
-    const sources = await desktopCapturer.getSources({
-      types: ['screen'],
-      thumbnailSize: { width: thumbWidth, height: thumbHeight }
-    });
-
-  // Try to find a window source that matches the frontmost window title or app name
-    let matchedSource = null;
-    try {
-      const title = String(windowContext.windowTitle || '').toLowerCase();
-      const appName = String(windowContext.appName || '').toLowerCase();
-      for (const s of sources) {
-        const name = String(s.name || '').toLowerCase();
-        const displayId = String(s.display_id || '').toLowerCase();
-        if (title && name.includes(title)) { matchedSource = s; break; }
-        if (appName && name.includes(appName)) { matchedSource = s; break; }
-        // Some sources encode app/window metadata in the name like "Safari - example.com"
-        if (title && name.indexOf(title) >= 0) { matchedSource = s; break; }
-        if (appName && name.indexOf(appName) >= 0) { matchedSource = s; break; }
-      }
-    } catch (_) { matchedSource = null; }
-
-    // Prefer matched window source; otherwise fall back to the first screen source
-    const screenSource = sources.find((s) => String(s.id || '').toLowerCase().startsWith('screen:')) || sources.find((s) => String(s.id || '').toLowerCase().includes('screen'));
-    const source = matchedSource || screenSource || sources[0];
-
-    if (!source) {
-      throw new Error('No screen or window source available for capture');
+      } catch (_) {}
     }
 
-    const pngBuffer = source.thumbnail.toPNG();
-    if (!pngBuffer || !pngBuffer.length) {
-      throw new Error('Screen capture returned an empty image');
+    if (captureMode !== 'frontmost-window' && process.platform === 'darwin' && windowContext.bounds) {
+      try {
+        const { x, y, width, height } = windowContext.bounds || {};
+        if ([x, y, width, height].every((value) => Number.isFinite(value)) && width > 20 && height > 20) {
+          await new Promise((resolve, reject) => {
+            execFile(
+              '/usr/sbin/screencapture',
+              ['-x', '-R', `${Math.round(x)},${Math.round(y)},${Math.max(1, Math.round(width))},${Math.max(1, Math.round(height))}`, imagePath],
+              { timeout: 15000 },
+              (error) => {
+                if (error) reject(error);
+                else resolve();
+              }
+            );
+          });
+          if (await Utils.existsAsync(imagePath)) {
+            captureMode = 'frontmost-window-bounds';
+            sourceName = windowContext.windowTitle || windowContext.appName || 'Window';
+            capturePngBuffer = await fs.promises.readFile(imagePath).catch(() => null);
+          }
+        }
+      } catch (_) {}
     }
-    try {
+
+    if (!String(captureMode).startsWith('frontmost-window')) {
+      const primary = screen.getPrimaryDisplay();
+      const fullSize = primary?.size || { width: 1920, height: 1080 };
+      const reducedLoad = AppState.isReducedLoadMode();
+      const maxWidth = reducedLoad ? 640 : 960;
+      const scale = Math.min(1, maxWidth / Math.max(1, Number(fullSize.width || 1920)));
+      const thumbWidth = Math.max(480, Math.floor((fullSize.width || 1920) * scale));
+      const thumbHeight = Math.max(270, Math.floor((fullSize.height || 1080) * scale));
+
+      const sources = await desktopCapturer.getSources({
+        types: ['screen'],
+        thumbnailSize: { width: thumbWidth, height: thumbHeight }
+      });
+
+      let matchedSource = null;
+      try {
+        const title = String(windowContext.windowTitle || '').toLowerCase();
+        const appName = String(windowContext.appName || '').toLowerCase();
+        for (const s of sources) {
+          const name = String(s.name || '').toLowerCase();
+          if (title && name.includes(title)) { matchedSource = s; break; }
+          if (appName && name.includes(appName)) { matchedSource = s; break; }
+        }
+      } catch (_) { matchedSource = null; }
+
+      const screenSource = sources.find((s) => String(s.id || '').toLowerCase().startsWith('screen:')) || sources.find((s) => String(s.id || '').toLowerCase().includes('screen'));
+      const source = matchedSource || screenSource || sources[0];
+
+      if (!source) throw new Error('No screen or window source available for capture');
+
+      const pngBuffer = source.thumbnail.toPNG();
+      if (!pngBuffer || !pngBuffer.length) throw new Error('Screen capture returned an empty image');
+
       await fs.promises.writeFile(imagePath, pngBuffer);
       capturePngBuffer = pngBuffer;
-    } catch (writeErr) {
-      throw writeErr;
+      sourceName = source.name || 'Screen';
     }
-    sourceName = source.name || 'Screen';
-  }
 
-  if (!capturePngBuffer && (await Utils.existsAsync(imagePath))) {
-    capturePngBuffer = await fs.promises.readFile(imagePath).catch(() => null);
-  }
+    if (!capturePngBuffer && (await Utils.existsAsync(imagePath))) {
+      capturePngBuffer = await fs.promises.readFile(imagePath).catch(() => null);
+    }
 
-  // Use the visual fingerprint as the cheap gate before OCR/embedding work.
-  const fingerprint = buildPerceptualFingerprintFromPngBuffer(capturePngBuffer);
-  const visualDiffPct = Number((fingerprintDiffPercent(lastAcceptedCaptureFingerprint, fingerprint) * 100).toFixed(2));
-  const visualChangeSignificant = !lastAcceptedCaptureFingerprint || !fingerprint || visualDiffPct >= (CAPTURE_VISUAL_DIFF_THRESHOLD * 100);
-  const forceCapture = /manual|reset/i.test(String(reason || ''));
+    const fingerprint = buildPerceptualFingerprintFromPngBuffer(capturePngBuffer);
+    const visualDiffPct = Number((fingerprintDiffPercent(lastAcceptedCaptureFingerprint, fingerprint) * 100).toFixed(2));
+    const visualChangeSignificant = !lastAcceptedCaptureFingerprint || !fingerprint || visualDiffPct >= (CAPTURE_VISUAL_DIFF_THRESHOLD * 100);
+    const forceCapture = /manual|reset/i.test(String(reason || ''));
 
-  if (fingerprint) {
-    lastAcceptedCaptureFingerprint = fingerprint;
-  }
+    if (fingerprint) lastAcceptedCaptureFingerprint = fingerprint;
 
-  if (!visualChangeSignificant && !forceCapture) {
-    return {
-      skipped: true,
-      reason: 'low_visual_change',
-      screenshot_present: Boolean(await Utils.existsAsync(imagePath)),
-      imagePath: (await Utils.existsAsync(imagePath)) ? imagePath : null,
-      screenshot_filename: filename,
+    if (!visualChangeSignificant && !forceCapture) {
+      return {
+        skipped: true,
+        reason: 'low_visual_change',
+        screenshot_present: Boolean(await Utils.existsAsync(imagePath)),
+        imagePath: (await Utils.existsAsync(imagePath)) ? imagePath : null,
+        screenshot_filename: filename,
+        activeApp: windowContext.appName || '',
+        activeWindowTitle: windowContext.windowTitle || '',
+        visual_diff_pct: visualDiffPct,
+        visual_diff_threshold_pct: Number((CAPTURE_VISUAL_DIFF_THRESHOLD * 100).toFixed(2))
+      };
+    }
+
+    const contextSuffix = [windowContext.appName, windowContext.windowTitle].filter(Boolean).join(' - ');
+    const axText = String(windowContext.extractedText || '').trim();
+    const canUseAxOnly = !forceCapture && axText.length >= 80;
+    const now = Date.now();
+    const ocrThrottled = !forceCapture && (now - lastLowPowerOCRAt) < LOW_POWER_OCR_MIN_INTERVAL_MS;
+    
+    let ocrStartTime = Date.now();
+    const ocr = canUseAxOnly
+      ? { text: '', lines: [], confidence: 0, status: 'skipped_ax_text_available' }
+      : ocrThrottled
+      ? { text: '', lines: [], confidence: 0, status: 'throttled_for_performance' }
+      : await runVisionOCR(imagePath);
+    
+    const ocrDuration = Date.now() - ocrStartTime;
+    if (!canUseAxOnly && !ocrThrottled) lastLowPowerOCRAt = now;
+
+    const ocrText = String(ocr.text || '').trim();
+    const mergedText = [axText, ocrText].filter(Boolean).join('\n').trim();
+
+    const event = {
+      id: `sensor_${timestamp}`,
+      type: 'screen_capture',
+      title: `Frontmost OCR: ${contextSuffix || sourceName || 'Screen'}`,
+      timestamp,
+      captured_at: new Date(timestamp).toISOString(),
+      captured_at_local: new Date(timestamp).toLocaleString(),
+      sourceName,
+      captureMode: `${captureMode}-ocr`,
       activeApp: windowContext.appName || '',
       activeWindowTitle: windowContext.windowTitle || '',
+      windowId: windowContext.windowId || null,
+      windowBounds: windowContext.bounds || null,
+      windowContextStatus: windowContext.status || 'unavailable',
+      imagePath: imagePath,
+      text: mergedText,
+      textCaptureSource: axText && ocrText ? 'ax+ocr' : (ocrText ? 'ocr' : (axText ? 'ax' : 'none')),
+      ocrLines: ocr.lines || [],
+      ocrConfidence: ocr.confidence || 0,
+      ocrStatus: ocr.status || (ocrText ? 'complete' : 'no_text'),
+      ocrDuration,
       visual_diff_pct: visualDiffPct,
-      visual_diff_threshold_pct: Number((CAPTURE_VISUAL_DIFF_THRESHOLD * 100).toFixed(2))
+      visual_diff_threshold_pct: Number((CAPTURE_VISUAL_DIFF_THRESHOLD * 100).toFixed(2)),
+      visual_change_significant: visualChangeSignificant,
+      screenshot_folder: sensorStorageDir,
+      screenshot_filename: filename,
+      reason,
+      in_session: inStudySession,
+      study_session_id: inStudySession ? studySession.session_id : null,
     };
-  }
 
-  const contextSuffix = [windowContext.appName, windowContext.windowTitle].filter(Boolean).join(' - ');
+    if (windowContext.error) event.windowContextError = windowContext.error;
+    if (ocr.error) event.ocrError = ocr.error;
+    if (AppState.isReducedLoadMode()) lastLowPowerOCRAt = Date.now();
 
-  const axText = String(windowContext.extractedText || '').trim();
-  const canUseAxOnly = !forceCapture && axText.length >= 80;
-  
-  // Throttle OCR to prevent CPU overload
-  const now = Date.now();
-  const ocrThrottled = !forceCapture && (now - lastLowPowerOCRAt) < LOW_POWER_OCR_MIN_INTERVAL_MS;
-  
-  // Check performance monitor for OCR throttling
-  // const performanceThrottled = !canUseAxOnly && !ocrThrottled && performanceMonitor.shouldThrottleOperation('ocr');
-  
-  let ocrStartTime = Date.now();
-  const ocr = canUseAxOnly
-    ? {
-        text: '',
-        lines: [],
-        confidence: 0,
-        status: 'skipped_ax_text_available'
+    try {
+      const urlAssociationStartedAt = Date.now();
+      const associatedUrls = await findAssociatedUrlsForScreenshot({
+        timestamp,
+        appName: event.activeApp,
+        windowTitle: event.activeWindowTitle,
+        limit: 5
+      });
+      urlAssociationDurationMs = Date.now() - urlAssociationStartedAt;
+      if (associatedUrls.length) {
+        event.associatedUrls = associatedUrls;
+        event.primaryUrl = associatedUrls[0].url;
+        event.primaryDomain = associatedUrls[0].domain || '';
       }
-    : ocrThrottled
-    ? {
-        text: '',
-        lines: [],
-        confidence: 0,
-        status: 'throttled_for_performance'
-      }
-    : performanceThrottled
-    ? {
-        text: '',
-        lines: [],
-        confidence: 0,
-        status: 'performance_throttled'
-      }
-    : await runVisionOCR(imagePath);
-  
-  const ocrDuration = Date.now() - ocrStartTime;
-  
-  // Update last OCR timestamp only when OCR actually runs
-  if (!canUseAxOnly && !ocrThrottled && !performanceThrottled) {
-    lastLowPowerOCRAt = now;
-  }
-
-  const ocrText = String(ocr.text || '').trim();
-  const mergedText = [axText, ocrText].filter(Boolean).join('\n').trim();
-
-  if (!canUseAxOnly && ocrDuration > 500) {
-    console.log(`[SensorCapture] OCR completed in ${ocrDuration}ms for ${imagePath}`);
-  }
-
-  const event = {
-    id: `sensor_${timestamp}`,
-    type: 'screen_capture',
-    title: `Frontmost OCR: ${contextSuffix || sourceName || 'Screen'}`,
-    timestamp,
-    captured_at: new Date(timestamp).toISOString(),
-    captured_at_local: new Date(timestamp).toLocaleString(),
-    sourceName,
-    captureMode: `${captureMode}-ocr`,
-    activeApp: windowContext.appName || '',
-    activeWindowTitle: windowContext.windowTitle || '',
-    windowId: windowContext.windowId || null,
-    windowBounds: windowContext.bounds || null,
-    windowContextStatus: windowContext.status || 'unavailable',
-    imagePath: imagePath,
-    text: mergedText,
-    textCaptureSource: axText && ocrText ? 'ax+ocr' : (ocrText ? 'ocr' : (axText ? 'ax' : 'none')),
-    ocrLines: ocr.lines || [],
-    ocrConfidence: ocr.confidence || 0,
-    ocrStatus: ocr.status || (ocrText ? 'complete' : 'no_text'),
-    ocrDuration,
-    visual_diff_pct: visualDiffPct,
-    visual_diff_threshold_pct: Number((CAPTURE_VISUAL_DIFF_THRESHOLD * 100).toFixed(2)),
-    visual_change_significant: visualChangeSignificant,
-    screenshot_folder: sensorStorageDir,
-    screenshot_filename: filename,
-    reason,
-    in_session: inStudySession,
-    study_session_id: inStudySession ? studySession.session_id : null,
-  };
-  if (windowContext.error) event.windowContextError = windowContext.error;
-  if (ocr.error) event.ocrError = ocr.error;
-  if (AppState.isReducedLoadMode()) lastLowPowerOCRAt = Date.now();
-
-  try {
-    const urlAssociationStartedAt = Date.now();
-    const associatedUrls = await findAssociatedUrlsForScreenshot({
-      timestamp,
-      appName: event.activeApp,
-      windowTitle: event.activeWindowTitle,
-      limit: 5
-    });
-    urlAssociationDurationMs = Date.now() - urlAssociationStartedAt;
-    if (associatedUrls.length) {
-      event.associatedUrls = associatedUrls;
-      event.primaryUrl = associatedUrls[0].url;
-      event.primaryDomain = associatedUrls[0].domain || '';
+    } catch (historyError) {
+      console.warn('[SensorCapture] Failed to associate browser URLs:', historyError?.message || historyError);
     }
-  } catch (historyError) {
-    console.warn('[SensorCapture] Failed to associate browser URLs:', historyError?.message || historyError);
-  }
 
-  // Content filtering - check for sensitive content and delete if found
-  const filterCheck = shouldFilterCapture(
-    event.text,
-    event.activeWindowTitle,
-    event.activeApp,
-    event.primaryUrl || null
-  );
-
-  if (filterCheck.shouldFilter) {
-    const filterResult = await deleteSensitiveCapture(imagePath, event.id, filterCheck.reason);
-    return {
-      ...event,
-      filtered: true,
-      filter_reason: filterCheck.reason,
-      sensitive_category: filterCheck.category || null,
-      retained_for_durability: Boolean(filterResult?.retained_for_durability),
-      screenshot_present: Boolean(await Utils.existsAsync(imagePath)),
-      imagePath: (await Utils.existsAsync(imagePath)) ? imagePath : null
-    };
-  }
-
-  const existing = pruneOldSensorCaptures(getSensorEvents());
-  const { maxEvents } = getSensorSettings();
-  const nextEvents = [event, ...existing].slice(0, Math.max(50, Number(maxEvents || DEFAULT_SENSOR_SETTINGS.maxEvents)));
-
-  const persistStartedAt = Date.now();
-  debouncedStoreSet('sensorEvents', nextEvents);
-  eventPersistenceDurationMs = Date.now() - persistStartedAt;
-
-  if (isPeriodicScreenshot) {
-    // Release the capture lock promptly so DB/vector ingestion doesn't block the next capture cycle.
-    sensorCaptureInProgress = false;
-    captureLockReleased = true;
-  }
-
-  // L1 Ingestion - Always save OCR to memory with full metadata
-  try {
-    
-    const ingestPayload = {
-      type: 'ScreenCapture',
-      timestamp: event.timestamp,
-      source: 'Sensors',
-      text: [
-        event.activeApp ? `App: ${event.activeApp}` : '',
-        event.activeWindowTitle ? `Window: ${event.activeWindowTitle}` : '',
-        ocrText ? `OCR raw text:\n${ocrText}` : '',
-        axText ? `AX raw text:\n${axText}` : '',
-        event.text ? `Captured text:\n${event.text}` : ''
-      ].filter(Boolean).join('\n'),
-      metadata: {
+    const filterCheck = shouldFilterCapture(event.text, event.activeWindowTitle, event.activeApp, event.primaryUrl || null);
+    if (filterCheck.shouldFilter) {
+      const filterResult = await deleteSensitiveCapture(imagePath, event.id, filterCheck.reason);
+      return {
         ...event,
-        app: event.activeApp || 'Desktop',
-        source_app: event.activeApp || 'Desktop',
-        data_source: 'screenshot_ocr',
-        window_title: event.activeWindowTitle || '',
-        url: event.primaryUrl || null,
-        primary_url: event.primaryUrl || null,
-        primary_domain: event.primaryDomain || null,
-        associated_urls: event.associatedUrls || [],
-        browser_context_urls: event.associatedUrls || [],
-        context_title: event.activeWindowTitle || event.sourceName || '',
-        timestamp: event.captured_at,
-        app_id: event.activeApp || 'Desktop',
-        raw_ocr_text: ocrText,
-        raw_ax_text: axText,
-        raw_ocr_lines: event.ocrLines || [],
-        raw_ocr_confidence: event.ocrConfidence || 0,
-        ocr_text_char_count: ocrText.length,
-        ax_text_char_count: axText.length,
-        text_capture_source: event.textCaptureSource || 'none',
-        screenshot_folder: event.screenshot_folder,
-        screenshot_filename: event.screenshot_filename,
-        screenshot_path: event.imagePath,
-        capture_reason: event.reason,
-        capture_interval_seconds: 30
-      }
-    };
-
-    await ingestRawEvent(ingestPayload);
-
-    // Log OCR ingestion with metadata
-    const ocrSummary = [
-      `OCR status: ${event.ocrStatus}`,
-      event.ocrConfidence ? `confidence: ${(event.ocrConfidence * 100).toFixed(1)}%` : null,
-      event.ocrDuration ? `duration: ${event.ocrDuration}ms` : null,
-      `source: ${event.textCaptureSource}`,
-      `ocr_chars: ${ocrText.length}`,
-      `ax_chars: ${axText.length}`,
-      event.text ? `text_chars: ${event.text.length}` : 'no_text'
-    ].filter(Boolean).join(', ');
-
-    // OCR ingestion saved (verbose logging omitted from hot path)
-
-    updateMemoryGraphHealth({
-      lastDesktopCaptureAt: new Date().toISOString(),
-      desktopCaptureStatus: 'idle',
-      lastDesktopCaptureSource: event.textCaptureSource || 'none',
-      lastDesktopCaptureApp: event.activeApp || '',
-      lastOCRStatus: event.ocrStatus,
-      lastOCRConfidence: event.ocrConfidence,
-      lastCaptureDurationMs: Date.now() - captureStartedAt,
-      lastUrlAssociationDurationMs: urlAssociationDurationMs,
-      lastEventPersistenceDurationMs: eventPersistenceDurationMs
-    });
-    // Timing summary omitted from hot path; uncomment for profiling:
-    // console.log(`[SensorCaptureTiming] total=${Date.now() - captureStartedAt}ms ocr=${ocrDuration}ms urls=${urlAssociationDurationMs}ms persist=${eventPersistenceDurationMs}ms`);
-
-    // Throttle expensive background suggestion generation to avoid UI slowdown.
-    const triggerInterval = AppState.isReducedLoadMode()
-      ? Math.max(CAPTURE_TRIGGER_MIN_INTERVAL_MS * 2, LOW_POWER_HEAVY_JOB_MIN_GAP_MS)
-      : Math.max(CAPTURE_TRIGGER_MIN_INTERVAL_MS, LOW_POWER_HEAVY_JOB_MIN_GAP_MS);
-    const activeSuggestionCount = mergeSuggestionQueues(store.get('suggestions') || [], [], MAX_PRACTICAL_SUGGESTIONS).length;
-    if (activeSuggestionCount < MAX_PRACTICAL_SUGGESTIONS && (Date.now() - lastCaptureSuggestionTriggerAt) >= triggerInterval) {
-      lastCaptureSuggestionTriggerAt = Date.now();
-      setTimeout(() => {
-        runSuggestionEngineJob().catch(err =>
-          console.log('Background suggestion engine trigger failed:', err?.message || err)
-        );
-      }, 5 * 60 * 1000); // Delay to avoid doing LLM work during active screenshot/OCR cycles.
+        filtered: true,
+        filter_reason: filterCheck.reason,
+        sensitive_category: filterCheck.category || null,
+        retained_for_durability: Boolean(filterResult?.retained_for_durability),
+        screenshot_present: Boolean(await Utils.existsAsync(imagePath)),
+        imagePath: (await Utils.existsAsync(imagePath)) ? imagePath : null
+      };
     }
-  } catch (e) {
-    console.error('[captureDesktopSensorSnapshot] L1 ingestion failed:', e.message || e);
-    console.error('[captureDesktopSensorSnapshot] Failed to ingest OCR capture from:', event.activeApp || 'unknown app');
-    updateMemoryGraphHealth({
-      desktopCaptureStatus: 'error',
-      lastDesktopCaptureError: e?.message || String(e),
-      lastDesktopCaptureErrorAt: new Date().toISOString(),
-      lastCaptureDurationMs: Date.now() - captureStartedAt
-    });
-  }
+
+    const existing = pruneOldSensorCaptures(getSensorEvents());
+    const { maxEvents } = getSensorSettings();
+    const nextEvents = [event, ...existing].slice(0, Math.max(50, Number(maxEvents || DEFAULT_SENSOR_SETTINGS.maxEvents)));
+
+    const persistStartedAt = Date.now();
+    debouncedStoreSet('sensorEvents', nextEvents);
+    eventPersistenceDurationMs = Date.now() - persistStartedAt;
+
+    if (isPeriodicScreenshot) {
+      sensorCaptureInProgress = false;
+      captureLockReleased = true;
+    }
+
+    try {
+      const ingestPayload = {
+        type: 'ScreenCapture',
+        timestamp: event.timestamp,
+        source: 'Sensors',
+        text: [
+          event.activeApp ? `App: ${event.activeApp}` : '',
+          event.activeWindowTitle ? `Window: ${event.activeWindowTitle}` : '',
+          ocrText ? `OCR raw text:\n${ocrText}` : '',
+          axText ? `AX raw text:\n${axText}` : '',
+          event.text ? `Captured text:\n${event.text}` : ''
+        ].filter(Boolean).join('\n'),
+        metadata: {
+          ...event,
+          app: event.activeApp || 'Desktop',
+          source_app: event.activeApp || 'Desktop',
+          data_source: 'screenshot_ocr',
+          window_title: event.activeWindowTitle || '',
+          url: event.primaryUrl || null,
+          primary_url: event.primaryUrl || null,
+          primary_domain: event.primaryDomain || null,
+          associated_urls: event.associatedUrls || [],
+          browser_context_urls: event.associatedUrls || [],
+          context_title: event.activeWindowTitle || event.sourceName || '',
+          timestamp: event.captured_at,
+          app_id: event.activeApp || 'Desktop',
+          raw_ocr_text: ocrText,
+          raw_ax_text: axText,
+          raw_ocr_lines: event.ocrLines || [],
+          raw_ocr_confidence: event.ocrConfidence || 0,
+          ocr_text_char_count: ocrText.length,
+          ax_text_char_count: axText.length,
+          text_capture_source: event.textCaptureSource || 'none',
+          screenshot_folder: event.screenshot_folder,
+          screenshot_filename: event.screenshot_filename,
+          screenshot_path: event.imagePath,
+          capture_reason: event.reason,
+          capture_interval_seconds: 30
+        }
+      };
+      await ingestRawEvent(ingestPayload);
+
+      updateMemoryGraphHealth({
+        lastDesktopCaptureAt: new Date().toISOString(),
+        desktopCaptureStatus: 'idle',
+        lastDesktopCaptureSource: event.textCaptureSource || 'none',
+        lastDesktopCaptureApp: event.activeApp || '',
+        lastOCRStatus: event.ocrStatus,
+        lastOCRConfidence: event.ocrConfidence,
+        lastCaptureDurationMs: Date.now() - captureStartedAt,
+        lastUrlAssociationDurationMs: urlAssociationDurationMs,
+        lastEventPersistenceDurationMs: eventPersistenceDurationMs
+      });
+
+      const triggerInterval = AppState.isReducedLoadMode() ? Math.max(60 * 60 * 1000 * 2, 600000) : Math.max(60 * 60 * 1000, 600000);
+      const activeSuggestionCount = mergeSuggestionQueues(store.get('suggestions') || [], [], MAX_PRACTICAL_SUGGESTIONS).length;
+      if (activeSuggestionCount < MAX_PRACTICAL_SUGGESTIONS && (Date.now() - lastCaptureSuggestionTriggerAt) >= triggerInterval) {
+        lastCaptureSuggestionTriggerAt = Date.now();
+        setTimeout(() => {
+          runSuggestionEngineJob().catch(err => console.log('Background suggestion engine trigger failed:', err?.message || err));
+        }, 300000);
+      }
+    } catch (e) {
+      console.error('[captureDesktopSensorSnapshot] L1 ingestion failed:', e.message || e);
+      updateMemoryGraphHealth({
+        desktopCaptureStatus: 'error',
+        lastDesktopCaptureError: e?.message || String(e),
+        lastDesktopCaptureErrorAt: new Date().toISOString(),
+        lastCaptureDurationMs: Date.now() - captureStartedAt
+      });
+    }
 
     return event;
   } catch (error) {
@@ -1824,9 +1725,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     throw error;
   } finally {
     sensorCaptureStartedAt = 0;
-    if (!captureLockReleased) {
-      sensorCaptureInProgress = false;
-    }
+    if (!captureLockReleased) sensorCaptureInProgress = false;
   }
 }
 
