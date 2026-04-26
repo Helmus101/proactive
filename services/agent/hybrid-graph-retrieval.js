@@ -1081,9 +1081,12 @@ async function vectorSearchNodes(nodeRows, semanticQueries = [], perQueryLimit =
   for (const query of semanticQueries || []) {
     await yieldToEventLoop();
     const queryEmbedding = await generateEmbedding(query, process.env.OPENAI_API_KEY);
-    const ranked = nodeRows
-      .map((row) => {
-const embedding = getEmbedding(row);
+    const mappedNodes = [];
+    const CHUNK_SIZE = 250;
+    for (let i = 0; i < nodeRows.length; i += CHUNK_SIZE) {
+      const chunk = nodeRows.slice(i, i + CHUNK_SIZE);
+      mappedNodes.push(...chunk.map((row) => {
+        const embedding = getEmbedding(row);
         return {
           key: `node:${row.id}`,
           source_type: 'node',
@@ -1109,7 +1112,10 @@ const embedding = getEmbedding(row);
           base_score: cosineSimilarity(queryEmbedding, embedding),
           match_reason: `semantic:${query}`
         };
-      })
+      }));
+      await yieldToEventLoop();
+    }
+    const ranked = mappedNodes
       .filter((row) => row.base_score > 0)
       .sort((a, b) => (b.base_score || 0) - (a.base_score || 0))
       .slice(0, Math.max(6, perQueryLimit || 30));
@@ -1214,15 +1220,21 @@ async function vectorSearchTextChunks(filters = {}, semanticQueries = [], perQue
   for (const query of semanticQueries || []) {
     await yieldToEventLoop();
     const queryEmbedding = await generateEmbedding(query, process.env.OPENAI_API_KEY);
-    const ranked = chunkRows
-      .map((row) => {
+    const mappedChunks = [];
+    const CHUNK_SIZE_CHUNKS = 250;
+    for (let i = 0; i < chunkRows.length; i += CHUNK_SIZE_CHUNKS) {
+      const chunk = chunkRows.slice(i, i + CHUNK_SIZE_CHUNKS);
+      mappedChunks.push(...chunk.map((row) => {
         const embedding = getEmbedding(row);
         return {
           ...row,
           base_score: cosineSimilarity(queryEmbedding, embedding),
           match_reason: `semantic:chunk:${query}`
         };
-      })
+      }));
+      await yieldToEventLoop();
+    }
+    const ranked = mappedChunks
       .filter((row) => row.base_score > 0)
       .sort((a, b) => (b.base_score || 0) - (a.base_score || 0))
       .slice(0, Math.max(4, perQueryLimit || 12));

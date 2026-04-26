@@ -56,7 +56,7 @@ class WeaveApp {
             }
         })());
         this.showPeopleSection = false;
-        this.chatHistoryCollapsed = localStorage.getItem('chatHistoryCollapsed') === 'true';
+        this.chatHistoryCollapsed = localStorage.getItem('chatHistoryCollapsed') !== 'false';
         this.presenceMode = 'waiting';
         this.contactsLoaded = false;
         this.chatSessions = [];
@@ -328,6 +328,7 @@ class WeaveApp {
             viewId = 'presence-view';
         }
         this.activeView = viewId;
+        document.body.classList.toggle('full-page-chat', viewId === 'action-view');
         this.views.forEach((view) => {
             const isActive = view.id === viewId;
             view.classList.toggle('hidden', !isActive);
@@ -2517,7 +2518,7 @@ Would you like me to continue with more detail?` : content;
 
     updateThinkingPanel(panel, payload) {
         if (!panel) return;
-        const currentState = panel.__thinkingState || { stage: 'query_analysis', progress: 15, label: 'Analyzing your question' };
+        const currentState = panel.__thinkingState || { stage: 'query_analysis', progress: 15, label: 'Analyzing your question', expanded: true };
         const mapped = this.mapThinkingStage(payload, currentState);
         const eventStage = this.normalizeLiveThinkingEvent(payload, currentState);
         let nextState = this.mergeThinkingStage(currentState, eventStage);
