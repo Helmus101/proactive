@@ -146,6 +146,10 @@ const rebuildInvertedIndex = (...args) => lazyRequire('./services/summarizer/ind
 let mainWindow;
 let voiceHudWindow = null;
 const appInteractionState = { focused: false, minimized: false, chatActive: false, lastInteractionAt: 0 };
+let activeStudySession = null;
+let sensorCaptureInProgress = false;
+let sensorCaptureTimer = null;
+let sensorCaptureStartedAt = 0;
 
 // Initialize store early
 const store = new Store();
@@ -274,7 +278,7 @@ function ensureVoiceHudVisible() {
     startPeriodicScreenshotCapture,
     getScreenshotsPausedForDisplayOff: () => screenshotsPausedForDisplayOff,
     getPeriodicScreenshotRunning: () => periodicScreenshotRunning,
-    isChatActive: () => ChatManagement.ChatManagement.isChatActive()
+    isChatActive: () => ChatManagement.isChatActive()
   });
   ChatManagement.init({
     appState: AppState
@@ -554,7 +558,6 @@ function inferStudySignal(text = '', event = {}) {
 }
 
 // Memory Graph Processing Timers
-let sensorCaptureTimer = null;
 let episodeGenerationTimer = null;
 let suggestionEngineTimer = null;
 let semanticsTimer = null;
@@ -572,7 +575,7 @@ const MAX_PRACTICAL_SUGGESTIONS = 7;
 const CAPTURE_TRIGGER_MIN_INTERVAL_MS = 60 * 60 * 1000;
 // EMERGENCY CPU THROTTLING - Disable most background processes
 const EMERGENCY_THROTTLE_ENABLED = true;
-const PERIODIC_SCREENSHOT_INTERVAL_MS = EMERGENCY_THROTTLE_ENABLED ? 5 * 60 * 1000 : 45 * 1000; // 5 minutes when throttled
+const PERIODIC_SCREENSHOT_INTERVAL_MS = EMERGENCY_THROTTLE_ENABLED ? 5 * 60 * 1000 : 30 * 1000; // 5 minutes when throttled
 const SUGGESTION_REFRESH_INTERVAL_MINUTES = EMERGENCY_THROTTLE_ENABLED ? 60 : 30; // 1 hour when throttled
 const PERIODIC_SCREENSHOT_WAKE_DELAY_MS = 15 * 1000;       // 15s after wake before first capture
 const LOW_POWER_OCR_MIN_INTERVAL_MS = 15 * 60 * 1000; // INCREASED from 5 min
@@ -1855,35 +1858,20 @@ function startSensorCaptureLoop(mode = null) {
 
   // Startup capture is handled by the periodic screenshot loop (startPeriodicScreenshotCapture).
 
-  const intervalMs = getPeriodicScreenshotIntervalMs(mode || AppState.getPerformanceMode());
+  const intervalMs = AppState.getPeriodicScreenshotIntervalMs(mode || AppState.getPerformanceMode());
   sensorCaptureTimer = setInterval(() => {
-    // Prevent overlapping captures and add additional throttling
+    // Prevent overlapping captures
     if (periodicScreenshotRunning || sensorCaptureInProgress || screenshotsPausedForDisplayOff) return;
     
-    // Emergency throttling if system is under extreme load
-    // const perfReport = performanceMonitor.getPerformanceReport();
-    // if (perfReport.cpuUsage > 90 || perfReport.memoryUsage > 90) {
-    //   console.log(`[SensorCapture] Emergency throttling due to extreme load: CPU=${perfReport.cpuUsage.toFixed(1)}% Memory=${perfReport.memoryUsage.toFixed(1)}%`);
-    //   return;
-    // }
-    
-    // Add extra delay if system is under heavy load
-    const idleTime = (powerMonitor && typeof powerMonitor.getSystemIdleTime === 'function') ? powerMonitor.getSystemIdleTime() : 0;
-    if (idleTime < 30 && !shouldDeferBackgroundWork("SensorCapture")) {
-      // System is active, delay capture to reduce interference
-      setTimeout(() => {
-        if (!periodicScreenshotRunning && !sensorCaptureInProgress && !screenshotsPausedForDisplayOff) {
-          captureDesktopSensorSnapshot("scheduled").catch((error) => {
-            console.error("[SensorCapture] Scheduled capture failed:", error?.message || error);
-          });
-        }
-      }, Math.random() * 30000); // Random delay up to 30s
-    } else {
-      // Fire-and-forget scheduled capture to keep it in the background
-      captureDesktopSensorSnapshot("scheduled").catch((error) => {
-        console.error("[SensorCapture] Scheduled capture failed:", error?.message || error);
-      });
+    // Strictly defer all background capture work if the user is chatting or the system is busy
+    if (shouldDeferBackgroundWork("SensorCapture")) {
+      return;
     }
+    
+    // Fire-and-forget scheduled capture
+    captureDesktopSensorSnapshot("scheduled").catch((error) => {
+      console.error("[SensorCapture] Scheduled capture failed:", error?.message || error);
+    });
   }, intervalMs);
 }
 
@@ -1904,7 +1892,7 @@ function startPeriodicScreenshotWatchdog() {
       sensorCaptureStartedAt = 0;
     }
     if (!periodicScreenshotTimer) {
-      const intervalMs = getPeriodicScreenshotIntervalMs();
+      const intervalMs = AppState.getPeriodicScreenshotIntervalMs();
       periodicScreenshotNextDueAt = Date.now() + intervalMs;
       scheduleNextPeriodicScreenshot(intervalMs);
       console.warn('[Screenshot] Watchdog restored missing periodic screenshot timer');
@@ -1914,12 +1902,12 @@ function startPeriodicScreenshotWatchdog() {
 
 function scheduleNextPeriodicScreenshot(delayMs) {
   clearPeriodicScreenshotTimer();
-  const safeDelayMs = Math.max(1000, Number(delayMs || getPeriodicScreenshotIntervalMs()));
+  const safeDelayMs = Math.max(1000, Number(delayMs || AppState.getPeriodicScreenshotIntervalMs()));
   periodicScreenshotTimer = setTimeout(() => {
     runPeriodicScreenshotTick().catch((error) => {
       console.error("[Screenshot] Periodic screenshot loop failed:", error?.message || error);
       if (!screenshotsPausedForDisplayOff && periodicScreenshotRunning) {
-        const intervalMs = getPeriodicScreenshotIntervalMs();
+        const intervalMs = AppState.getPeriodicScreenshotIntervalMs();
         periodicScreenshotNextDueAt = Date.now() + intervalMs;
         scheduleNextPeriodicScreenshot(intervalMs);
       }
@@ -1937,7 +1925,7 @@ async function runPeriodicScreenshotTick() {
     return;
   }
   const now = Date.now();
-  const intervalMs = getPeriodicScreenshotIntervalMs();
+  const intervalMs = AppState.getPeriodicScreenshotIntervalMs();
   if (!periodicScreenshotNextDueAt || periodicScreenshotNextDueAt <= now) {
     const missedIntervals = periodicScreenshotNextDueAt
       ? Math.max(1, Math.ceil((now - periodicScreenshotNextDueAt + 1) / intervalMs))
@@ -1976,7 +1964,7 @@ async function runPeriodicScreenshotTick() {
     }
   } finally {
     if (!screenshotsPausedForDisplayOff && periodicScreenshotRunning) {
-      const nextIntervalMs = getPeriodicScreenshotIntervalMs();
+      const nextIntervalMs = AppState.getPeriodicScreenshotIntervalMs();
       while (periodicScreenshotNextDueAt <= Date.now()) {
         periodicScreenshotNextDueAt += nextIntervalMs;
       }
@@ -2004,7 +1992,7 @@ function resumePeriodicScreenshotCapture(reason = 'display/system awake') {
   }
 
   lastAcceptedCaptureFingerprint = null;
-  const wakeDelayMs = getPeriodicScreenshotWakeDelayMs();
+  const wakeDelayMs = AppState.getPeriodicScreenshotWakeDelayMs();
   periodicScreenshotNextDueAt = Date.now() + wakeDelayMs;
   console.log(`[Screenshot] Resumed: ${reason}; next capture in ${Math.round(wakeDelayMs / 100) / 10}s`);
   scheduleNextPeriodicScreenshot(wakeDelayMs);
@@ -2018,8 +2006,8 @@ function startPeriodicScreenshotCapture(mode = null, options = {}) {
   clearPeriodicScreenshotTimer();
 
   const currentMode = mode || AppState.getPerformanceMode();
-  const intervalMs = getPeriodicScreenshotIntervalMs(currentMode);
-  const initialDelayMs = Math.max(1000, Number(options.initialDelayMs || getPeriodicScreenshotWakeDelayMs(currentMode)));
+  const intervalMs = AppState.getPeriodicScreenshotIntervalMs(currentMode);
+  const initialDelayMs = Math.max(1000, Number(options.initialDelayMs || AppState.getPeriodicScreenshotWakeDelayMs(currentMode)));
 
   periodicScreenshotRunning = true;
   periodicScreenshotNextDueAt = Date.now() + initialDelayMs;
@@ -2586,7 +2574,7 @@ async function runSuggestionEngineJob(options = {}) {
         maxTodoSignals: 5,
         existingState
       }),
-      45000,
+      120000,
       'buildRadarState'
     );
     persistRadarState(radarState);
@@ -11640,7 +11628,7 @@ app.whenReady().then(async () => {
   startOAuthServer(Number(oauthPort) || 3002);
 
   setTimeout(() => startSourceWarmup(), STARTUP_SOURCE_WARMUP_DELAY_MS);
-  setTimeout(() => startPeriodicScreenshotCapture(), Math.max(15000, getPeriodicScreenshotWakeDelayMs()));
+  setTimeout(() => startPeriodicScreenshotCapture(), Math.max(15000, AppState.getPeriodicScreenshotWakeDelayMs()));
 
   // Initialize memory graph processing
   setTimeout(() => startMemoryGraphProcessing(), STARTUP_MEMORY_GRAPH_DELAY_MS);

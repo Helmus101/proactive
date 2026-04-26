@@ -1228,7 +1228,7 @@ async function executeParallelRetrieval(baseQuery, baseThought, options, onProgr
     ...((baseThought.semantic_queries || []).map((item) => String(item || '').trim())),
     ...((baseThought.message_queries || []).map((item) => String(item || '').trim()))
   ].filter(Boolean);
-  const maxParallelQueries = options?.economy ? 2 : 3;
+  const maxParallelQueries = options?.economy ? 3 : 5;
   const queries = Array.from(new Set(bundle)).slice(0, maxParallelQueries);
 
   // Detect when a query requires deep context (e.g., long-term relationship, patterns)

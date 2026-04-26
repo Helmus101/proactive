@@ -24,6 +24,8 @@ function startActiveChatRequest(senderId, requestId) {
   if (deps.appState) {
     deps.appState.appInteractionState.chatActive = true;
     deps.appState.markAppInteraction("chat-start");
+    // Trigger immediate update to defer background work and lower UI effects
+    deps.appState.updatePerformanceState(); 
   }
   const previousKey = activeChatRequestsBySender.get(senderId);
   if (previousKey && previousKey !== key) {
@@ -73,10 +75,29 @@ function finishActiveChatRequest(senderId, requestId) {
   }
 }
 
+function slimNode(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  if (Array.isArray(obj)) return obj.map(slimNode);
+  const slim = {};
+  const keep = ['id', 'node_id', 'event_id', 'title', 'layer', 'score', 'useful_score', 'status', 'requestId', 'step', 'label', 'detail', 'stages', 'trace', 'thinking_trace', 'stage_trace', 'timestamp', 'app'];
+  for (const key of keep) {
+    if (key in obj) {
+      if (['trace', 'thinking_trace', 'stage_trace', 'stages'].includes(key)) {
+        slim[key] = slimNode(obj[key]);
+      } else {
+        slim[key] = obj[key];
+      }
+    }
+  }
+  return slim;
+}
+
 function compactChatStepPayload(data = {}, requestId) {
-  const payload = { ...data, requestId };
-  if (Array.isArray(payload.preview_items)) payload.preview_items = payload.preview_items.slice(0, 5);
-  // Keep trace and thinking_trace for the UI to show progress steps
+  // Use slimNode to recursively remove heavy fields (embeddings, raw text, canonical_text)
+  const payload = slimNode({ ...data, requestId });
+  if (Array.isArray(payload.preview_items)) {
+    payload.preview_items = payload.preview_items.slice(0, 5);
+  }
   return payload;
 }
 

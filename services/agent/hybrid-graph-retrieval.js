@@ -87,7 +87,8 @@ const embeddingCache = new Map();
 const EMBEDDING_CACHE_LIMIT = 5000;
 
 function yieldToEventLoop() {
-  return new Promise((resolve) => setImmediate(resolve));
+  // Use a 50ms delay to strictly throttle CPU usage during heavy operations
+  return new Promise((resolve) => setTimeout(resolve, 10));
 }
 
 function getEmbedding(row) {
@@ -1607,6 +1608,10 @@ async function expandGraphHierarchical(seedNodes = [], pool = []) {
   const poolMap = new Map(pool.map(n => [n.id, n]));
 
   for (const seed of seedNodes) {
+    if (expanded.length >= MAX_EXPANDED) break;
+    await yieldToEventLoop();
+    await new Promise(r => setTimeout(r, 4)); // Throttle expansion loop
+    
     const seedId = seed.node_id || seed.id;
     if (!seedId) continue;
 
@@ -1705,6 +1710,7 @@ async function expandGraph(seedNodes = [], hopLimit = DEFAULT_HOP_LIMIT, maxExpa
 
   while (queue.length && expanded.length < maxExpanded) {
     await yieldToEventLoop();
+    await new Promise(r => setTimeout(r, 5)); // Throttled expansion to keep CPU responsive
     const current = queue.shift();
     if (current.depth >= effectiveHopLimit) continue;
 
@@ -2138,9 +2144,11 @@ async function buildHybridGraphRetrieval({
   const semanticRankings = retrievalPlan.mode === 'queryless'
     ? []
     : await vectorSearchNodes(finalNodeRows, retrievalPlan.semantic_queries || retrievalPlan.search_queries || [], perQueryVectorLimit);
+  await yieldToEventLoop();
   const chunkSemanticRankings = retrievalPlan.mode === 'queryless'
     ? []
     : await vectorSearchTextChunks(finalFilters, retrievalPlan.semantic_queries || retrievalPlan.search_queries || [], Math.max(4, Math.floor(perQueryVectorLimit / 2)), retrievalDiagnostics);
+  await yieldToEventLoop();
 
   // Consolidate and rank all search results picking the top 10
   const consolidatedSeeds = reciprocalRankFusion([...semanticRankings, ...chunkSemanticRankings]);

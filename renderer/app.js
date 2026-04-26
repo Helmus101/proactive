@@ -597,7 +597,7 @@ class WeaveApp {
             }
             const generated = await this.withTimeout(
                 window.electronAPI.generateProactiveTodos({}),
-                20000,
+                120000,
                 'generateProactiveTodos'
             );
             console.debug('[Renderer] generateSuggestions received', Array.isArray(generated) ? `${generated.length} items` : typeof generated);

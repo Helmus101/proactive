@@ -43,9 +43,9 @@ function isReducedLoadMode() {
 }
 
 function getPeriodicScreenshotIntervalMs(mode = getPerformanceMode()) {
-  const PERIODIC_SCREENSHOT_INTERVAL_MS = (process.env.EMERGENCY_THROTTLE_ENABLED === 'true') ? 5 * 60 * 1000 : 45 * 1000;
-  if (mode === 'deep-idle') return 45 * 60 * 1000;
-  if (mode === 'reduced')   return 20 * 60 * 1000;
+  const PERIODIC_SCREENSHOT_INTERVAL_MS = (process.env.EMERGENCY_THROTTLE_ENABLED === 'true') ? 5 * 60 * 1000 : 30 * 1000;
+  if (mode === 'deep-idle') return 15 * 60 * 1000;
+  if (mode === 'reduced')   return 5 * 60 * 1000;
   return PERIODIC_SCREENSHOT_INTERVAL_MS;
 }
 

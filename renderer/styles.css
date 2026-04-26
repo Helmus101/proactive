@@ -2525,8 +2525,8 @@ body.compact-mode .suggestion-card {
     border-radius: 18px;
     margin: 12px auto 16px;
     overflow: hidden;
-    backdrop-filter: blur(22px);
-    -webkit-backdrop-filter: blur(22px);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
     box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
     transition: max-height 250ms cubic-bezier(0.4, 0, 0.2, 1), opacity 180ms ease, transform 180ms ease, box-shadow 180ms ease;
     max-height: 62px;
@@ -6237,8 +6237,8 @@ body[data-ambient="evening"] .liquid-background {
     align-items: center !important;
     background: rgba(255, 255, 255, 0.86) !important;
     border-bottom: 1px solid rgba(107, 163, 229, 0.14) !important;
-    backdrop-filter: blur(24px) !important;
-    -webkit-backdrop-filter: blur(24px) !important;
+    backdrop-filter: blur(12px) !important;
+    -webkit-backdrop-filter: blur(12px) !important;
     box-shadow: 0 8px 28px rgba(31, 41, 55, 0.06) !important;
 }
 

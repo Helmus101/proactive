@@ -397,6 +397,9 @@ function initDB() {
         )`);
 
         safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_scheduled_automations_next_run ON scheduled_automations(next_run_at, enabled)`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_memory_edges_from ON memory_edges(from_node_id)`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_memory_edges_to ON memory_edges(to_node_id)`);
+        safeSchemaRun(`CREATE INDEX IF NOT EXISTS idx_memory_nodes_layer ON memory_nodes(layer)`);
 
         resolve();
       });
