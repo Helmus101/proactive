@@ -1450,6 +1450,9 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   let urlAssociationDurationMs = 0;
   let eventPersistenceDurationMs = 0;
   const timestamp = Date.now();
+  const studySession = getStudySessionState();
+  const inStudySession = studySession && studySession.status === "active";
+  const performanceThrottled = false;
   const filename = `ocr_capture_${timestamp}_${crypto.randomBytes(4).toString('hex')}.png`;
   const sensorStorageDir = await ensureSensorStorageDir();
   const imagePath = path.join(sensorStorageDir, filename);
@@ -1659,6 +1662,8 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     screenshot_folder: sensorStorageDir,
     screenshot_filename: filename,
     reason,
+    in_session: inStudySession,
+    study_session_id: inStudySession ? studySession.session_id : null,
   };
   if (windowContext.error) event.windowContextError = windowContext.error;
   if (ocr.error) event.ocrError = ocr.error;
@@ -1681,9 +1686,6 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   } catch (historyError) {
     console.warn('[SensorCapture] Failed to associate browser URLs:', historyError?.message || historyError);
   }
-
-    in_session: inStudySession,
-  };
 
   // Content filtering - check for sensitive content and delete if found
   const filterCheck = shouldFilterCapture(
@@ -6312,7 +6314,7 @@ function buildHomeworkRecoveryTasks(limit = 4) {
       category: 'work',
       assignee: 'ai',
       ai_draft: `Plan: 1) Reopen ${focus}. 2) Complete the missing section or answers. 3) Submit and confirm status.`,
-        ? [
+        action_plan: focus ? [
             { step: 2, action: 'READ_PAGE_STATE', intent: 'locate_unfinished_item' },
             { step: 3, action: 'READ_PAGE_STATE', intent: 'confirm_submission' }
           ]

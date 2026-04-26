@@ -441,8 +441,9 @@ async function detectUnfinishedLoops(rows, now) {
     const anchorTime = formatAnchorTime(startedTs);
     const ageLabel = ageH < 1 ? 'just now' : ageH < 24 ? `${Math.round(ageH)}h ago` : `${Math.round(ageH / 24)}d ago`;
     const timeAnchorLabel = dueTs ? 'before deadline' : (anchorTime ? `started ${anchorTime}` : (ageH > 18 ? 'today' : 'next block'));
+    const isStudy = /study|homework|academic|exam|assignment/i.test(title) || Boolean(metadata.in_session || metadata.study_session_id);
     out.push(candidateBase({
-      opportunityType: 'unfinished_work_loop',
+      opportunityType: isStudy ? 'unfinished_study_loop' : 'unfinished_work_loop',
       seedNodeId: row.id,
       title: `Complete: ${title} (open ${ageLabel})`,
       triggerSummary: dueTs

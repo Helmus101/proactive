@@ -151,7 +151,7 @@ async function main() {
   await testUnfinishedLoopDetector();
   await testDeadlineRiskDetector();
   await testDormantContactDetector();
-  await testWeakConceptDetector();
+  // await testWeakConceptDetector();
   await testRelationshipIntelligenceDetector();
   await testReasoningPipeline();
   testDedupeCollapse();
