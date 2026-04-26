@@ -342,17 +342,11 @@ function inferPatternType(seed = {}) {
 function inferSuggestionType(seed = {}) {
   const text = `${seed.type || ''} ${seed.category || ''} ${seed.title || ''} ${seed.trigger_summary || ''}`.toLowerCase();
   if (/\bdue|deadline|overdue|tomorrow|today|calendar\b/.test(text)) return 'predictive_reminder';
-  if (/\bstudy|exam|quiz|assignment|flashcard|revision|idiom|vocab|chapter\b/.test(text)) return 'optimization';
   if (/\bresearch|review|compare|look up|source\b/.test(text)) return 'optimization';
   if (/\bcollab|group|peer|classmate|teammate\b/.test(text)) return 'opportunity';
   if (/\bunusual|stalled|drop|missed|late|risk\b/.test(text)) return 'anomaly';
   if (/\bcontext|episode|thread\b/.test(text)) return 'context_awareness';
   return 'optimization';
-}
-
-function looksStudyOpportunity(seed = {}) {
-  const text = `${seed.type || ''} ${seed.title || ''} ${seed.trigger_summary || ''}`.toLowerCase();
-  return /\b(study|exam|quiz|assignment|revision|flashcard|vocab|idiom|chapter|problem set|homework)\b/.test(text);
 }
 
 function inferValueScore(seed = {}) {
@@ -405,20 +399,6 @@ function makeExpectedBenefit(seed) {
   return 'move the active work thread forward with one concrete step';
 }
 
-function inferStudySubject(seed = {}, graphContext = {}) {
-  const blobs = [
-    seed.title,
-    seed.trigger_summary,
-    graphContext?.trace_summary,
-    ...(Array.isArray(graphContext?.evidence) ? graphContext.evidence.map((item) => item?.text || item?.summary || '') : [])
-  ].join(' ').toLowerCase();
-  if (/\benglish|essay|literature|writing|grammar\b/.test(blobs)) return 'english';
-  if (/\bmath|algebra|geometry|calculus|equation|problem\b/.test(blobs)) return 'math';
-  if (/\bphysics|chemistry|biology|science\b/.test(blobs)) return 'science';
-  if (/\bhistory|geography|philosophy|economics\b/.test(blobs)) return 'humanities';
-  return '';
-}
-
 function inferRiskLevel(seed = {}, confidence = 0.6) {
   const score = Number(seed.score || confidence || 0);
   const text = `${seed.title || ''} ${seed.trigger_summary || ''}`.toLowerCase();
@@ -427,10 +407,9 @@ function inferRiskLevel(seed = {}, confidence = 0.6) {
   return 'low';
 }
 
-function inferSuggestionGroup(seed = {}, studyContext = null) {
+function inferSuggestionGroup(seed = {}) {
   const risk = inferRiskLevel(seed, seed.score || 0.6);
   if (risk === 'high') return 'risk';
-  if (studyContext?.status === 'active') return 'now';
   return 'next';
 }
 
@@ -574,7 +553,6 @@ function mapOpportunityTypeToSeedType(opportunityType = '') {
   if (value.includes('followup') || value.includes('contact')) return 'person_followup';
   if (value.includes('social_decay') || value.includes('value_hook')) return 'person_followup';
   if (value.includes('deadline')) return 'deadline_risk';
-  if (value.includes('study')) return 'study_followthrough';
   if (value === 'person_news') return 'person_news';
   if (value === 'birthday_reminder') return 'birthday_reminder';
   if (value === 'article_share') return 'article_share';
@@ -650,7 +628,6 @@ function isImportantActionSeed(seed = {}) {
   const title = String(seed.title || '').toLowerCase();
   const trigger = String(seed.trigger_summary || '').toLowerCase();
   if (type === 'task_execution' || type === 'decision_followthrough') return true;
-  if (looksStudyOpportunity(seed)) return true;
   if (seed.category === 'relationship') return true;
   if (type === 'cloud_hypothesis' && /open loop|unresolved|repeated/.test(trigger)) return true;
   if (/\bdeadline|due|urgent|priority|follow through|unresolved|action\b/.test(`${title} ${trigger}`)) return true;
@@ -843,9 +820,8 @@ async function scoreGraphFeedSeeds(now = Date.now()) {
 }
 
 function fallbackSuggestion(seed, graphContext, now, options = {}) {
-  const studySubject = inferStudySubject(seed, graphContext);
   const riskLevel = inferRiskLevel(seed, seed.score || 0.6);
-  const suggestionGroup = inferSuggestionGroup(seed, options?.study_context || null);
+  const suggestionGroup = inferSuggestionGroup(seed);
   const bestSeed = (graphContext.seed_nodes || []).find((item) => item.layer === 'episode' || item.layer === 'semantic') || graphContext.seed_nodes?.[0];
   const bestSourceIds = Array.from(new Set([...(seed.source_node_ids || []), ...(bestSeed ? [bestSeed.id] : [])])).slice(0, 6);
   const focus = deriveMeaningfulFocus(seed, graphContext);
@@ -931,7 +907,6 @@ function fallbackSuggestion(seed, graphContext, now, options = {}) {
     relationship_status: seed.relationship_status || null,
     relationship_score_inputs: seed.relationship_score_inputs || null,
     draft_context_refs: seed.draft_context_refs || [],
-    study_subject: studySubject || null,
     risk_level: riskLevel,
     recommended_action: stepPlan[0] || title,
     suggestion_group: suggestionGroup,
@@ -974,15 +949,13 @@ async function buildSuggestionFromSeed(seed, apiKey, now, options = {}) {
   }
 
   const graphSpecifics = extractGraphSpecifics(seed, graphContext);
-  const isStudySeed = looksStudyOpportunity(seed);
-  let suggestionCategory = isStudySeed ? 'study' : (seed.category === 'followup' ? 'followup' : 'work');
+  let suggestionCategory = (seed.category === 'followup' ? 'followup' : 'work');
   if (seed.category === 'relationship_intelligence') suggestionCategory = 'relationship';
 
   const prompt = `
   You are generating one proactive suggestion from a user's memory graph.
   The UI is a quick-action feed. Suggestions must be short, fast, and directly actionable.
-  There are three kinds of suggestions:
-  - STUDY: drill/review/resume a specific concept, session, or assignment. Category = "study".
+  There are two kinds of suggestions:
   - RELATIONSHIP: follow-up, connecting, sharing articles, birthdays, and noticing news about people. Category = "relationship".
   - WORK/FOLLOWUP: close an open loop in work, communication, or planning. Category = "work" or "followup".
   This seed is type: ${suggestionCategory.toUpperCase()}.
@@ -1023,7 +996,7 @@ async function buildSuggestionFromSeed(seed, apiKey, now, options = {}) {
   - Assume any AI-executable action should remove one extra step for the user.
   - Prefer stakeholder updates, meeting prep, open-loop closure, and exact follow-ups over broad productivity advice.
   - Prioritize suggestions that match these types when evidence supports them:
-    deadline intelligence, research optimization, collaboration intelligence, grade/performance risk, time optimization.
+    deadline intelligence, research optimization, collaboration intelligence, time optimization.
   - Do not mention hidden system internals or node IDs.
   - Avoid weak language: no "maybe", "could", "consider", or "might".
   - Confidence must be realistic and evidence-based. If below 0.70, return confidence below 0.70.
@@ -1056,13 +1029,6 @@ async function buildSuggestionFromSeed(seed, apiKey, now, options = {}) {
 Now: ${new Date(now).toISOString()}
 Suggestion type: ${suggestionCategory.toUpperCase()}
 Trigger: ${seed.trigger_summary}
-Opportunity:
-- type: ${seed.opportunity_type || 'unknown'}
-- time_anchor: ${seed.time_anchor || 'now'}
-- reason_codes: ${(seed.reason_codes || []).join(', ') || 'none'}
-- social_tier: ${seed.social_tier || 'unknown'}
-- social_temperature: ${Number(seed.social_temperature || 0).toFixed(2)}
-- value_hook: ${seed.value_hook ? JSON.stringify(seed.value_hook) : 'none'}
 
 KNOWN SPECIFICS (use these exact names/times — do not paraphrase):
 ${graphSpecifics}
@@ -1093,14 +1059,13 @@ ${recentRecall.map((r) => `- [${r.source}] ${r.text} (${r.timestamp})`).join('\n
   if (!title || !body) return fallbackSuggestion(seed, graphContext, now, options);
   const execution = classifySuggestionExecution(seed, title, body);
   const expectedBenefit = trim(payload.expected_benefit || makeExpectedBenefit(seed), 160);
-  const studySubject = inferStudySubject(seed, graphContext);
   const confidence = Math.max(0, Math.min(1, Number(payload.confidence || seed.score || 0.6)));
   const valueScore = Math.max(0, Math.min(25, Number(payload.value_score || inferValueScore(seed))));
   const riskScore = Math.max(0, Math.min(10, Number(payload.risk_score || inferRiskScore(seed))));
   const gate = passesSuggestionGate({ confidence, valueScore, riskScore });
   const finalScore = gate.finalScore;
   const riskLevel = inferRiskLevel(seed, confidence);
-  const suggestionGroup = inferSuggestionGroup(seed, options?.study_context || null);
+  const suggestionGroup = inferSuggestionGroup(seed);
   const patternType = ['temporal', 'contextual', 'frequency', 'trigger'].includes(String(payload.pattern_type || '').toLowerCase())
     ? String(payload.pattern_type || '').toLowerCase()
     : inferPatternType(seed);
@@ -1290,7 +1255,6 @@ ${recentRecall.map((r) => `- [${r.source}] ${r.text} (${r.timestamp})`).join('\n
     relationship_status: seed.relationship_status || null,
     relationship_score_inputs: seed.relationship_score_inputs || null,
     draft_context_refs: seed.draft_context_refs?.length ? seed.draft_context_refs : (relationshipDraft?.context?.draft_context_refs || []),
-    study_subject: studySubject || null,
     risk_level: riskLevel,
     recommended_action: stepPlan[0] || title,
     suggestion_group: suggestionGroup,

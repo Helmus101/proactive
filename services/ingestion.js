@@ -570,30 +570,6 @@ function inferDesktopActivity(contentType, text, metadata = {}) {
 
   const activityLabel = isCreating ? 'creating' : 'viewing';
 
-  // Prefer explicit study signal emitted during capture over guessed text labels.
-  if (meta.study_signal) {
-    const signalMap = {
-      reading: 'reading study content',
-      solving: 'solving problems or exercises',
-      drafting: 'drafting written work',
-      revision: 'reviewing feedback or results',
-      distraction: 'browsing non-task content',
-      'context-switch': 'switching between study contexts',
-      idle: 'screen open with little readable activity'
-    };
-    const signal = String(meta.study_signal).toLowerCase();
-    const label = signalMap[signal] || `study signal: ${meta.study_signal}`;
-    // "idle/distraction" are noisy in OCR captures; only trust them when evidence is weak.
-    if (!['idle', 'distraction'].includes(signal) || (!focusLine && !shortEvidence)) {
-      return {
-        summary: shortEvidence ? `${label}${focusLine ? ` (${focusLine})` : ''}` : label,
-        confidence: shortEvidence || focusLine ? 'high' : 'medium',
-        evidence: [focusLine || shortEvidence].filter(Boolean),
-        activity_type: isCreating ? 'creating' : 'viewing'
-      };
-    }
-  }
-
   if (!source || source.length < 20) {
     return {
       summary: windowTitle ? `${activityLabel} content in ${windowTitle}` : (app ? `${activityLabel} content in ${app}` : 'activity unclear from capture'),
@@ -629,7 +605,7 @@ function inferDesktopActivity(contentType, text, metadata = {}) {
     };
   }
 
-  if (/\b(todo|task|deadline|due|submit|assignment|exam|priority|follow up|required|action item)\b/i.test(source)) {
+  if (/\b(todo|task|deadline|due|submit|priority|follow up|required|action item)\b/i.test(source)) {
     return {
       summary: focusLine ? `task-oriented work: ${focusLine}` : 'task-oriented activity visible in capture',
       confidence: 'high',
@@ -675,7 +651,6 @@ function extractActionMarkers(text, contentType) {
   if (/\bfix|debug|error|issue|exception|failed|crash\b/i.test(source)) markers.push('troubleshooting');
   if (/\bdraft|write|prepare|send\b/i.test(source)) markers.push('drafting');
   if (/\b(todo|task|action item|due|deadline|priority|required)\b/i.test(source)) markers.push('task_execution');
-  if (/\bsubmit|assignment|exam|study plan|problem set\b/i.test(source)) markers.push('study_task');
   if (contentType === 'email' && /\b(subject:|from:|to:)\b/i.test(source)) markers.push('thread_context');
   return Array.from(new Set(markers)).slice(0, 6);
 }

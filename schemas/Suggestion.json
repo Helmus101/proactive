@@ -24,7 +24,6 @@
     "deeplink": { "type": "string" },
     "category": { "type": "string" },
     "assignee": { "type": "string", "enum": ["ai","human"] },
-    "study_subject": { "type": ["string", "null"] },
     "risk_level": { "type": "string", "enum": ["low", "medium", "high"] },
     "evidence_path": { "type": "array", "items": { "type": "object" } },
     "recommended_action": { "type": "string" },

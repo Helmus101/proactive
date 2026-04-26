@@ -545,15 +545,12 @@ function inferStudySignal(text = '', event = {}) {
     text,
     event.activeApp,
     event.activeWindowTitle,
-    event.study_goal,
-    event.study_subject
   ].map((value) => String(value || '').toLowerCase()).join(' ');
 
   if (!haystack.trim()) return null;
   if (/\b(exam|quiz|flashcard|anki|revision|review|practice test|problem set)\b/.test(haystack)) return 'reviewing';
   if (/\b(reading|chapter|article|paper|lecture notes|textbook|research)\b/.test(haystack)) return 'reading';
   if (/\b(homework|assignment|submit|due|canvas|classroom|instructure|exercise)\b/.test(haystack)) return 'task';
-  if (/\b(study|course|class|lesson|learn|vocab|thesis)\b/.test(haystack)) return 'study';
   return null;
 }
 
@@ -633,7 +630,6 @@ function looksRelationshipSuggestion(item = {}) {
 
 function hydrateStudySessionFromStore() {
   if (activeStudySession) return activeStudySession;
-  const stored = store.get('studySessionState') || null;
   if (stored && stored.status === 'active' && stored.session_id) {
     activeStudySession = {
       status: 'active',
@@ -664,7 +660,6 @@ function emitStudySessionUpdate() {
   const payload = getStudySessionState();
   if (mainWindow && mainWindow.webContents) {
     try {
-      mainWindow.webContents.send('study-session-update', payload);
     } catch (_) {}
   }
 }
@@ -674,7 +669,6 @@ function setStudySessionState(nextState = {}) {
     ...(getStudySessionState() || {}),
     ...(nextState || {})
   };
-  debouncedStoreSet('studySessionState', activeStudySession);
   emitStudySessionUpdate();
   return activeStudySession;
 }
@@ -1048,7 +1042,6 @@ function getSensorStatus() {
     totalCaptures: events.length,
     screenPermission,
     transport: 'apple-vision-frontmost-window',
-    study_session: getStudySessionState(),
     performance_mode: AppState.isReducedLoadMode() ? 'reduced' : 'normal'
   };
 }
@@ -1588,8 +1581,6 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
   }
 
   const contextSuffix = [windowContext.appName, windowContext.windowTitle].filter(Boolean).join(' - ');
-  const studySession = getStudySessionState();
-  const inStudySession = studySession?.status === 'active' && Boolean(studySession?.session_id);
 
   const axText = String(windowContext.extractedText || '').trim();
   const canUseAxOnly = !forceCapture && axText.length >= 80;
@@ -1666,9 +1657,6 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     screenshot_folder: sensorStorageDir,
     screenshot_filename: filename,
     reason,
-    study_session_id: inStudySession ? studySession.session_id : null,
-    study_goal: inStudySession ? (studySession.goal || '') : '',
-    study_subject: inStudySession ? (studySession.subject || '') : ''
   };
   if (windowContext.error) event.windowContextError = windowContext.error;
   if (ocr.error) event.ocrError = ocr.error;
@@ -1692,12 +1680,7 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
     console.warn('[SensorCapture] Failed to associate browser URLs:', historyError?.message || historyError);
   }
 
-  event.study_signal = inferStudySignal(event.text, event);
-  event.study_context = {
     in_session: inStudySession,
-    session_id: event.study_session_id,
-    goal: event.study_goal,
-    subject: event.study_subject
   };
 
   // Content filtering - check for sensitive content and delete if found
@@ -1770,11 +1753,6 @@ async function captureDesktopSensorSnapshot(reason = 'scheduled') {
         ocr_text_char_count: ocrText.length,
         ax_text_char_count: axText.length,
         text_capture_source: event.textCaptureSource || 'none',
-        study_context: event.study_context,
-        study_signal: event.study_signal,
-        study_session_id: event.study_session_id,
-        study_goal: event.study_goal,
-        study_subject: event.study_subject,
         screenshot_folder: event.screenshot_folder,
         screenshot_filename: event.screenshot_filename,
         screenshot_path: event.imagePath,
@@ -3009,7 +2987,6 @@ const DataModels = {
 // Intent clusters for classification
 const IntentClusters = {
   JOB_SEARCH: 'job_search',
-  THESIS_STUDY: 'thesis_study',
   RELATIONSHIP_NETWORKING: 'relationship_networking',
   PERSONAL_CARE: 'personal_care',
   SIDE_PROJECT: 'side_project',
@@ -3032,7 +3009,6 @@ class ProactiveSuggestionEngine {
       avg_productive_hours: [9, 10, 14, 15],
       cluster_weights: {
         job_search: 0.8,
-        thesis_study: 0.7,
         relationship_networking: 0.6,
         side_project: 0.6,
         personal_care: 0.5
@@ -3216,7 +3192,6 @@ class ProactiveSuggestionEngine {
     if (domain.includes('indeed.com') || domain.includes('glassdoor.com')) return IntentClusters.JOB_SEARCH;
     if (domain.includes('careers') || page_title.includes('career')) return IntentClusters.JOB_SEARCH;
 
-    // Thesis/study patterns
     if (domain.includes('university.edu') || domain.includes('edu')) return IntentClusters.THESIS_STUDY;
     if (page_title.includes('exam') || page_title.includes('thesis') || page_title.includes('research')) return IntentClusters.THESIS_STUDY;
 
@@ -3256,7 +3231,6 @@ class ProactiveSuggestionEngine {
     const title = event_title.toLowerCase();
 
     if (title.includes('interview')) return IntentClusters.JOB_SEARCH;
-    if (title.includes('exam') || title.includes('study') || title.includes('class')) return IntentClusters.THESIS_STUDY;
     if (title.includes('coffee') || title.includes('meet') || title.includes('call')) return IntentClusters.RELATIONSHIP_NETWORKING;
     if (title.includes('workout') || title.includes('gym') || title.includes('exercise')) return IntentClusters.PERSONAL_CARE;
     if (title.includes('project') || title.includes('startup')) return IntentClusters.SIDE_PROJECT;
@@ -3278,7 +3252,6 @@ class ProactiveSuggestionEngine {
   inferClusterFromSensor(capture) {
     const content = `${capture.active_app || ''} ${capture.active_window_title || ''} ${capture.text || ''}`.toLowerCase();
     if (/interview|recruiter|resume|cv|cover letter|application/.test(content)) return IntentClusters.JOB_SEARCH;
-    if (/thesis|research|paper|study|lecture|exam/.test(content)) return IntentClusters.THESIS_STUDY;
     if (/github|pull request|notion|project|roadmap|deploy|bug/.test(content)) return IntentClusters.SIDE_PROJECT;
     if (/message|linkedin|email|calendar|meeting|follow up|reply/.test(content)) return IntentClusters.RELATIONSHIP_NETWORKING;
     if (/workout|meal|health|sleep|meditation/.test(content)) return IntentClusters.PERSONAL_CARE;
@@ -6194,7 +6167,6 @@ function inferTaskIntent(text) {
   if (/\b(meeting|calendar|agenda|attendees|event)\b/.test(t)) intents.push('meeting');
   if (/\b(doc|document|proposal|slide|deck|report|draft)\b/.test(t)) intents.push('document');
   if (/\b(code|bug|error|stack|commit|deploy|api|manifest|extension)\b/.test(t)) intents.push('engineering');
-  if (/\b(homework|assignment|study|class|lecture|exam)\b/.test(t)) intents.push('study');
   if (/\b(invoice|tax|bank|payment|finance|bill)\b/.test(t)) intents.push('admin');
   if (!intents.length) intents.push('general');
   return intents;
@@ -6221,9 +6193,6 @@ function enforceSingleFocusTask(task) {
     } else if (primaryIntent === 'engineering') {
       next.title = `Fix one specific engineering issue${focus ? `: ${focus}` : ''}`.slice(0, 120);
       next.description = `Work on one bug/implementation step only${focus ? ` (${focus})` : ''}.`;
-    } else if (primaryIntent === 'study') {
-      next.title = `Complete one study task${focus ? `: ${focus}` : ''}`.slice(0, 120);
-      next.description = `Finish one concrete study assignment step${focus ? ` for ${focus}` : ''}.`;
     } else if (primaryIntent === 'admin') {
       next.title = `Resolve one admin item${focus ? `: ${focus}` : ''}`.slice(0, 120);
       next.description = `Handle one operational/admin task${focus ? ` (${focus})` : ''}.`;
@@ -6315,11 +6284,9 @@ function diversifyTasksByCategory(tasks, maxTotal = 16, maxPerCategory = 4) {
 }
 
 function buildHomeworkRecoveryTasks(limit = 4) {
-  const studyPattern = /\b(homework|assignment|problem set|exercise|chapter|submit|deadline|due|lecture|classroom|canvas|study)\b/i;
   const sensors = (getSensorEvents() || []).slice(0, 120);
   const candidates = sensors.filter((ev) => {
     const text = `${ev.activeWindowTitle || ''} ${ev.text || ''} ${ev.activeApp || ''}`;
-    return studyPattern.test(text);
   });
   if (!candidates.length) return [];
 
@@ -6327,7 +6294,6 @@ function buildHomeworkRecoveryTasks(limit = 4) {
     .slice()
     .sort((a, b) => Number(b?.timestamp || 0) - Number(a?.timestamp || 0));
 
-  const studyUrl = recentUrls.find((u) => /(classroom\.google\.com|canvas|instructure|docs\.google\.com|notion\.so)/i.test(String(u?.url || '')))?.url || null;
   const seen = new Set();
   const tasks = [];
   for (const ev of candidates) {
@@ -6340,15 +6306,11 @@ function buildHomeworkRecoveryTasks(limit = 4) {
       id: `homework_${ev.id || Date.now()}_${tasks.length}`,
       title: `Finish and submit: ${focus}`.slice(0, 120),
       priority: /\bdue|deadline|submit\b/i.test(String(ev.text || '')) ? 'high' : 'medium',
-      description: `Detected unfinished study work from recent activity: ${focus}.`,
       reason: 'You started this academic task but no completion signal was captured.',
       category: 'work',
       assignee: 'ai',
       ai_draft: `Plan: 1) Reopen ${focus}. 2) Complete the missing section or answers. 3) Submit and confirm status.`,
-      deeplink: studyUrl,
-      action_plan: studyUrl
         ? [
-            { step: 1, action: 'NAVIGATE', url: studyUrl, intent: 'open_study_workspace' },
             { step: 2, action: 'READ_PAGE_STATE', intent: 'locate_unfinished_item' },
             { step: 3, action: 'READ_PAGE_STATE', intent: 'confirm_submission' }
           ]
@@ -6407,7 +6369,6 @@ async function buildCurrentWorkContinuationTasks(limit = 6) {
       priority: /deadline|due|submit|asap/i.test(sensorText) ? 'high' : 'medium',
       description: `Current work detected in ${sensor.activeApp || 'desktop'}: ${focus}.`,
       reason,
-      category: /essay|assignment|homework|study|class/i.test(`${focus} ${sensorText}`) ? 'work' : 'followup',
       assignee: 'ai',
       ai_draft: `Plan: 1) Reopen the active context. 2) Complete the unfinished step you already started. 3) Confirm completion and capture the final state.`,
       deeplink,
@@ -6592,7 +6553,6 @@ function getFocusVideoPicks(dateKey) {
   const pools = [
     [
       { title: 'Lofi Girl — lofi hip hop radio', url: 'https://www.youtube.com/watch?v=jfKfPfyJRdk' },
-      { title: 'Chillhop Music — beats to study', url: 'https://www.youtube.com/watch?v=5yx6BWlEVcY' }
     ],
     [
       { title: 'Relaxing Jazz Piano Radio', url: 'https://www.youtube.com/watch?v=Dx5qFachd3A' },
@@ -11109,7 +11069,6 @@ function extractCategoryFromText(text) {
   const lowerText = text.toLowerCase();
   if (lowerText.includes('email') || lowerText.includes('reply') || lowerText.includes('contact')) {
     return 'communication';
-  } else if (lowerText.includes('learn') || lowerText.includes('study') || lowerText.includes('course')) {
     return 'learning';
   } else if (lowerText.includes('meet') || lowerText.includes('network') || lowerText.includes('connect')) {
     return 'networking';

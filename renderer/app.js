@@ -698,7 +698,6 @@ class WeaveApp {
                     prerequisites: Array.isArray(item.prerequisites) ? item.prerequisites : [],
                     step_plan: Array.isArray(item.step_plan) ? item.step_plan.filter(Boolean).map((step) => compact(step, 42)).slice(0, 2) : plan,
                     snoozedUntil: item.snoozedUntil || 0,
-                    study_subject: (item.study_subject || '').trim(),
                     risk_level: (item.risk_level || '').trim().toLowerCase(),
                     evidence_path: Array.isArray(item.evidence_path) ? item.evidence_path : [],
                     recommended_action: compact(item.recommended_action || '', 46),
@@ -783,7 +782,6 @@ class WeaveApp {
         const section = (label, items, offset = 0) => {
             if (!items.length) return '';
             return `
-                <section class="study-suggestion-group conversation-stream">
                     <div class="regular-tasks-header" style="margin-bottom: 10px;">
                         <div class="regular-tasks-kicker">${this.escapeHtml(label)}</div>
                     </div>
@@ -987,7 +985,6 @@ class WeaveApp {
 
         const expanded = this.expandedCards.has(todo.id);
         const suggestionCategory = todo.suggestion_category || todo.category || 'work';
-        const isStudy = suggestionCategory === 'study';
         const aiCanAutomate = Boolean(todo.ai_doable && todo.action_type && todo.action_type !== 'manual_next_step');
         const compact = (value, limit = 90) => {
             const text = String(value || '').replace(/\s+/g, ' ').trim();
@@ -1011,7 +1008,6 @@ class WeaveApp {
         const evidenceLabel = evidenceCompact || receiptSummary || '';
 
         return `
-                <article class="suggestion-card conversation-entry ${this.escapeHtml(cardTone)}${isStudy ? ' suggestion-study' : ''}" data-id="${this.escapeHtml(todo.id)}" tabindex="0" style="animation-delay:${index * 40}ms;">
                     <div class="suggestion-header">
                         <div class="suggestion-content">
                             <div class="suggestion-card-topline">
@@ -1240,7 +1236,6 @@ class WeaveApp {
             if (!RELATIONSHIP_FEATURE_ENABLED && this.isRelationshipSignal(todo)) return false;
             if (this.currentFilter === 'all') return true;
             if (RELATIONSHIP_FEATURE_ENABLED && this.currentFilter === 'relationships') return String(todo.signal_type || '').toLowerCase() === 'relationship' || ['followup', 'relationship_intelligence'].includes(todo.category);
-            if (this.currentFilter === 'todos') return String(todo.signal_type || '').toLowerCase() === 'todo' || ['work', 'creative', 'study'].includes(todo.category);
             return todo.category === this.currentFilter;
         });
 
@@ -3074,7 +3069,6 @@ Would you like me to continue with more detail?` : content;
         const prompts = [];
         const todos = this.getVisibleTodos().slice(0, 4);
         const topTodo = todos[0];
-        const deliveryTodo = todos.find((todo) => String(todo.signal_type || '').toLowerCase() === 'todo' || ['work', 'creative', 'study'].includes(todo.category));
         if (topTodo?.title) prompts.push(`What is the best next move for "${topTodo.title}" right now?`);
         if (deliveryTodo?.title) prompts.push(`Brief me on the work context behind "${deliveryTodo.title}".`);
         prompts.push('What are my top five moves?');
@@ -4019,9 +4013,6 @@ Would you like me to continue with more detail?` : content;
             const snippet = (event.text || '').slice(0, 120).trim();
             const imageInfo = event.imagePath ? `<span>${this.escapeHtml(this.basename(event.imagePath))}</span><span>•</span>` : '';
             const exactTime = event.captured_at_local || (event.timestamp ? new Date(event.timestamp).toLocaleString() : 'Unknown time');
-            const inSession = Boolean(event.study_context?.in_session || event.study_session_id);
-            const studyMeta = inSession
-                ? `Study • ${event.study_subject || event.study_context?.subject || 'general'} • ${event.study_signal || 'active'}`
                 : '';
             return `
                 <div class="history-row">
@@ -4034,7 +4025,6 @@ Would you like me to continue with more detail?` : content;
                     <div class="history-row-meta">
                         <span>${this.escapeHtml(exactTime)}</span>
                     </div>
-                    ${studyMeta ? `<div class="history-row-meta">${this.escapeHtml(studyMeta)}</div>` : ''}
                     ${snippet ? `<div class="history-row-meta">${this.escapeHtml(snippet)}</div>` : ''}
                     ${event.imagePath ? `<div class="history-row-meta">${imageInfo}<span>${this.escapeHtml(event.imagePath)}</span></div>` : ''}
                 </div>
@@ -4500,14 +4490,12 @@ Would you like me to continue with more detail?` : content;
         const value = String(category || '').trim().toLowerCase();
         if (value.includes('follow')) return 'followup';
         if (value.includes('relationship')) return 'relationship_intelligence';
-        if (['work', 'creative', 'personal', 'study', 'relationship_intelligence'].includes(value)) return value;
         return 'work';
     }
 
     prettyCategory(category) {
         if (category === 'followup') return 'Follow-up';
         if (category === 'relationship_intelligence') return 'Relationship insight';
-        if (['work', 'creative', 'study'].includes(category)) return 'Briefing';
         if (category === 'personal') return 'General';
         return category.charAt(0).toUpperCase() + category.slice(1);
     }
@@ -4540,7 +4528,6 @@ Would you like me to continue with more detail?` : content;
 
     cardToneClass(category = '') {
         if (['followup', 'relationship_intelligence'].includes(category)) return 'suggestion-client';
-        if (['work', 'creative', 'study'].includes(category)) return 'suggestion-delivery';
         return 'suggestion-general';
     }
 
@@ -4562,7 +4549,6 @@ Would you like me to continue with more detail?` : content;
             personal: 'favorite',
             creative: 'lightbulb',
             followup: 'reply',
-            study: 'school',
             relationship_intelligence: 'group'
         };
         return icons[category] || 'task';

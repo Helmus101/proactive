@@ -26,7 +26,6 @@ function normalizeCategory(category) {
   if (raw.includes('follow')) return 'followup';
   if (raw.includes('creative')) return 'creative';
   if (raw.includes('personal')) return 'personal';
-  if (raw.includes('study')) return 'study';
   if (raw.includes('relationship')) return 'relationship';
   if (raw.includes('plan') || raw.includes('work')) return 'work';
   return 'work';
@@ -38,7 +37,6 @@ function inferIntentLabel(text) {
   if (/\b(meeting|calendar|agenda|attendees|event|call)\b/.test(t)) return 'Prepare the next meeting outcome';
   if (/\b(doc|document|proposal|report|draft|slide|deck|sheet|notes)\b/.test(t)) return 'Move the draft toward a shareable state';
   if (/\b(code|bug|error|deploy|api|manifest|extension|fix|pull request|commit)\b/.test(t)) return 'Resolve the implementation blocker';
-  if (/\b(homework|assignment|study|exam|class|lecture|submit|problem set)\b/.test(t)) return 'Finish the academic deliverable';
   if (/\b(product|checkout|purchase|buy|pricing)\b/.test(t)) return 'Make the pending product decision';
   if (/\b(profile|linkedin|reach out|connect|recruiter|candidate|job)\b/.test(t)) return 'Advance the outreach or application';
   return 'Advance the active piece of work';
@@ -51,7 +49,7 @@ function titleHasConcreteTarget(title) {
   if (/["']/i.test(t)) return true;
   // Proper noun check (CamelCase)
   if (/[A-Z][a-z]+/.test(t)) return true;
-  if (/\b(email|thread|meeting|agenda|proposal|report|deck|draft|bug|ticket|assignment|homework|profile|application|checkout|doc|file|calendar|extension|manifest|budget|invoice)\b/i.test(t)) return true;
+  if (/\b(email|thread|meeting|agenda|proposal|report|deck|draft|bug|ticket|profile|application|checkout|doc|file|calendar|extension|manifest|budget|invoice)\b/i.test(t)) return true;
   return false; // Require explicit target now, don't just rely on word count
 }
 
