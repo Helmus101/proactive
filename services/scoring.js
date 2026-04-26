@@ -165,7 +165,6 @@ function generateSuggestionsFromOpenLoops(openLoops, userProfile = {}, contactPr
     if (/meeting|calendar|agenda|event/.test(t)) tags.push('meeting');
     if (/doc|document|proposal|report|draft|slide/.test(t)) tags.push('document');
     if (/code|bug|error|deploy|manifest|extension|api/.test(t)) tags.push('engineering');
-    if (/homework|assignment|study|class|exam/.test(t)) tags.push('study');
     if (!tags.length) tags.push('general');
     return tags;
   }
@@ -180,13 +179,11 @@ function generateSuggestionsFromOpenLoops(openLoops, userProfile = {}, contactPr
     if (intent === 'meeting') return `Schedule or prep one meeting${focus ? `: ${focus}` : ''}`.slice(0, 120);
     if (intent === 'document') return `Complete one document step${focus ? `: ${focus}` : ''}`.slice(0, 120);
     if (intent === 'engineering') return `Fix one specific issue${focus ? `: ${focus}` : ''}`.slice(0, 120);
-    if (intent === 'study') return `Finish one study task${focus ? `: ${focus}` : ''}`.slice(0, 120);
     return base || 'Complete one concrete task';
   }
   function mapCategoryToFixedSet(category) {
     const raw = safeStr(category).toLowerCase();
     if (/work|job|career|project|business|recruit/i.test(raw)) return 'Work';
-    if (/education|learn|study|course|class|thesis|research/i.test(raw)) return 'Education';
     if (/health|fitness|workout|gym|sleep|doctor/i.test(raw)) return 'Health';
     if (/social|relationship|friend|family|network/i.test(raw)) return 'Social';
     if (/finance|money|invoice|tax|bill|payment|bank/i.test(raw)) return 'Finance';
@@ -205,7 +202,6 @@ function generateSuggestionsFromOpenLoops(openLoops, userProfile = {}, contactPr
   function isRepetitiveExecutableAction(actionType, category) {
     const a = safeStr(actionType).toLowerCase();
     const c = safeStr(category).toLowerCase();
-    if (/education/.test(c)) return false;
     return ['follow_up', 'send_message', 'send_email', 'schedule_meeting', 'apply_or_review'].includes(a);
   }
 

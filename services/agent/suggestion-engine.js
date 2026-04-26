@@ -347,10 +347,9 @@ function actionLabelForTitle(title = '') {
 
 function normalizeSuggestionType(value = '', fallbackText = '') {
   const raw = String(value || '').toLowerCase().trim();
-  const valid = ['study', 'relationship', 'work', 'personal', 'creative', 'followup', 'nurture', 'life_event', 'checkin', 'task', 'opportunity', 'insight'];
+  const valid = ['relationship', 'work', 'personal', 'creative', 'followup', 'nurture', 'life_event', 'checkin', 'task', 'opportunity', 'insight'];
   if (valid.includes(raw)) return raw;
   const hay = `${raw} ${String(fallbackText || '').toLowerCase()}`;
-  if (/\bstudy|quiz|exam|class|assignment|homework|lecture|review|flashcard|vocab\b/.test(hay)) return 'study';
   if (/\blife[ _]event|birthday|anniversary|wedding|graduation|funeral\b/.test(hay)) return 'life_event';
   if (/\bnurture|mentor|coaching|help|support\b/.test(hay)) return 'nurture';
   if (/\bcheck-?in|reconnect|say hi\b/.test(hay)) return 'checkin';
@@ -772,7 +771,7 @@ async function generateTopTodosFromMemoryQuery(llmConfig, options = {}) {
   ${JSON.stringify(topFiveItems)}
 
   Generate proactive suggestions. Up to 8 candidates.
-  Format JSON array: [{"type": "work|followup|study|personal|creative|relationship|nurture|life_event|checkin|task|opportunity|insight", "title": "imperative", "reason": "why now", "description": "", "outcome": "", "evidence": ["id"], "time_anchor": "today|now", "priority": "low|medium|high", "confidence": 0.0, "primary_action": "label", "secondary_action": "", "source_index": 1, "expires_at": "ISO"}]
+  Format JSON array: [{"type": "work|followup|personal|creative|relationship|nurture|life_event|checkin|task|opportunity|insight", "title": "imperative", "reason": "why now", "description": "", "outcome": "", "evidence": ["id"], "time_anchor": "today|now", "priority": "low|medium|high", "confidence": 0.0, "primary_action": "label", "secondary_action": "", "source_index": 1, "expires_at": "ISO"}]
 
   Rules:
   - Title MUST start with verb + specific entity/time.
@@ -935,7 +934,7 @@ Rules:
   description (optional),
   reason (one sentence grounded in memory),
   time_anchor (optional, e.g. "now" or "today 10:00"),
-  category (optional: work|followup|study|personal|creative|relationship|nurture|life_event|checkin|task|opportunity|insight),
+  category (optional: work|followup|personal|creative|relationship|nurture|life_event|checkin|task|opportunity|insight),
   priority (optional: low|medium|high).
 - Return strict JSON only.
 

@@ -42,10 +42,6 @@ function normalizeTarget(text = '') {
   return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
-function isStudyText(text = '') {
-  return /\b(study|exam|quiz|assignment|revision|flashcard|vocab|idiom|chapter|problem set|homework)\b/i.test(String(text || ''));
-}
-
 function sourceRefsFromRow(row) {
   return parseList(row?.source_refs);
 }
@@ -441,17 +437,14 @@ async function detectUnfinishedLoops(rows, now) {
     const dueTs = parseTs(metadata.due_date || metadata.deadline || 0);
     const ageH = Math.max(0, (now - parseTs(row.updated_at || row.created_at)) / (60 * 60 * 1000));
     const title = row.title || row.summary || 'Task';
-    const isStudy = isStudyText(`${title} ${row.summary || ''} ${row.canonical_text || ''}`);
     const startedTs = parseTs(row.updated_at || row.created_at);
     const anchorTime = formatAnchorTime(startedTs);
     const ageLabel = ageH < 1 ? 'just now' : ageH < 24 ? `${Math.round(ageH)}h ago` : `${Math.round(ageH / 24)}d ago`;
     const timeAnchorLabel = dueTs ? 'before deadline' : (anchorTime ? `started ${anchorTime}` : (ageH > 18 ? 'today' : 'next block'));
     out.push(candidateBase({
-      opportunityType: isStudy ? 'unfinished_study_loop' : 'unfinished_work_loop',
+      opportunityType: 'unfinished_work_loop',
       seedNodeId: row.id,
-      title: isStudy
-        ? `Resume: ${title} (started ${ageLabel})`
-        : `Complete: ${title} (open ${ageLabel})`,
+      title: `Complete: ${title} (open ${ageLabel})`,
       triggerSummary: dueTs
         ? `${title} is unfinished with a deadline signal. Started ${ageLabel}, no completion recorded.`
         : `${title} opened ${ageLabel} with no completion signal.`,
@@ -518,36 +511,6 @@ async function detectDormantContacts(rows, now) {
       sourceRefs: sourceRefsFromRow(row),
       canonicalTarget: normalizeTarget(row.title),
       score: Math.min(0.95, 0.64 + Math.min(0.2, days / 28))
-    }));
-  }
-  return out;
-}
-
-async function detectWeakStudyConcept(cloudRows, now) {
-  const out = [];
-  for (const row of cloudRows || []) {
-    const text = `${row.title || ''} ${row.summary || ''}`;
-    if (!isStudyText(text)) continue;
-    const metadata = asObj(row.metadata);
-    const repeated = Number(metadata.repeat_count || metadata.evidence_count || 0);
-    if (repeated < 2 && !/\bweak|struggle|mistake|incorrect|failed\b/i.test(text)) continue;
-    const latest = parseTs(metadata.latest_activity_at || row.updated_at || row.created_at);
-    const hours = latest ? Math.max(0, (now - latest) / (60 * 60 * 1000)) : 24;
-    const conceptName = (row.title || 'concept').trim();
-    const repeatLabel = repeated >= 2 ? `missed ${repeated}x` : 'flagged weak';
-    const lastReviewLabel = hours < 2 ? 'recently' : hours < 24 ? `${Math.round(hours)}h ago` : `${Math.round(hours / 24)}d ago`;
-    out.push(candidateBase({
-      opportunityType: 'weak_repeated_study_concept',
-      seedNodeId: row.id,
-      title: `Drill: ${conceptName} (${repeatLabel})`,
-      triggerSummary: `${conceptName} has been ${repeatLabel} across study sessions, last seen ${lastReviewLabel}. Needs a targeted review block.`,
-      confidence: Math.min(0.94, 0.64 + Math.min(0.2, repeated / 6) + Math.max(0, (24 - Math.min(hours, 24)) / 120)),
-      reasonCodes: ['repeated_weak_signal', 'study_gap'],
-      timeAnchor: hours < 24 ? `last reviewed ${lastReviewLabel}` : 'today',
-      candidateActions: [`Run focused drill on: ${conceptName}`, 'Redo missed questions for this concept'],
-      sourceRefs: sourceRefsFromRow(row),
-      canonicalTarget: normalizeTarget(conceptName),
-      score: Math.min(0.97, 0.68 + Math.min(0.2, repeated / 6))
     }));
   }
   return out;
@@ -926,7 +889,6 @@ async function mineProactiveOpportunities(now = Date.now(), options = {}) {
 
   if (deepScan) {
     candidates.push(...await detectDormantContacts(semanticRows, now));
-    candidates.push(...await detectWeakStudyConcept(cloudRows, now));
     candidates.push(...await detectRelationshipIntelligence(semanticRows, episodeRows, recentEvents, now));
   }
 
@@ -958,7 +920,6 @@ module.exports = {
     detectUnfinishedLoops,
     detectDeadlineRisk,
     detectDormantContacts,
-    detectWeakStudyConcept,
     detectRelationshipIntelligence,
     dedupeCandidates,
     enrichWithRecentRecall,
