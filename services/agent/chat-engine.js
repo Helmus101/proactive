@@ -1512,7 +1512,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   if (preflightStop) return preflightStop;
 
   // 1. Router Stage
-  emitStage('routing', 'started', { label: 'Hypothesis', detail: 'Deciding whether this query should use memory, web, or hybrid retrieval.' }, false);
+  emitStage('routing', 'started', { label: 'Hypothesis', detail: 'Deciding whether this query should use memory, web, or hybrid retrieval.' }, true);
   const { baseThought, retrievalQuery, activeQuery, chatHistory } = await runRouterStage({ query, options });
   const summaryHits = searchSummaryRollups(query, options?.historical_summaries || {}, options?.search_index || {}, 6);
   const summaryContext = formatSummaryContext(summaryHits);
@@ -1559,7 +1559,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
   });
 
   // 2. Planner Stage
-  emitStage('planning', 'started', { label: 'Planner', detail: 'Generating a concise execution plan and refining key query terms.' }, false);
+  emitStage('planning', 'started', { label: 'Planner', detail: 'Generating a concise execution plan and refining key query terms.' }, true);
   let plan = await runPlannerStage({
     query: activeQuery,
     routerOutput: baseThought,
@@ -1574,7 +1574,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     label: 'Planner',
     detail: plan ? 'Created a formal execution plan with refined queries.' : 'Using default routing plan.',
     preview_items: plan?.reasoning_plan || []
-  }, false);
+  }, true);
 
   // 3. Retriever Stage (always memory first, then web if needed)
   let retrieval = {
@@ -1846,7 +1846,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
     }
 
     // 4. Judge Stage
-    emitStage('judging', 'started', { label: 'Evidence test', detail: 'Checking whether the current memory and web evidence supports the answer.' }, false);
+    emitStage('judging', 'started', { label: 'Evidence test', detail: 'Checking whether the current memory and web evidence supports the answer.' }, true);
     judgment = await runJudgeStage({
       query: activeQuery,
       plan,
@@ -1859,7 +1859,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       label: 'Evidence test',
       detail: judgment.reason,
       status: judgment.sufficient ? 'completed' : 'retry'
-    }, false);
+    }, true);
 
     if (judgment.sufficient || !apiKey || deadline.shouldStop()) break;
   }
@@ -1910,7 +1910,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       }));
 
       // 6. Reflector Stage (with confidence gating)
-      emitStage('reflecting', 'started', { label: 'Critique', detail: 'Reviewing the draft for completeness, accuracy, and hallucination risk.' }, false);
+      emitStage('reflecting', 'started', { label: 'Critique', detail: 'Reviewing the draft for completeness, accuracy, and hallucination risk.' }, true);
       if (deepDive && !deadline.shouldStop() && deadline.timeLeftMs > 1500) {
         reflection = await runReflectorStage({
           query,
@@ -1925,7 +1925,7 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
           label: 'Reflecting',
           detail: reflection.reason,
           status: reflection.approved ? 'completed' : 'retry'
-        }, false);
+        }, true);
         if (reflection.approved) break;
       } else {
         reflection = { approved: true, reason: 'Skipped reflection to keep the chat responsive.' };
