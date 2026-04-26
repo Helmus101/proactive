@@ -1235,19 +1235,24 @@ async function executeParallelRetrieval(baseQuery, baseThought, options, onProgr
   const requiresDeepContext = /\b(relationship|relationships|pattern|patterns|over the last|long-term|habit|habitual|recurring|years?|months?|context|history|why|how does this connect|across|theme|trend|brief me|deep dive|go deeper)\b/i.test(baseQuery);
   const recursionDepth = (requiresDeepContext && !options.passiveOnly) ? (options?.economy ? 1 : 2) : 0;
 
-  // Parallel multi-agent dispatch
-  const results = await Promise.allSettled(queries.map((q) => buildHybridGraphRetrieval({
-    query: q,
-    options: {
-      ...options,
-      retrieval_thought: { ...baseThought, semantic_queries: [q] }
-    },
-    seedLimit: requiresDeepContext ? 8 : Math.max(4, Math.floor(12 / Math.max(1, queries.length))),
-    hopLimit: requiresDeepContext ? 4 : 3,
-    recursionDepth,
-    passiveOnly: options.passiveOnly || false,
-    onProgress
-  })));
+  // Sequential multi-agent dispatch to prevent CPU saturation
+  const results = [];
+  for (const q of queries) {
+    if (options.cancellation?.isCancelled()) break;
+    const res = await buildHybridGraphRetrieval({
+      query: q,
+      options: {
+        ...options,
+        retrieval_thought: { ...baseThought, semantic_queries: [q] }
+      },
+      seedLimit: requiresDeepContext ? 8 : Math.max(4, Math.floor(12 / Math.max(1, queries.length))),
+      hopLimit: requiresDeepContext ? 4 : 3,
+      recursionDepth,
+      passiveOnly: options.passiveOnly || false,
+      onProgress
+    }).then(v => ({ status: 'fulfilled', value: v })).catch(e => ({ status: 'rejected', reason: e }));
+    results.push(res);
+  }
 
   const successfulResults = results
     .filter((r) => r.status === 'fulfilled')
@@ -1636,17 +1641,8 @@ async function answerChatQuery({ apiKey, query, options = {}, onStep }) {
       passiveOnly: false
     }, emit);
 
-    if (iteration === 1 && deepDive && retrievalLooksSparse(retrieval)) {
-      retrieval = await executeParallelRetrieval(activeQuery, currentThought, {
-        mode: 'chat',
-        app: options?.app,
-        date_range: currentThought.applied_date_range || options?.date_range,
-        source_types: options?.source_types,
-        metadata_filters: currentThought.metadata_filters || options?.metadata_filters || {},
-        retrieval_thought: currentThought,
-        passiveOnly: false
-      }, emit);
-    }
+    // Sparse retrieval handled within iterations; no extra redundant call needed.
+
 
     // Widen if still sparse
     const canWiden = deepDive && Boolean(currentThought?.initial_date_range || currentThought?.filters?.app) && !currentThought?.fallback_policy?.attempted;

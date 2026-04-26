@@ -75,10 +75,8 @@ function finishActiveChatRequest(senderId, requestId) {
 
 function compactChatStepPayload(data = {}, requestId) {
   const payload = { ...data, requestId };
-  if (Array.isArray(payload.preview_items)) payload.preview_items = payload.preview_items.slice(0, 3);
-  if (payload.trace && Array.isArray(payload.trace)) delete payload.trace;
-  if (payload.stage_trace) delete payload.stage_trace;
-  if (payload.thinking_trace) delete payload.thinking_trace;
+  if (Array.isArray(payload.preview_items)) payload.preview_items = payload.preview_items.slice(0, 5);
+  // Keep trace and thinking_trace for the UI to show progress steps
   return payload;
 }
 
