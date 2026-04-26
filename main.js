@@ -2805,6 +2805,8 @@ function startMemoryGraphProcessing() {
     } catch (e) {
       console.warn('[MemoryGraph] Failed to schedule aligned hourly pulse:', e?.message || e);
     }
+  }
+  scheduleAlignedJobs();
 
   // Suggestion engine hourly; each run only fills missing slots up to 7.
   if (suggestionEngineTimer) clearInterval(suggestionEngineTimer);
